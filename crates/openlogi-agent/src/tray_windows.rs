@@ -204,6 +204,16 @@ pub fn set_badge_style(style: TrayBadgeStyle) {
 fn run_tray_loop(observable: Arc<ObservableState>, shutdown_tx: ShutdownRequestSender) {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
     OBSERVABLE.with_borrow_mut(|slot| *slot = Some(observable.clone()));
+    // The agent process is DPI-unaware (no manifest), so without this the
+    // hidden window virtualizes to 96 DPI and the badge renders at the 100%
+    // 16 px while the 125%+ taskbar slot is 20 px — the shell upscales the
+    // bitmap and the badge reads soft and small next to DPI-aware icons.
+    // Per-monitor-v2 on this thread makes `GetDpiForWindow` report the real
+    // DPI (and delivers WM_DPICHANGED, which the handler already refreshes
+    // on). Everything else this thread does is coordinate-free or
+    // self-consistent: the menu pairs `GetCursorPos` with `TrackPopupMenu`,
+    // both physical on an aware thread.
+    set_per_monitor_dpi_awareness();
     let class_name = wide("OpenLogiAgentTray");
     // SAFETY: plain win32 registration/creation calls with pointers that
     // outlive the calls; the class name buffer lives until thread exit.
@@ -451,6 +461,21 @@ fn desired_key(hwnd: HWND, summary: Option<&BatterySummary>) -> IconKey {
         size: small_icon_size(hwnd),
         light,
         style: badge_style(),
+    }
+}
+
+/// Switch this thread to per-monitor-v2 DPI awareness. Fails closed: if the
+/// context cannot be set (pre-1607 Windows), the thread stays unaware and the
+/// badge just renders at the 100% size as before.
+fn set_per_monitor_dpi_awareness() {
+    use windows_sys::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+    };
+    // SAFETY: the call only changes this thread's DPI virtualization mode;
+    // passing a documented constant context and checking the previous one is
+    // the documented pattern.
+    unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 }
 
