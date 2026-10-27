@@ -119,6 +119,15 @@ fn save_position(origin: Point<gpui::Pixels>) {
     let Some(path) = position_path() else {
         return;
     };
+    // A fresh Linux install has no config directory until the agent writes
+    // its config; the overlay can run against a mock before that ever
+    // happened, so the write creates its parent instead of failing silently.
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        warn!(%error, "Flow Indicator: could not create its config directory");
+        return;
+    }
     let Ok(body) = toml::to_string(&SavedPosition {
         x: f32::from(origin.x),
         y: f32::from(origin.y),
