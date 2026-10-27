@@ -1,0 +1,37 @@
+# Owner: openlogi_core::device::BatteryInfo — reading, tone, bar_percentage,
+# and charging_without_reading decide what a battery reading shows, its colour
+# role, how full a bar draws, and whether a charging cold start has anything
+# to show. The settings app, the tray, and the floating widget all consume
+# them, so they must agree on what "no reading" means and which tone a charge
+# state carries.
+id: core-battery-reading-owner
+language: rust
+severity: error
+message: Use openlogi_core::device::BatteryInfo::{reading, tone, bar_percentage, charging_without_reading} instead of re-deriving a battery reading, its tone or bar fill, or the charging cold-start rule.
+note: |
+  The settings app owned these rules privately (ui/battery.rs) until the tray
+  and widget needed the same readings. A second copy would let the tray show
+  a different value than the app, or paint a charging cold start as critical.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/device.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - kind: enum_item
+      regex: '\benum\s+(?:BatteryReading|BatteryTone)\b'
+    - kind: function_item
+      has:
+        field: name
+        regex: '^is_charging$'
+    - kind: match_arm
+      all:
+        - regex: '^Some\(0\)\s+if\b'
+        - has:
+            stopBy: end
+            regex: 'BatteryStatus::Charging'
+    - kind: binary_expression
+      regex: '\bpercentage\s*==\s*Some\(0\)'
