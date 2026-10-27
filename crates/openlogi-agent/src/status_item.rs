@@ -71,6 +71,35 @@ pub(crate) fn new_action_item(
 /// status bar is ~22pt tall, leaving ~18pt for the icon).
 const STATUS_ICON_POINTS: f64 = 18.0;
 
+/// A display-only menu line: no action, no target, never enabled. The tray
+/// uses these for the battery device rows.
+pub(crate) fn new_disabled_item(mtm: MainThreadMarker, title: &str) -> Retained<NSMenuItem> {
+    // SAFETY: `initWithTitle:action:keyEquivalent:` is NSMenuItem's designated
+    // initializer; the `NSString` outlives the call and a `None` action needs
+    // no target.
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(title),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    item.setEnabled(false);
+    item
+}
+
+/// Set (or clear) the status item's text beside its icon. AppKit lays the
+/// title out in the menu bar's own text style, so the battery readout needs
+/// no bitmap renderer on macOS; an empty string clears it and leaves the
+/// glyph alone.
+pub(crate) fn set_title(item: &NSStatusItem, mtm: MainThreadMarker, title: Option<&str>) {
+    let Some(button) = item.button(mtm) else {
+        return;
+    };
+    button.setTitle(&NSString::from_str(title.unwrap_or("")));
+}
+
 /// Set a custom PNG as the status-item icon (template image). Pass the @2x PNG
 /// data; the image's logical size is pinned to the fixed menu-bar point size,
 /// so macOS scales the bitmap to fit regardless of the PNG's pixel dimensions

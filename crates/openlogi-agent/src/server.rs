@@ -114,7 +114,7 @@ impl AgentServer {
             Ok((config, file)) => {
                 let revision = file.revision();
                 let launch_at_login = config.app_settings.launch_at_login;
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
                 let tray_battery = config.app_settings.tray_battery;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
@@ -146,6 +146,8 @@ impl AgentServer {
                 // resolved first so its words are rebuilt in the new locale.
                 #[cfg(target_os = "windows")]
                 crate::tray_windows::set_battery_readout(tray_battery);
+                #[cfg(target_os = "macos")]
+                crate::tray::set_battery_readout(tray_battery);
                 Ok(revision)
             }
             Err(error) => {

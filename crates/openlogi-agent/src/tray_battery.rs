@@ -135,6 +135,32 @@ impl BatterySummary {
     pub(crate) fn badge(&self) -> Badge {
         first_battery_readout(&self.devices).map_or_else(Badge::none, Badge::for_device)
     }
+
+    /// The macOS menu-bar title: the percentage, or the charging bolt for a
+    /// cold start that has no gauge yet. Level-only and error readings keep
+    /// the glyph — the words live in the menu rows, which fit.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn title(&self) -> Option<String> {
+        first_battery_readout(&self.devices).and_then(|device| {
+            let battery = device.battery.as_ref()?;
+            if !device.has_readout() || is_error(device) {
+                return None;
+            }
+            if device.online && shows_charging(device) {
+                return Some("⚡".to_owned());
+            }
+            match battery.value() {
+                BatteryValue::Percent(percentage) => Some(format!("{percentage}%")),
+                _ => None,
+            }
+        })
+    }
+
+    /// Whether any device row would be listed.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn has_rows(&self) -> bool {
+        !self.devices.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -407,5 +433,61 @@ mod tests {
                 .expect("87% is a readout")
                 .contains(&rust_i18n::t!("device.charging").to_string())
         );
+    }
+
+    #[test]
+    fn the_macos_title_shows_the_percentage_or_the_charging_bolt() {
+        let percent = summary(vec![paired(
+            1,
+            Some("MX Master 3S"),
+            DeviceKind::Mouse,
+            true,
+            Some(battery(
+                Some(87),
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+            )),
+        )]);
+        assert_eq!(percent.title().as_deref(), Some("87%"));
+
+        // A cold-start 0% while charging must not read out as "0%".
+        let charging = summary(vec![paired(
+            1,
+            Some("MX Master 3S"),
+            DeviceKind::Mouse,
+            true,
+            Some(battery(
+                Some(0),
+                BatteryLevel::Good,
+                BatteryStatus::Charging,
+            )),
+        )]);
+        assert_eq!(charging.title().as_deref(), Some("⚡"));
+
+        // A level-only reading has no compact form for the menu bar.
+        let level_only = summary(vec![paired(
+            1,
+            Some("MX Master 3S"),
+            DeviceKind::Mouse,
+            true,
+            Some(battery(
+                None,
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+            )),
+        )]);
+        assert_eq!(level_only.title(), None);
+
+        let error = summary(vec![paired(
+            1,
+            Some("MX Master 3S"),
+            DeviceKind::Mouse,
+            true,
+            Some(battery(None, BatteryLevel::Unknown, BatteryStatus::Error)),
+        )]);
+        assert_eq!(error.title(), None);
+
+        // No device with a readout keeps the glyph.
+        assert_eq!(BatterySummary::from_inventory(&[]).title(), None);
     }
 }

@@ -42,7 +42,7 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 mod tray_battery;
 #[cfg(target_os = "windows")]
 mod tray_windows;
@@ -139,6 +139,10 @@ fn main() {
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
         let app_icon = config.app_settings.app_icon;
+        let tray_battery = config.app_settings.tray_battery;
+        // The tray reads the same state cell the IPC server hands out; clone
+        // before the core thread moves the last handle.
+        let tray_observable = Arc::clone(&observable);
         // The tray waits for the core to declare the agent *armed*: a dormant
         // agent (launch_at_login off, started at login, no client yet) must
         // not put an icon in the menu bar only to vanish seconds later. A
@@ -160,7 +164,14 @@ fn main() {
             return;
         }
         if armed_rx.recv().is_ok() {
-            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal, shutdown_tx);
+            tray::run_app_loop(
+                show_in_menu_bar,
+                app_icon,
+                tray_battery,
+                tray_observable,
+                device_io_signal,
+                shutdown_tx,
+            );
         }
     }
     #[cfg(not(target_os = "macos"))]

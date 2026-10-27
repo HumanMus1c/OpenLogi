@@ -24,6 +24,7 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -37,6 +38,7 @@ use objc2_app_kit::{
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
 };
 use objc2_foundation::{NSNotification, NSString};
+use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
@@ -45,13 +47,24 @@ use tracing::{info, warn};
 use crate::activity_macos::{self, ActivityGate};
 use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item;
+use crate::tray_battery::BatterySummary;
+
+/// Whether the menu-bar item carries the battery readout (title beside the
+/// glyph plus the device rows). Live-toggled from the IPC server's config
+/// reload, the same seam the Windows tray uses.
+static TRAY_BATTERY: AtomicBool = AtomicBool::new(true);
+/// Set while a battery refresh is queued on the main queue, so a burst of
+/// inventory changes collapses into one refresh, mirroring the Windows tray's
+/// update-pending flag.
+static REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// The installed menu-bar item plus the action target its menu items weakly
-/// reference — everything a later config reload needs to restyle the icon or
-/// rebuild the menu in a new language.
+/// reference — everything a later config reload needs to restyle the icon,
+/// rebuild the menu in a new language, or refresh the battery readout.
 struct TrayState {
     item: Retained<NSStatusItem>,
     target: Retained<MenuTarget>,
+    observable: Arc<ObservableState>,
 }
 
 thread_local! {
@@ -108,11 +121,66 @@ pub fn relocalize() {
                 // The status item retains the menu; the fresh one replaces the
                 // old wholesale so titles, order, and key equivalents cannot
                 // drift from `build_menu`.
-                let menu = build_menu(mtm, &state.target);
+                let summary = current_summary(&state.observable);
+                let menu = build_menu(mtm, &state.target, Some(&summary));
                 state.item.setMenu(Some(&menu));
             }
         });
     });
+}
+
+/// Apply a config reload's `tray_battery` choice. Mirrors the Windows tray's
+/// live toggle: the value is stored for the next refresh and the main queue
+/// re-reads the summary immediately.
+pub fn set_battery_readout(enabled: bool) {
+    TRAY_BATTERY.store(enabled, Ordering::Relaxed);
+    DispatchQueue::main().exec_async(refresh_battery_readout);
+}
+
+/// Re-read the battery summary and restyle the title and menu. Runs on the
+/// main queue; a no-op when the item is hidden or the loop never started.
+fn refresh_battery_readout() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    TRAY.with_borrow(|state| {
+        let Some(state) = state.as_ref() else {
+            return;
+        };
+        let summary = current_summary(&state.observable);
+        status_item::set_title(&state.item, mtm, summary.title().as_deref());
+        let menu = build_menu(mtm, &state.target, Some(&summary));
+        state.item.setMenu(Some(&menu));
+    });
+}
+
+/// The battery readout for one inventory snapshot, read on the calling
+/// (main) thread.
+fn current_summary(observable: &ObservableState) -> BatterySummary {
+    observable.read(|snapshot| BatterySummary::from_inventory(&snapshot.inventory))
+}
+
+/// The watcher mirrors the Windows tray's state watcher: `ObservableState`
+/// publishes inventory changes on a watch channel, and each change queues one
+/// coalesced refresh on the main queue, where the state is re-read so a burst
+/// of updates collapses.
+fn spawn_battery_watcher(observable: Arc<ObservableState>) {
+    if let Err(e) = std::thread::Builder::new()
+        .name("openlogi-tray-state".into())
+        .spawn(move || {
+            let mut state = observable.subscribe();
+            while futures::executor::block_on(state.changed()).is_ok() {
+                if !REFRESH_PENDING.swap(true, Ordering::AcqRel) {
+                    DispatchQueue::main().exec_async(|| {
+                        REFRESH_PENDING.store(false, Ordering::Release);
+                        refresh_battery_readout();
+                    });
+                }
+            }
+        })
+    {
+        warn!(error = %e, "could not spawn the tray state watcher");
+    }
 }
 
 struct SessionTargetIvars {
@@ -252,15 +320,22 @@ fn gui_is_running() -> bool {
 /// tokio core still does all the work). The toggle takes effect on the agent's
 /// next launch — a no-restart live toggle would need a main-thread hop from the
 /// IPC reload path (deferred; it can't be verified headlessly).
+/// `tray_battery` controls whether the item carries the battery readout; a
+/// live toggle comes through [`set_battery_readout`].
+/// `observable` is the shared inventory state the readout re-reads on every
+/// refresh.
 /// `device_io_signal` is the hardware gate; it opens only while the Mac is in
 /// a full wake and this login session owns the console (`activity_macos`).
 pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
+    tray_battery: bool,
+    observable: Arc<ObservableState>,
     device_io_signal: DeviceIoSignal,
     shutdown_tx: ShutdownRequestSender,
 ) -> ! {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
+    TRAY_BATTERY.store(tray_battery, Ordering::Relaxed);
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
         let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
@@ -276,7 +351,7 @@ pub fn run_app_loop(
     openlogi_inject::prepare_menu_shortcuts(mtm);
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
-    let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
+    let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon, observable));
 
     // AppKit documents that an app launched into an inactive session receives
     // `NSWorkspaceSessionDidResignActiveNotification` between its will- and
@@ -329,10 +404,12 @@ fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> 
 
 /// Build and install the menu-bar status item, returning the objects that must
 /// stay alive for the app's lifetime (the status item, the action target the
-/// menu items weakly reference, and the menu itself).
+/// menu items weakly reference, and the menu itself), and start the battery
+/// state watcher.
 fn install_status_item(
     mtm: MainThreadMarker,
     app_icon: AppIcon,
+    observable: Arc<ObservableState>,
 ) -> (
     Retained<objc2_app_kit::NSStatusItem>,
     Retained<MenuTarget>,
@@ -345,19 +422,37 @@ fn install_status_item(
         *slot = Some(TrayState {
             item: status_item.clone(),
             target: target.clone(),
+            observable: Arc::clone(&observable),
         });
     });
-    let menu = build_menu(mtm, &target);
+    let menu = build_menu(mtm, &target, None);
     status_item.setMenu(Some(&menu));
+    spawn_battery_watcher(observable);
 
     info!("menu-bar item installed");
     (status_item, target, menu)
 }
 
 /// Build the tray menu with the current locale's titles. The one constructor
-/// for both the install and a [`relocalize`] rebuild, so the two cannot drift.
-fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_kit::NSMenu> {
+/// for both the install and a [`relocalize`] or battery-refresh rebuild, so
+/// the three cannot drift. `battery` supplies the disabled device rows above
+/// the first separator; `None` (or the setting off) leaves the menu as it was
+/// before the readout existed.
+fn build_menu(
+    mtm: MainThreadMarker,
+    target: &MenuTarget,
+    battery: Option<&BatterySummary>,
+) -> Retained<objc2_app_kit::NSMenu> {
     let menu = status_item::new_menu(mtm);
+
+    if TRAY_BATTERY.load(Ordering::Relaxed)
+        && let Some(summary) = battery.filter(|summary| summary.has_rows())
+    {
+        for line in summary.menu_lines() {
+            menu.addItem(&status_item::new_disabled_item(mtm, &line));
+        }
+        status_item::add_separator(&menu, mtm);
+    }
 
     let show = status_item::new_action_item(
         mtm,

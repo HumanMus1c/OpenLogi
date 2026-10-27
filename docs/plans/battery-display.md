@@ -2,10 +2,12 @@
 
 Status: M0, M1a, M1b (Windows tray badge), and the Flow Indicator (floating
 card + Settings tab, drag and position memory, Normal/Topmost) implemented.
-Remaining: macOS/Linux parity, plus the manual taskbar DPI/theme and Explorer
-restart checks. GPUI exposes no bottom-most window layer, so there is no
-Desktop display mode; the card's position lives in `flow-indicator.toml`
-beside `config.toml`.
+The macOS menu-bar readout (title beside the glyph, capped device rows, live
+`tray_battery` toggle) is implemented but not yet compiled or run on macOS
+hardware. Remaining: macOS/Linux widget verification, Linux parity, plus the
+manual taskbar DPI/theme and Explorer restart checks. GPUI exposes no
+bottom-most window layer, so there is no Desktop display mode; the card's
+position lives in `flow-indicator.toml` beside `config.toml`.
 
 The visual reference is **vigil-watt** (MIT): its tray icon renders the lowest
 battery percentage as a coloured badge, its tray menu lists device readings, and
