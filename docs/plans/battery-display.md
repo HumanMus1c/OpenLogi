@@ -4,8 +4,12 @@ Status: M0, M1a, M1b (Windows tray badge), and the Flow Indicator (floating
 card + Settings tab, drag and position memory, Normal/Topmost) implemented.
 The macOS menu-bar readout (title beside the glyph, capped device rows, live
 `tray_battery` toggle) is implemented but not yet compiled or run on macOS
-hardware. Remaining: macOS/Linux widget verification, Linux parity, plus the
-manual taskbar DPI/theme and Explorer restart checks. GPUI exposes no
+hardware. Windows live checks done on a 125%-DPI dark/light taskbar: live
+tooltip, badge render, theme-change refresh, and Explorer-restart re-add.
+Remaining: macOS hardware verification, Linux hardware verification (the
+widget's Linux fallback is the existing Normal/PopUp window mapping — GPUI
+exposes no layer-shell; position persistence and drag are untested there),
+and the 100/150/200% DPI matrix beyond the observed 125%. GPUI exposes no
 bottom-most window layer, so there is no Desktop display mode; the card's
 position lives in `flow-indicator.toml` beside `config.toml`.
 
