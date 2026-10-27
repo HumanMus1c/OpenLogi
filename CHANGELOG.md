@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.19] - 2026-10-27
+
+### Fixed
+
+- *(linux)* stabilize actions ring placement during gnome animations ([#2037](https://github.com/AprilNEA/OpenLogi/pull/2037))
+- *(linux)* retry Hyprland desktop switches with the Lua dispatcher ([#2059](https://github.com/AprilNEA/OpenLogi/pull/2059))
+- *(cli)* read 0x1001 battery voltage in diag battery ([#2049](https://github.com/AprilNEA/OpenLogi/pull/2049))
+- *(macos)* keep held modifiers on re-posted media keys ([#2056](https://github.com/AprilNEA/OpenLogi/pull/2056))
+- *(agent)* keep the macOS relaunch successor out of the agent's process group ([#2063](https://github.com/AprilNEA/OpenLogi/pull/2063))
+- *(agent)* recover mouse capture across Bluetooth and Bolt switches ([#1746](https://github.com/AprilNEA/OpenLogi/pull/1746))
+- *(overlay)* keep the Windows Actions Ring from taking the foreground ([#2053](https://github.com/AprilNEA/OpenLogi/pull/2053))
+- *(desktop)* mark the selected pill with the accent border ([#2047](https://github.com/AprilNEA/OpenLogi/pull/2047))
+
 ## [0.8.18] - 2026-10-25
 
 ### Added
