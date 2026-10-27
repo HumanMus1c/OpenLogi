@@ -49,7 +49,7 @@ pub use settings::{
     FLOW_INDICATOR_MAX_DEVICES_DEFAULT, FLOW_INDICATOR_MAX_DEVICES_MAX,
     FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode, Lighting, MouseProfileTarget,
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
+    ThumbwheelSensitivity, TrayBadgeStyle, UiScale, VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::app::AppAliases;

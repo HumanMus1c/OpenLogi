@@ -92,6 +92,11 @@ optional physical device key.
   a HID read. Off restores the static brand icon and the plain Show/Quit menu;
   the change applies on the next config reload. macOS consumes the menu-bar
   side in a follow-up; Linux has no tray.
+- `tray_badge_style` (default `"circle"`): the shape of the Windows tray
+  badge. `"circle"` draws the disc inscribed in the system's icon slot;
+  `"rounded_square"` draws a full-bleed rounded square that carries the same
+  visual weight as the square-ish icons around it. Windows-only — macOS shows
+  a text title and Linux has no tray.
 - `flow_indicator` (default `true`): a floating card listing the devices the
   agent has detected, their battery percentages, and charging state. It lives
   in the overlay process, so it stays available with the settings window

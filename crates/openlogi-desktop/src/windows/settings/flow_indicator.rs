@@ -7,7 +7,7 @@ use super::{
 use gpui_component::radio::{Radio, RadioGroup};
 use openlogi_core::config::{
     FLOW_INDICATOR_MAX_DEVICES_DEFAULT, FLOW_INDICATOR_MAX_DEVICES_MAX,
-    FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode,
+    FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode, TrayBadgeStyle,
 };
 
 pub(super) fn flow_indicator_page() -> SettingPage {
@@ -16,6 +16,10 @@ pub(super) fn flow_indicator_page() -> SettingPage {
     // work, so the switch appears only where it currently drives something.
     #[cfg(target_os = "windows")]
     let group = group.item(tray_battery_item());
+    // The badge is Windows-only: macOS reads the level out as text and Linux
+    // has no tray surface.
+    #[cfg(target_os = "windows")]
+    let group = group.item(badge_style_item());
     let group = group
         .item(flow_indicator_item())
         .item(show_offline_item())
@@ -39,6 +43,43 @@ fn tray_battery_item() -> SettingItem {
         ),
     )
     .description(tr!("flow_indicator.tray_battery_description"))
+}
+
+#[cfg(target_os = "windows")]
+fn badge_style_item() -> SettingItem {
+    SettingItem::new(
+        tr!("flow_indicator.tray_badge_style"),
+        SettingField::render(|_, _, cx| {
+            let style = AppState::try_read(cx).map_or(TrayBadgeStyle::Circle, |state| {
+                state.app_settings().tray_badge_style
+            });
+            RadioGroup::vertical("tray-badge-style")
+                .child(
+                    Radio::new("tray-badge-style-circle")
+                        .label(tr!("flow_indicator.tray_badge_style_circle"))
+                        .debug_selector(|| "tray-badge-style-circle".into()),
+                )
+                .child(
+                    Radio::new("tray-badge-style-square")
+                        .label(tr!("flow_indicator.tray_badge_style_square"))
+                        .debug_selector(|| "tray-badge-style-square".into()),
+                )
+                .selected_index(Some(match style {
+                    TrayBadgeStyle::Circle => 0,
+                    TrayBadgeStyle::RoundedSquare => 1,
+                }))
+                .on_change(|index, _, cx| {
+                    let style = match index {
+                        0 => TrayBadgeStyle::Circle,
+                        1 => TrayBadgeStyle::RoundedSquare,
+                        _ => unreachable!("the badge style has exactly two choices"),
+                    };
+                    AppState::apply(cx, |state| state.commit_tray_badge_style(style));
+                })
+        }),
+    )
+    .layout(gpui::Axis::Vertical)
+    .description(tr!("flow_indicator.tray_badge_style_description"))
 }
 
 fn flow_indicator_item() -> SettingItem {

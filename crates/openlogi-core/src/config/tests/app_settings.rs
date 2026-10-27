@@ -197,6 +197,40 @@ fn tray_battery_stays_on_unless_turned_off() {
 }
 
 #[test]
+fn tray_badge_style_defaults_to_a_circle_and_roundtrips_the_square() {
+    assert_eq!(
+        Config::default().app_settings.tray_badge_style,
+        TrayBadgeStyle::Circle
+    );
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 8
+            [app_settings]
+            tray_battery = false
+        ",
+    )
+    .expect("config predating the badge-style setting loads");
+    assert_eq!(
+        predating.app_settings.tray_badge_style,
+        TrayBadgeStyle::Circle
+    );
+
+    let mut cfg = Config::default();
+    cfg.app_settings.tray_badge_style = TrayBadgeStyle::RoundedSquare;
+    let read = write_and_read(&cfg);
+    assert_eq!(
+        read.app_settings.tray_badge_style,
+        TrayBadgeStyle::RoundedSquare
+    );
+    let serialized = toml::to_string(&read.app_settings).expect("serialize");
+    assert!(
+        serialized.contains("tray_badge_style = \"rounded_square\""),
+        "the value serializes as snake_case for the example config"
+    );
+}
+
+#[test]
 fn flow_indicator_defaults_and_clamps_its_row_limit() {
     let settings = AppSettings::default();
     assert!(settings.flow_indicator);

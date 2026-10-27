@@ -183,6 +183,7 @@ fn main() {
             tray_windows::spawn(
                 config.app_settings.show_in_menu_bar,
                 config.app_settings.tray_battery,
+                config.app_settings.tray_badge_style,
                 Arc::clone(&observable),
                 shutdown_tx.clone(),
             );

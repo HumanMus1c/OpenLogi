@@ -13,6 +13,7 @@
     reason = "icon dimensions are bounded to 64 px and the supersampled canvas to 256 px; every integer is exact in f32 and every coordinate cast is a bounded non-negative value"
 )]
 
+use openlogi_core::config::TrayBadgeStyle;
 use openlogi_core::device::{BatteryDevice, BatteryReading, BatteryTone};
 
 /// The disc colour role. Unlike [`BatteryTone`], no reading is neutral, and a
@@ -113,7 +114,12 @@ const BOLT: [(f32, f32); 6] = [
 
 /// Render `badge` as straight-alpha RGBA at `size`×`size`.
 #[must_use]
-pub(crate) fn render(badge: Badge, size: u32, light_taskbar: bool) -> Vec<u8> {
+pub(crate) fn render(
+    badge: Badge,
+    size: u32,
+    light_taskbar: bool,
+    style: TrayBadgeStyle,
+) -> Vec<u8> {
     let size = size.clamp(8, 64);
     let n = size * SS;
     let mut pixels = vec![0u8; (n * n) as usize * 4];
@@ -126,24 +132,34 @@ pub(crate) fn render(badge: Badge, size: u32, light_taskbar: bool) -> Vec<u8> {
     };
     let ring_alpha = if light_taskbar { 140 } else { 190 };
 
-    let center = n as f32 / 2.0;
-    let radius = center - SS as f32 * 0.75;
+    let half = n as f32 / 2.0;
     let ring_width = SS as f32;
-    let inner_radius = radius - ring_width;
+    // A quarter of the side, so a 20 px square badge rounds like the
+    // squircle-shaped icons around it rather than like a squircle pill.
+    let corner = half / 2.0;
+    // Both shapes keep the glyphs fitted to the inner circle: a square's
+    // inscribed circle equals the disc's post-ring edge, so the digits read
+    // the same in either shape and never graze the ring or a corner.
+    let fit_radius = half - ring_width;
     let glyph_scale = match badge.text {
-        BadgeText::Percent(percentage) => digit_scale(percentage, inner_radius),
-        BadgeText::Charging => inner_radius * 1.4,
+        BadgeText::Percent(percentage) => digit_scale(percentage, fit_radius),
+        BadgeText::Charging => fit_radius * 1.4,
         BadgeText::Dash => 0.0,
     };
 
     for y in 0..n {
         for x in 0..n {
-            let dx = x as f32 + 0.5 - center;
-            let dy = y as f32 + 0.5 - center;
-            let distance = (dx * dx + dy * dy).sqrt();
-            let (rgb, alpha) = if distance > radius {
+            let dx = x as f32 + 0.5 - half;
+            let dy = y as f32 + 0.5 - half;
+            // Signed distance to the shape's edge: negative inside, so the
+            // ring band and glyph test stay shape-agnostic.
+            let edge = match style {
+                TrayBadgeStyle::Circle => (dx * dx + dy * dy).sqrt() - half,
+                TrayBadgeStyle::RoundedSquare => rounded_square_edge(dx, dy, half, corner),
+            };
+            let (rgb, alpha) = if edge >= 0.0 {
                 ([0, 0, 0], 0)
-            } else if distance > inner_radius {
+            } else if edge > -ring_width {
                 (ring, ring_alpha)
             } else {
                 (disc, 255)
@@ -151,8 +167,8 @@ pub(crate) fn render(badge: Badge, size: u32, light_taskbar: bool) -> Vec<u8> {
             let mut rgb = rgb;
             let mut alpha = alpha;
             if alpha > 0
-                && distance <= inner_radius - SS as f32 * 0.5
-                && glyph_hit(badge.text, glyph_scale, inner_radius, dx, dy)
+                && edge <= -ring_width - SS as f32 * 0.5
+                && glyph_hit(badge.text, glyph_scale, fit_radius, dx, dy)
             {
                 rgb = WHITE;
                 alpha = 255;
@@ -163,6 +179,15 @@ pub(crate) fn render(badge: Badge, size: u32, light_taskbar: bool) -> Vec<u8> {
     }
 
     downsample(&pixels, n, size)
+}
+
+/// The signed distance to a centred rounded square's edge: the standard
+/// rounded-rectangle SDF, negative inside.
+fn rounded_square_edge(dx: f32, dy: f32, half: f32, corner: f32) -> f32 {
+    let qx = dx.abs() - (half - corner);
+    let qy = dy.abs() - (half - corner);
+    let (outside_x, outside_y) = (qx.max(0.0), qy.max(0.0));
+    (outside_x * outside_x + outside_y * outside_y).sqrt() + qx.max(qy).min(0.0) - corner
 }
 
 fn tone_rgb(tone: BadgeTone) -> [u8; 3] {
@@ -299,6 +324,7 @@ fn downsample(source: &[u8], n: u32, size: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{Badge, BadgeText, BadgeTone, render};
+    use openlogi_core::config::TrayBadgeStyle;
 
     fn pixel(rgba: &[u8], size: u32, x: u32, y: u32) -> [u8; 4] {
         let offset = ((y * size + x) * 4) as usize;
@@ -341,12 +367,16 @@ mod tests {
         ];
         for size in [16, 20, 24, 32] {
             for light in [true, false] {
-                for face in faces {
-                    let rgba = render(face, size, light);
-                    assert_eq!(rgba.len(), (size * size * 4) as usize);
-                    assert_eq!(pixel(&rgba, size, 0, 0)[3], 0, "{face:?} {size}");
-                    assert_eq!(pixel(&rgba, size, size - 1, size - 1)[3], 0);
-                    assert!(pixel(&rgba, size, size / 2, size / 2)[3] > 200);
+                for style in [TrayBadgeStyle::Circle, TrayBadgeStyle::RoundedSquare] {
+                    for face in faces {
+                        let rgba = render(face, size, light, style);
+                        assert_eq!(rgba.len(), (size * size * 4) as usize);
+                        // Both shapes round their corners: the square's
+                        // quarter-side radius keeps the bitmap corner clear.
+                        assert_eq!(pixel(&rgba, size, 0, 0)[3], 0, "{face:?} {size} {style:?}");
+                        assert_eq!(pixel(&rgba, size, size - 1, size - 1)[3], 0);
+                        assert!(pixel(&rgba, size, size / 2, size / 2)[3] > 200);
+                    }
                 }
             }
         }
@@ -361,6 +391,7 @@ mod tests {
             },
             16,
             false,
+            TrayBadgeStyle::Circle,
         );
         let dash = render(
             Badge {
@@ -369,6 +400,7 @@ mod tests {
             },
             16,
             false,
+            TrayBadgeStyle::Circle,
         );
         assert!(count_white(&digits) > count_white(&dash));
     }
@@ -382,6 +414,7 @@ mod tests {
             },
             20,
             false,
+            TrayBadgeStyle::Circle,
         );
         let dash = render(
             Badge {
@@ -390,6 +423,7 @@ mod tests {
             },
             20,
             false,
+            TrayBadgeStyle::Circle,
         );
         assert!(count_white(&bolt) > 0);
         assert!(count_white(&dash) > 0);
@@ -402,8 +436,8 @@ mod tests {
             tone: BadgeTone::Green,
         };
         let size = 24;
-        let dark = render(face, size, false);
-        let light = render(face, size, true);
+        let dark = render(face, size, false, TrayBadgeStyle::Circle);
+        let light = render(face, size, true, TrayBadgeStyle::Circle);
         // A disc sample left of the digits.
         let disc = pixel(&dark, size, size / 2, size - 4);
         assert!(disc[3] > 200);
@@ -411,11 +445,29 @@ mod tests {
             disc[1] > disc[0] && disc[1] > disc[2],
             "green disc: {disc:?}"
         );
-        // The outer ring flips between taskbars.
+        // The outer ring flips between taskbars: the last pixel column sits
+        // inside the full-bleed disc's one-pixel ring band.
         assert_ne!(
-            pixel(&dark, size, size - 2, size / 2),
-            pixel(&light, size, size - 2, size / 2)
+            pixel(&dark, size, size - 1, size / 2),
+            pixel(&light, size, size - 1, size / 2)
         );
+    }
+
+    #[test]
+    fn the_square_style_fills_where_the_circle_stays_clear() {
+        let face = Badge {
+            text: BadgeText::Percent(42),
+            tone: BadgeTone::Accent,
+        };
+        let size = 24;
+        let circle = render(face, size, false, TrayBadgeStyle::Circle);
+        let square = render(face, size, false, TrayBadgeStyle::RoundedSquare);
+        // Inside the corner band the square is inked where the inscribed
+        // circle has already ended: the square carries the visual weight of
+        // the square-ish icons around it.
+        let (x, y) = (3, 1);
+        assert_eq!(pixel(&circle, size, x, y)[3], 0, "circle corner band");
+        assert!(pixel(&square, size, x, y)[3] > 200, "square corner band");
     }
 
     #[test]

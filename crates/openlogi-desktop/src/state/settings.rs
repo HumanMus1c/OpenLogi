@@ -8,7 +8,7 @@ use gpui_component::ThemeMode;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode,
     FLOW_INDICATOR_MAX_DEVICES_MAX, FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode,
-    MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    MouseProfileTarget, ThumbwheelSensitivity, TrayBadgeStyle, UiScale, VerticalScrollSensitivity,
 };
 use openlogi_core::update_feed::UpdateChannel;
 
@@ -343,6 +343,19 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.tray_battery = enabled);
         self.persist_and_reload("tray battery readout setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Set the tray badge's shape and persist it. The agent owns the tray;
+    /// it re-renders the badge when the reload reaches it. An already-set
+    /// value writes nothing and is still reported; disk failures restore the
+    /// persisted value.
+    pub fn commit_tray_badge_style(&mut self, style: TrayBadgeStyle) -> StateEvents {
+        if self.config.app_settings.tray_badge_style == style {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.tray_badge_style = style);
+        self.persist_and_reload("tray badge style setting");
         StateEvent::SettingsChanged.into()
     }
     /// Toggle the floating Flow Indicator and persist it. The overlay watches

@@ -25,9 +25,10 @@
 )]
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use openlogi_agent_core::observable::ObservableState;
+use openlogi_core::config::TrayBadgeStyle;
 use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
@@ -50,8 +51,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::shutdown::{self, ShutdownRequestSender};
 use crate::tray_battery::{Badge, BatterySummary, create_icon, destroy_icon, render_badge};
 
-/// What the installed icon represents. The theme flag is part of the key so a
-/// taskbar theme change rebuilds the brand glyph or the badge's contrast ring.
+/// What the installed icon represents. The theme flag and badge style are
+/// part of the key so a taskbar theme change or a style reload rebuilds the
+/// brand glyph or the badge's contrast ring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IconKey {
     Brand {
@@ -61,6 +63,7 @@ enum IconKey {
         badge: Badge,
         size: u32,
         light: bool,
+        style: TrayBadgeStyle,
     },
 }
 
@@ -93,9 +96,21 @@ static TRAY_HWND: AtomicUsize = AtomicUsize::new(0);
 /// Whether the battery readout is enabled. Set from the config at install and
 /// again on every config reload.
 static TRAY_BATTERY: AtomicBool = AtomicBool::new(true);
+/// The badge shape, encoded as the discriminant the core setting serializes:
+/// `0` = circle, `1` = rounded square. Owned here because the tray thread
+/// reads it on every refresh while the IPC server writes it on reload.
+static TRAY_BADGE_STYLE: AtomicU8 = AtomicU8::new(0);
 /// One refresh message at a time: an inventory burst coalesces into a single
 /// re-read.
 static UPDATE_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// The current badge shape, for the icon key and the renderer.
+fn badge_style() -> TrayBadgeStyle {
+    match TRAY_BADGE_STYLE.load(Ordering::Relaxed) {
+        1 => TrayBadgeStyle::RoundedSquare,
+        _ => TrayBadgeStyle::Circle,
+    }
+}
 
 thread_local! {
     /// Where the win32 tray callback hands process termination to the async
@@ -124,10 +139,18 @@ thread_local! {
 pub fn spawn(
     show_in_tray: bool,
     tray_battery: bool,
+    badge_style: TrayBadgeStyle,
     observable: Arc<ObservableState>,
     shutdown_tx: ShutdownRequestSender,
 ) {
     TRAY_BATTERY.store(tray_battery, Ordering::Relaxed);
+    TRAY_BADGE_STYLE.store(
+        match badge_style {
+            TrayBadgeStyle::Circle => 0,
+            TrayBadgeStyle::RoundedSquare => 1,
+        },
+        Ordering::Relaxed,
+    );
     if !show_in_tray {
         info!("tray icon disabled by preference — agent stays invisible");
         return;
@@ -145,6 +168,27 @@ pub fn spawn(
 /// stores the value the next read will use.
 pub fn set_battery_readout(enabled: bool) {
     TRAY_BATTERY.store(enabled, Ordering::Relaxed);
+    let hwnd = TRAY_HWND.load(Ordering::Relaxed) as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: PostMessageW is safe from any thread, and the handle is the
+    // window this process created; zero — the not-yet-created and already-
+    // ended cases — is checked above.
+    unsafe { PostMessageW(hwnd, WM_TRAY_UPDATE, 0, 0) };
+}
+
+/// Apply a config reload's `tray_badge_style` choice. Same seam as
+/// [`set_battery_readout`]: store, then wake the tray thread so the icon key
+/// differs and the badge re-renders.
+pub fn set_badge_style(style: TrayBadgeStyle) {
+    TRAY_BADGE_STYLE.store(
+        match style {
+            TrayBadgeStyle::Circle => 0,
+            TrayBadgeStyle::RoundedSquare => 1,
+        },
+        Ordering::Relaxed,
+    );
     let hwnd = TRAY_HWND.load(Ordering::Relaxed) as HWND;
     if hwnd.is_null() {
         return;
@@ -406,6 +450,7 @@ fn desired_key(hwnd: HWND, summary: Option<&BatterySummary>) -> IconKey {
         badge: summary.map_or_else(Badge::none, BatterySummary::badge),
         size: small_icon_size(hwnd),
         light,
+        style: badge_style(),
     }
 }
 
@@ -426,8 +471,13 @@ fn small_icon_size(hwnd: HWND) -> u32 {
 fn build_icon(key: IconKey) -> Option<OwnedIcon> {
     match key {
         IconKey::Brand { light } => brand_icon(light),
-        IconKey::Badge { badge, size, light } => {
-            let rgba = render_badge(badge, size, light);
+        IconKey::Badge {
+            badge,
+            size,
+            light,
+            style,
+        } => {
+            let rgba = render_badge(badge, size, light, style);
             if let Some(handle) = create_icon(&rgba, size) {
                 return Some(OwnedIcon {
                     handle,

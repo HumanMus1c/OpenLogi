@@ -118,6 +118,7 @@ pub(crate) fn destroy_icon(icon: HICON) {
 mod tests {
     use super::super::badge::{Badge, BadgeText, BadgeTone, render};
     use super::{create_icon, destroy_icon};
+    use openlogi_core::config::TrayBadgeStyle;
 
     #[test]
     fn every_tray_size_builds_an_icon() {
@@ -129,6 +130,7 @@ mod tests {
                 },
                 size,
                 false,
+                TrayBadgeStyle::Circle,
             );
             let icon = create_icon(&rgba, size).expect("badge icon");
             destroy_icon(icon);

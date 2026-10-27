@@ -64,10 +64,22 @@ pub enum FlowIndicatorDisplayMode {
     Topmost,
 }
 
+/// The tray badge's shape. Windows renders the badge bitmap itself, so the
+/// style is a rendering choice; macOS shows a text title instead and Linux
+/// has no tray surface at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayBadgeStyle {
+    /// A disc inscribed in the system's icon slot, edge-to-edge.
+    #[default]
+    Circle,
+    /// A full-bleed rounded square, matching the square-ish icons around it.
+    RoundedSquare,
+}
+
 impl UiScale {
     /// Every supported scale, in the order Settings offers them.
     pub const ALL: [Self; 4] = [Self::Small, Self::Normal, Self::Large, Self::ExtraLarge];
-
     /// The displayed percentage for this scale.
     #[must_use]
     pub const fn percent(self) -> u16 {
@@ -320,6 +332,12 @@ pub struct AppSettings {
     /// tray.
     #[serde(default = "default_true")]
     pub tray_battery: bool,
+    /// The tray badge's shape. The circle fills the system's icon slot
+    /// edge-to-edge; the rounded square trades the disc look for the visual
+    /// weight the square-ish neighbouring icons carry. Windows-only — macOS
+    /// reads the level out as text and Linux has no tray.
+    #[serde(default)]
+    pub tray_badge_style: TrayBadgeStyle,
     /// Whether the floating Flow Indicator lists detected devices and their
     /// battery readings. **On by default.** The indicator renders the same
     /// inventory the agent already polls; it never triggers a HID read.
@@ -553,6 +571,7 @@ impl Default for AppSettings {
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
             tray_battery: true,
+            tray_badge_style: TrayBadgeStyle::Circle,
             flow_indicator: true,
             flow_indicator_show_offline: true,
             flow_indicator_max_devices: FLOW_INDICATOR_MAX_DEVICES_DEFAULT,
