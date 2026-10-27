@@ -46,9 +46,10 @@ pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
-    Lighting, MouseProfileTarget, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
-    WheelMode,
+    FLOW_INDICATOR_MAX_DEVICES_DEFAULT, FLOW_INDICATOR_MAX_DEVICES_MAX,
+    FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode, Lighting, MouseProfileTarget,
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::app::AppAliases;

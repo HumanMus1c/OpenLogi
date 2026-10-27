@@ -84,6 +84,25 @@ optional physical device key.
   clicked. With the setting off the agent posts no notice, but it still notes
   when a device charges, so the next discharge is announced once the setting
   is back on. A notice already on screen still closes on its own.
+- `tray_battery` (default `true`): the Windows notification-area tray shows a
+  battery readout — the device the agent would read out in its tooltip and a
+  disabled row per device in the right-click menu. The values use the same
+  `needs_attention` thresholds and status words as the settings app, and the
+  readout renders the inventory the agent already polls rather than triggering
+  a HID read. Off restores the static brand icon and the plain Show/Quit menu;
+  the change applies on the next config reload. macOS consumes the menu-bar
+  side in a follow-up; Linux has no tray.
+- `flow_indicator` (default `true`): a floating card listing the devices the
+  agent has detected, their battery percentages, and charging state. It lives
+  in the overlay process, so it stays available with the settings window
+  closed. `flow_indicator_show_offline` (default `true`) keeps a sleeping
+  device's last known reading with an Offline marker;
+  `flow_indicator_max_devices` (default `3`, valid `1`–`5`, out-of-range values
+  clamp) limits the rows; `flow_indicator_display_mode` is `normal` (default)
+  or `topmost`. The card follows the OS light/dark appearance, does not take
+  focus, and hides when disabled or when no device has a reading. The card can
+  be dragged and remembers its position in `flow-indicator.toml` beside
+  `config.toml`.
 - `lock_key_notifications` (default `true`): when a keyboard with the HID++
   `LockKeyState` feature (`0x4220`) reports Caps Lock turning on or off, the
   agent shows an indicator in the centre of the screen for 1.5 seconds. On

@@ -49,6 +49,21 @@ pub enum UiScale {
     ExtraLarge,
 }
 
+/// Z-order of the floating Flow Indicator window.
+///
+/// GPUI has no bottom-most window layer, so the choices are a normal window
+/// (other apps can cover it) and an opt-in topmost window (can cover fullscreen
+/// games, so it must not be the default).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowIndicatorDisplayMode {
+    /// Normal stacking: other applications can cover it.
+    #[default]
+    Normal,
+    /// Above other windows; opt-in.
+    Topmost,
+}
+
 impl UiScale {
     /// Every supported scale, in the order Settings offers them.
     pub const ALL: [Self; 4] = [Self::Small, Self::Normal, Self::Large, Self::ExtraLarge];
@@ -297,6 +312,31 @@ pub struct AppSettings {
     /// for what counts as low.
     #[serde(default = "default_true")]
     pub low_battery_notifications: bool,
+    /// Whether the tray shows a battery readout: the tooltip, the device rows
+    /// in its menu, and the tray icon. **On by default.** The readout renders
+    /// the inventory the agent already polls; it never triggers a HID read of
+    /// its own. Off restores the static brand icon and the plain Show/Quit
+    /// menu. macOS consumes the menu-bar side in a follow-up; Linux has no
+    /// tray.
+    #[serde(default = "default_true")]
+    pub tray_battery: bool,
+    /// Whether the floating Flow Indicator lists detected devices and their
+    /// battery readings. **On by default.** The indicator renders the same
+    /// inventory the agent already polls; it never triggers a HID read.
+    #[serde(default = "default_true")]
+    pub flow_indicator: bool,
+    /// Whether the Flow Indicator keeps offline devices with their last known
+    /// reading, marked offline, instead of hiding them.
+    #[serde(default = "default_true")]
+    pub flow_indicator_show_offline: bool,
+    /// How many device rows the Flow Indicator shows. Values outside
+    /// [`FLOW_INDICATOR_MAX_DEVICES_MIN`]..=[`FLOW_INDICATOR_MAX_DEVICES_MAX`]
+    /// clamp when read; the settings UI only writes the valid range.
+    #[serde(default = "default_flow_indicator_max_devices")]
+    pub flow_indicator_max_devices: u8,
+    /// Z-order of the Flow Indicator window.
+    #[serde(default)]
+    pub flow_indicator_display_mode: FlowIndicatorDisplayMode,
     /// Whether the overlay briefly shows a lock key a keyboard turned on or
     /// off. **On by default.** Caps Lock shows on every platform; Num Lock
     /// and Scroll Lock do not show on macOS, as in Logi Options+ (see
@@ -512,6 +552,11 @@ impl Default for AppSettings {
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
+            tray_battery: true,
+            flow_indicator: true,
+            flow_indicator_show_offline: true,
+            flow_indicator_max_devices: FLOW_INDICATOR_MAX_DEVICES_DEFAULT,
+            flow_indicator_display_mode: FlowIndicatorDisplayMode::Normal,
             lock_key_notifications: true,
             animate_desktop_switch: true,
         }
@@ -521,11 +566,33 @@ impl Default for AppSettings {
 /// serde default for the on-by-default [`AppSettings`] toggles
 /// ([`AppSettings::show_in_menu_bar`], [`AppSettings::capture_mouse_events`],
 /// [`AppSettings::auto_download_assets`],
-/// [`AppSettings::low_battery_notifications`],
+/// [`AppSettings::low_battery_notifications`], [`AppSettings::tray_battery`],
 /// [`AppSettings::animate_desktop_switch`]), so configs predating a field keep
 /// the out-of-the-box behavior.
 fn default_true() -> bool {
     true
+}
+
+/// Range of device rows the Flow Indicator accepts; hand-edited values clamp.
+pub const FLOW_INDICATOR_MAX_DEVICES_MIN: u8 = 1;
+/// See [`FLOW_INDICATOR_MAX_DEVICES_MIN`].
+pub const FLOW_INDICATOR_MAX_DEVICES_MAX: u8 = 5;
+/// Out-of-the-box Flow Indicator row count.
+pub const FLOW_INDICATOR_MAX_DEVICES_DEFAULT: u8 = 3;
+
+fn default_flow_indicator_max_devices() -> u8 {
+    FLOW_INDICATOR_MAX_DEVICES_DEFAULT
+}
+
+impl AppSettings {
+    /// The Flow Indicator's row limit, clamped for hand-edited configs.
+    #[must_use]
+    pub fn flow_indicator_row_limit(&self) -> u8 {
+        self.flow_indicator_max_devices.clamp(
+            FLOW_INDICATOR_MAX_DEVICES_MIN,
+            FLOW_INDICATOR_MAX_DEVICES_MAX,
+        )
+    }
 }
 
 /// Per-device RGB lighting: a single static color, brightness, and on/off.

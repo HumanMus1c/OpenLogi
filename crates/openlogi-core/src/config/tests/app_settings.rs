@@ -178,6 +178,70 @@ fn low_battery_notifications_stay_on_unless_turned_off() {
 }
 
 #[test]
+fn tray_battery_stays_on_unless_turned_off() {
+    assert!(Config::default().app_settings.tray_battery);
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 8
+            [app_settings]
+            low_battery_notifications = false
+        ",
+    )
+    .expect("config predating the tray-battery setting loads");
+    assert!(predating.app_settings.tray_battery);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.tray_battery = false;
+    assert!(!write_and_read(&cfg).app_settings.tray_battery);
+}
+
+#[test]
+fn flow_indicator_defaults_and_clamps_its_row_limit() {
+    let settings = AppSettings::default();
+    assert!(settings.flow_indicator);
+    assert!(settings.flow_indicator_show_offline);
+    assert_eq!(
+        settings.flow_indicator_row_limit(),
+        FLOW_INDICATOR_MAX_DEVICES_DEFAULT
+    );
+    assert_eq!(
+        settings.flow_indicator_display_mode,
+        FlowIndicatorDisplayMode::Normal
+    );
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 8
+            [app_settings]
+            tray_battery = false
+        ",
+    )
+    .expect("config predating the flow-indicator settings loads");
+    assert!(predating.app_settings.flow_indicator);
+    assert_eq!(predating.app_settings.flow_indicator_row_limit(), 3);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.flow_indicator = false;
+    cfg.app_settings.flow_indicator_max_devices = 99;
+    cfg.app_settings.flow_indicator_display_mode = FlowIndicatorDisplayMode::Topmost;
+    let reloaded = write_and_read(&cfg);
+    assert!(!reloaded.app_settings.flow_indicator);
+    assert_eq!(reloaded.app_settings.flow_indicator_max_devices, 99);
+    assert_eq!(reloaded.app_settings.flow_indicator_row_limit(), 5);
+    assert_eq!(
+        reloaded.app_settings.flow_indicator_display_mode,
+        FlowIndicatorDisplayMode::Topmost
+    );
+
+    cfg.app_settings.flow_indicator_max_devices = 0;
+    assert_eq!(
+        write_and_read(&cfg).app_settings.flow_indicator_row_limit(),
+        1
+    );
+}
+
+#[test]
 fn lock_key_notifications_stay_on_unless_turned_off() {
     assert!(Config::default().app_settings.lock_key_notifications);
 

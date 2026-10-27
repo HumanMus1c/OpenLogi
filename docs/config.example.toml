@@ -7,6 +7,15 @@ launch_at_login = true
 check_for_updates = false
 auto_install_updates = false
 show_in_menu_bar = true
+# Tray battery readout: tooltip and device rows in the tray menu (and the
+# Windows tray icon). Default true.
+tray_battery = true
+# Floating Flow Indicator listing detected devices. Defaults: on, offline
+# devices kept with their last known reading, 3 rows (1-5), normal stacking.
+flow_indicator = true
+flow_indicator_show_offline = true
+flow_indicator_max_devices = 3
+flow_indicator_display_mode = "normal"
 capture_mouse_events = true
 # Mouse button profiles: "pointer" (default) or "focused".
 mouse_profile_target = "pointer"
