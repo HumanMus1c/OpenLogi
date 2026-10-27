@@ -6,12 +6,15 @@ The macOS menu-bar readout (title beside the glyph, capped device rows, live
 `tray_battery` toggle) is implemented but not yet compiled or run on macOS
 hardware. Windows live checks done on a 125%-DPI dark/light taskbar: live
 tooltip, badge render, theme-change refresh, and Explorer-restart re-add.
-Remaining: macOS hardware verification, Linux hardware verification (the
-widget's Linux fallback is the existing Normal/PopUp window mapping — GPUI
-exposes no layer-shell; position persistence and drag are untested there),
-and the 100/150/200% DPI matrix beyond the observed 125%. GPUI exposes no
-bottom-most window layer, so there is no Desktop display mode; the card's
-position lives in `flow-indicator.toml` beside `config.toml`.
+Linux: the full non-desktop workspace compiles and passes Clippy/tests on
+WSLg (Ubuntu 26.04, Wayland + X11); the overlay connects to the mock agent,
+opens a window on both backends, and persists its position. Pixel-level
+verification needs a native Linux desktop — WSLg's RDP compositor does not
+show the per-pixel-alpha pop-up content. Remaining: macOS hardware
+verification, native-Linux desktop verification (drag, real-compositor
+z-order), and the 100/150/200% DPI matrix beyond the observed 125%. GPUI
+exposes no bottom-most window layer, so there is no Desktop display mode;
+the card's position lives in `flow-indicator.toml` beside `config.toml`.
 
 The visual reference is **vigil-watt** (MIT): its tray icon renders the lowest
 battery percentage as a coloured badge, its tray menu lists device readings, and
