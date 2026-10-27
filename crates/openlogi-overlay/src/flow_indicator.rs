@@ -528,15 +528,31 @@ impl FlowIndicator {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn window_options(_mode: FlowIndicatorDisplayMode, bounds: Bounds<gpui::Pixels>) -> WindowOptions {
     // Windows has no non-topmost toolwindow kind in GPUI. A PopUp is the
     // taskbar-less/Alt-Tab-less window; `apply_display_mode` strips its
-    // TOPMOST bit when the user chose Normal. Other platforms map the mode
-    // through the window kind directly.
-    #[cfg(target_os = "windows")]
-    let kind = WindowKind::PopUp;
-    #[cfg(not(target_os = "windows"))]
-    let kind = match _mode {
+    // TOPMOST bit when the user chose Normal.
+    WindowOptions {
+        titlebar: None,
+        focus: false,
+        show: true,
+        kind: WindowKind::PopUp,
+        is_movable: true,
+        is_resizable: false,
+        is_minimizable: false,
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id: Some("openlogi-flow-indicator".to_string()),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        ..WindowOptions::default()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn window_options(mode: FlowIndicatorDisplayMode, bounds: Bounds<gpui::Pixels>) -> WindowOptions {
+    // Other platforms map the mode through the window kind directly: a
+    // Normal window can be covered, a PopUp floats above them.
+    let kind = match mode {
         FlowIndicatorDisplayMode::Normal => WindowKind::Normal,
         FlowIndicatorDisplayMode::Topmost => WindowKind::PopUp,
     };

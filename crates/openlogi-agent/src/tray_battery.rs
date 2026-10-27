@@ -11,7 +11,10 @@ use openlogi_core::device::{
 };
 
 mod badge;
-pub(crate) use badge::{Badge, render as render_badge};
+#[cfg(target_os = "windows")]
+pub(crate) use badge::Badge;
+#[cfg(target_os = "windows")]
+pub(crate) use badge::render as render_badge;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
@@ -132,6 +135,7 @@ impl BatterySummary {
 
     /// The badge for the device the tooltip reads out, or a neutral dash when
     /// no device has a readout.
+    #[cfg(target_os = "windows")]
     pub(crate) fn badge(&self) -> Badge {
         first_battery_readout(&self.devices).map_or_else(Badge::none, Badge::for_device)
     }
