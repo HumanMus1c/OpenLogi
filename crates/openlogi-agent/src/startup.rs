@@ -48,11 +48,10 @@ pub(crate) struct Core {
 /// arming: no permission prompt, no device open, no helper spawn. Binding
 /// ahead of the watchers and prompts lets a dormant agent hear demand, and
 /// keeps a first-run consent dialog from blackholing the GUI's connect.
-pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
+pub(crate) async fn bootstrap(config: Config, observable: Arc<ObservableState>) -> Option<Core> {
     // The orchestrator is shared with the IPC server and mutated by the
     // select loop, so it lives behind an async mutex; locks are brief. The
     // hook facts are published by the select loop, which owns the hook.
-    let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
     #[cfg(target_os = "macos")]
     seed_permission_facts(&observable);
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(

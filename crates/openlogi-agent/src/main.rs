@@ -42,10 +42,15 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
+#[cfg(any(target_os = "windows", test))]
+mod tray_battery;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 mod virtual_keyboard;
 
+use std::sync::Arc;
+
+use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::config::Config;
 use tracing::{info, warn};
 
@@ -104,6 +109,10 @@ fn main() {
     // reaches the running agent through `reload_config`.
     openlogi_core::locale::activate(config.app_settings.language.as_deref());
 
+    // The tray and the IPC server read the same cell; construct it before the
+    // tray thread starts so the first tooltip already has a live handle.
+    let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -139,7 +148,12 @@ fn main() {
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(config, shutdown_requests, armed_tx));
+                runtime.block_on(lifecycle::run(
+                    config,
+                    shutdown_requests,
+                    observable,
+                    armed_tx,
+                ));
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
@@ -155,7 +169,12 @@ fn main() {
         // (message pump included); the async core keeps the main thread.
         #[cfg(target_os = "windows")]
         {
-            tray_windows::spawn(config.app_settings.show_in_menu_bar, shutdown_tx.clone());
+            tray_windows::spawn(
+                config.app_settings.show_in_menu_bar,
+                config.app_settings.tray_battery,
+                Arc::clone(&observable),
+                shutdown_tx.clone(),
+            );
             // Native resume notifications feed the same event seam as macOS
             // and Linux: inventory wakes immediately and replays volatile
             // settings on its settled authoritative snapshot.
@@ -165,7 +184,7 @@ fn main() {
         resume_linux::register(device_io_signal.clone());
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         drop(device_io_signal);
-        runtime.block_on(lifecycle::run(config, shutdown_requests));
+        runtime.block_on(lifecycle::run(config, shutdown_requests, observable));
     }
 }
 

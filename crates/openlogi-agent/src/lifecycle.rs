@@ -61,6 +61,7 @@ const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) async fn run(
     config: Config,
     shutdown_requests: ShutdownRequests,
+    observable: Arc<ObservableState>,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
@@ -70,6 +71,7 @@ pub(crate) async fn run(
     let Some(booted) = Booted::bootstrap(
         config,
         shutdown_requests,
+        observable,
         #[cfg(target_os = "macos")]
         armed_tx,
     )
@@ -109,13 +111,14 @@ impl Booted {
     async fn bootstrap(
         config: Config,
         shutdown_requests: ShutdownRequests,
+        observable: Arc<ObservableState>,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
         let capture_mouse_events = config.app_settings.capture_mouse_events;
         #[cfg(target_os = "macos")]
         let launch_at_login = config.app_settings.launch_at_login;
-        let core = startup::bootstrap(config).await?;
+        let core = startup::bootstrap(config, observable).await?;
         Some(Self {
             core,
             signals: ShutdownSignals::install(),

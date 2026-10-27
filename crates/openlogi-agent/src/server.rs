@@ -114,6 +114,8 @@ impl AgentServer {
             Ok((config, file)) => {
                 let revision = file.revision();
                 let launch_at_login = config.app_settings.launch_at_login;
+                #[cfg(target_os = "windows")]
+                let tray_battery = config.app_settings.tray_battery;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
@@ -140,6 +142,10 @@ impl AgentServer {
                 openlogi_core::locale::activate(language.as_deref());
                 #[cfg(target_os = "macos")]
                 crate::tray::relocalize();
+                // The tray's readout is a live setting; the language is
+                // resolved first so its words are rebuilt in the new locale.
+                #[cfg(target_os = "windows")]
+                crate::tray_windows::set_battery_readout(tray_battery);
                 Ok(revision)
             }
             Err(error) => {
