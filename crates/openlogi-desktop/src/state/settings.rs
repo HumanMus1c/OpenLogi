@@ -6,8 +6,9 @@ use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MouseProfileTarget,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode,
+    FLOW_INDICATOR_MAX_DEVICES_MAX, FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode,
+    MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 use openlogi_core::update_feed::UpdateChannel;
 
@@ -329,6 +330,68 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.low_battery_notifications = enabled);
         self.persist_and_reload("low-battery notifications setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle the tray's battery readout and persist it. The agent owns the
+    /// tray; it reads the new value on config reload. An already-set value
+    /// writes nothing and is still reported; disk failures restore the
+    /// persisted value.
+    pub fn commit_tray_battery(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.tray_battery == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.tray_battery = enabled);
+        self.persist_and_reload("tray battery readout setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle the floating Flow Indicator and persist it. The overlay watches
+    /// `config.toml`, so the card follows without an agent restart.
+    pub fn commit_flow_indicator(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.flow_indicator == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.flow_indicator = enabled);
+        self.persist_and_reload("Flow Indicator setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Keep or hide offline devices in the Flow Indicator.
+    pub fn commit_flow_indicator_show_offline(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.flow_indicator_show_offline == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.flow_indicator_show_offline = enabled);
+        self.persist_and_reload("Flow Indicator offline setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Set how many device rows the Flow Indicator shows, clamped to the
+    /// supported range before it reaches the file.
+    pub fn commit_flow_indicator_max_devices(&mut self, max_devices: u8) -> StateEvents {
+        let max_devices = max_devices.clamp(
+            FLOW_INDICATOR_MAX_DEVICES_MIN,
+            FLOW_INDICATOR_MAX_DEVICES_MAX,
+        );
+        if self.config.app_settings.flow_indicator_max_devices == max_devices {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.flow_indicator_max_devices = max_devices);
+        self.persist_and_reload("Flow Indicator row limit");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Set the Flow Indicator's z-order.
+    pub fn commit_flow_indicator_display_mode(
+        &mut self,
+        display_mode: FlowIndicatorDisplayMode,
+    ) -> StateEvents {
+        if self.config.app_settings.flow_indicator_display_mode == display_mode {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.flow_indicator_display_mode = display_mode);
+        self.persist_and_reload("Flow Indicator display mode");
         StateEvent::SettingsChanged.into()
     }
     /// Toggle the overlay's lock-key indicator and persist it. The agent

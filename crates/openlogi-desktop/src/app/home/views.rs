@@ -22,7 +22,7 @@ use super::{
     device_menu, device_menu_button, device_ring, keyboard_glow, kind_badge,
 };
 use crate::state::{AppState, DeviceRecord};
-use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading, value_label};
+use crate::ui::battery::{BatteryIndicator, value_label};
 use crate::ui::carousel::Carousel;
 use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 
@@ -362,7 +362,7 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     };
     let metadata = format!("{status}. {identity}. {}.", connection_summary(record));
     if let Some(battery) = record.battery.as_ref() {
-        let battery = if battery_charging_no_reading(battery) {
+        let battery = if battery.charging_without_reading() {
             tr!("device.charging").to_string()
         } else if record.online {
             format!("{} {}", tr!("device.battery"), value_label(battery))

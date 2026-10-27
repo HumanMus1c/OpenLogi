@@ -183,6 +183,45 @@ fn turning_off_low_battery_notifications_reloads_the_agent_once() {
 }
 
 #[test]
+fn flow_indicator_settings_update_state_and_reload_once() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+    assert!(state.app_settings().flow_indicator);
+
+    let _ = state.commit_flow_indicator(false);
+    assert!(!state.app_settings().flow_indicator);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+    let _ = state.commit_flow_indicator(false);
+    assert!(
+        receiver.try_recv().is_err(),
+        "an unchanged value writes nothing"
+    );
+
+    let _ = state.commit_flow_indicator_max_devices(9);
+    assert_eq!(
+        state.app_settings().flow_indicator_max_devices,
+        openlogi_core::config::FLOW_INDICATOR_MAX_DEVICES_MAX
+    );
+    let _ = state.commit_flow_indicator_max_devices(0);
+    assert_eq!(
+        state.app_settings().flow_indicator_row_limit(),
+        openlogi_core::config::FLOW_INDICATOR_MAX_DEVICES_MIN
+    );
+
+    let _ = state.commit_flow_indicator_display_mode(
+        openlogi_core::config::FlowIndicatorDisplayMode::Topmost,
+    );
+    assert_eq!(
+        state.app_settings().flow_indicator_display_mode,
+        openlogi_core::config::FlowIndicatorDisplayMode::Topmost
+    );
+}
+
+#[test]
 fn lock_key_notifications_persist_and_reload_only_when_changed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
