@@ -17,6 +17,7 @@
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 mod backlight;
+mod flow_indicator;
 mod ipc;
 mod lock_key;
 mod notice;
@@ -59,6 +60,7 @@ fn main() -> Result<()> {
         mut backlights,
         mut notices,
         mut lock_keys,
+        mut state,
         commands,
     } = ipc::spawn();
 
@@ -77,6 +79,51 @@ fn main() -> Result<()> {
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         let shelf = Rc::new(RefCell::new(NoticeShelf::default()));
+        let (flow_commands, mut flow_command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let observation_commands = flow_commands.clone();
+        cx.spawn(async move |_cx| {
+            while let Some(observation) = state.recv().await {
+                if observation_commands
+                    .send(flow_indicator::Command::Observation(Box::new(observation)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            let mut stamp = flow_indicator::config_stamp();
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let now = flow_indicator::config_stamp();
+                if now != stamp {
+                    stamp = now;
+                    if let Some(settings) = flow_indicator::load_settings()
+                        && flow_commands
+                            .send(flow_indicator::Command::Settings(settings))
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+                if flow_commands.send(flow_indicator::Command::Tick).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            let mut indicator = flow_indicator::FlowIndicator::new(
+                flow_indicator::load_settings().unwrap_or_default(),
+            );
+            while let Some(command) = flow_command_rx.recv().await {
+                cx.update(|cx| indicator.handle(command, cx));
+            }
+        })
+        .detach();
         cx.spawn(async move |cx| {
             while let Some(observed) = notices.recv().await {
                 openlogi_core::locale::activate(observed.language.as_deref());

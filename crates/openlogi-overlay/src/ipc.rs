@@ -19,7 +19,7 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::client::{self, ConnectError, Observer, Stamped};
 use openlogi_ipc::{
     ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, LockKeyObservation,
-    NoticeObservation, RingObservation,
+    NoticeObservation, Observation, RingObservation,
 };
 use succession::Standing;
 use tarpc::context;
@@ -63,6 +63,8 @@ pub(crate) struct Handle {
     /// The lock-key change the agent says should be showing, each time that
     /// changes. `None` is no indicator, which is also how one ends.
     pub(crate) lock_keys: mpsc::UnboundedReceiver<LockKeyObservation>,
+    /// The whole agent snapshot, for the Flow Indicator's device rows.
+    pub(crate) state: mpsc::UnboundedReceiver<Observation>,
     /// Where the view reports hover, activation, and cancellation.
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
 }
@@ -74,6 +76,7 @@ pub(crate) fn spawn() -> Handle {
     let (backlight_tx, backlights) = mpsc::unbounded_channel();
     let (notice_tx, notices) = mpsc::unbounded_channel();
     let (lock_key_tx, lock_keys) = mpsc::unbounded_channel();
+    let (state_tx, state) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
@@ -90,6 +93,7 @@ pub(crate) fn spawn() -> Handle {
                 observe(connect, LOCK_KEYS, |observed| lock_key_tx
                     .send(observed)
                     .is_ok()),
+                observe(connect, STATE, |observed| state_tx.send(observed).is_ok()),
                 send_commands(&mut command_rx)
             );
         });
@@ -102,6 +106,7 @@ pub(crate) fn spawn() -> Handle {
         backlights,
         notices,
         lock_keys,
+        state,
         commands,
     }
 }
@@ -146,6 +151,16 @@ const LOCK_KEYS: Cell<LockKeyObservation> = Cell {
     open: Observer::lock_keys,
     what: "lock-key",
     lost: Some(no_lock_key),
+};
+
+/// The whole agent snapshot. Keeping the last answer on a lost connection
+/// leaves the Flow Indicator showing the last-known readings until this
+/// process gives up on the agent, which is the same last-known language the
+/// widget uses for a sleeping device.
+const STATE: Cell<Observation> = Cell {
+    open: Observer::state,
+    what: "agent state",
+    lost: None,
 };
 
 /// The observation that closes the indicator when the agent that was driving
