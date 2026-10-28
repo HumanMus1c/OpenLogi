@@ -10,10 +10,11 @@ use openlogi_core::device::{
     first_battery_readout,
 };
 
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 mod badge;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) use badge::Badge;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) use badge::render as render_badge;
 #[cfg(target_os = "windows")]
 mod windows;
@@ -24,7 +25,7 @@ pub(crate) use windows::{create_icon, destroy_icon};
 pub(crate) const MAX_MENU_ROWS: usize = 6;
 
 /// The tooltip prefix and the fallback when no device has a readout.
-const BRAND: &str = "OpenLogi";
+pub(crate) const BRAND: &str = "OpenLogi";
 
 /// A device's display name: its prettified codename, or the localized kind
 /// when the firmware reported no name.
@@ -122,10 +123,15 @@ impl BatterySummary {
     /// persisted key would re-derive the device-config key, so this follows the
     /// plan's allowed fallback and reads out the first online device with
     /// something to show.
+    #[cfg(any(target_os = "windows", target_os = "macos", test))]
     pub(crate) fn tooltip(&self) -> Option<String> {
-        first_battery_readout(&self.devices)
-            .and_then(tooltip_readout)
-            .map(|readout| format!("{BRAND} · {readout}"))
+        self.readout().map(|readout| format!("{BRAND} · {readout}"))
+    }
+
+    /// The readout without the brand prefix, for surfaces that carry the brand
+    /// separately (the Linux tray's tooltip title).
+    pub(crate) fn readout(&self) -> Option<String> {
+        first_battery_readout(&self.devices).and_then(tooltip_readout)
     }
 
     /// The menu's device rows in inventory order, capped.
@@ -135,7 +141,7 @@ impl BatterySummary {
 
     /// The badge for the device the tooltip reads out, or a neutral dash when
     /// no device has a readout.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn badge(&self) -> Badge {
         first_battery_readout(&self.devices).map_or_else(Badge::none, Badge::for_device)
     }

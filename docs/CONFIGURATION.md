@@ -84,19 +84,20 @@ optional physical device key.
   clicked. With the setting off the agent posts no notice, but it still notes
   when a device charges, so the next discharge is announced once the setting
   is back on. A notice already on screen still closes on its own.
-- `tray_battery` (default `true`): the Windows notification-area tray shows a
-  battery readout — the device the agent would read out in its tooltip and a
-  disabled row per device in the right-click menu. The values use the same
-  `needs_attention` thresholds and status words as the settings app, and the
-  readout renders the inventory the agent already polls rather than triggering
-  a HID read. Off restores the static brand icon and the plain Show/Quit menu;
-  the change applies on the next config reload. macOS consumes the menu-bar
-  side in a follow-up; Linux has no tray.
-- `tray_badge_style` (default `"circle"`): the shape of the Windows tray
-  badge. `"circle"` draws the disc inscribed in the system's icon slot;
+- `tray_battery` (default `true`): the tray shows a battery readout — the
+  device the agent would read out in its tooltip and a disabled row per device
+  in the menu. The values use the same `needs_attention` thresholds and status
+  words as the settings app, and the readout renders the inventory the agent
+  already polls rather than triggering a HID read. Off restores the static
+  brand icon and the plain Show/Quit menu; the change applies on the next
+  config reload. Windows uses the notification area, macOS the menu-bar item,
+  and Linux a StatusNotifierItem (visible only where the desktop runs an SNI
+  host).
+- `tray_badge_style` (default `"circle"`): the shape of the tray badge.
+  `"circle"` draws the disc inscribed in the system's icon slot;
   `"rounded_square"` draws a full-bleed rounded square that carries the same
-  visual weight as the square-ish icons around it. Windows-only — macOS shows
-  a text title and Linux has no tray.
+  visual weight as the square-ish icons around it. Windows and Linux only —
+  macOS shows a text title.
 - `flow_indicator` (default `true`): a floating card listing the devices the
   agent has detected, their battery percentages, and charging state. It lives
   in the overlay process, so it stays available with the settings window

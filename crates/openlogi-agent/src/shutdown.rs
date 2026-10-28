@@ -14,8 +14,8 @@ use crate::virtual_keyboard::VirtualKeyboard;
 
 /// A non-signal request for the process lifecycle owner.
 pub(crate) enum ShutdownRequest {
-    /// The user chose Quit from the macOS or Windows tray.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    /// The user chose Quit from the macOS, Windows, or Linux tray.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     TrayQuit {
         /// Kept alive through graceful teardown. The tray only falls back to
         /// direct exit if this sender is dropped because the core returned or
@@ -85,6 +85,31 @@ pub(crate) fn request_tray_quit(
     #[expect(
         clippy::exit,
         reason = "fallback only: a missing or unwound core cannot return a status through an AppKit or win32 tray callback"
+    )]
+    std::process::exit(fallback_status)
+}
+
+/// The Linux form hands the same request over and returns instead of
+/// blocking: the ksni menu callback runs inside the tray's tokio runtime,
+/// where a blocking wait is a panic. Returning into the service is safe —
+/// the tray keeps serving until the lifecycle's own exit ends the process —
+/// and dropping the guard receiver only disarms the dead-core warning that
+/// could not be waited on anyway. A missing core still exits directly.
+#[cfg(target_os = "linux")]
+pub(crate) fn request_tray_quit(requests: Option<&ShutdownRequestSender>, fallback_status: i32) {
+    let (core_guard, _core_ended) = oneshot::channel();
+    let sent = requests.is_some_and(|requests| {
+        requests
+            .send(ShutdownRequest::TrayQuit { core_guard })
+            .is_ok()
+    });
+    if sent {
+        return;
+    }
+    tracing::warn!("no live agent core to accept tray Quit — exiting directly");
+    #[expect(
+        clippy::exit,
+        reason = "fallback only: a missing or unwound core cannot return a status through a D-Bus tray callback"
     )]
     std::process::exit(fallback_status)
 }

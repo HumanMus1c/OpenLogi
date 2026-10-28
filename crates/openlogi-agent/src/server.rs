@@ -114,9 +114,9 @@ impl AgentServer {
             Ok((config, file)) => {
                 let revision = file.revision();
                 let launch_at_login = config.app_settings.launch_at_login;
-                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
                 let tray_battery = config.app_settings.tray_battery;
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
                 let tray_badge_style = config.app_settings.tray_badge_style;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
@@ -152,6 +152,10 @@ impl AgentServer {
                 crate::tray_windows::set_badge_style(tray_badge_style);
                 #[cfg(target_os = "macos")]
                 crate::tray::set_battery_readout(tray_battery);
+                #[cfg(target_os = "linux")]
+                crate::tray_linux::set_battery_readout(tray_battery);
+                #[cfg(target_os = "linux")]
+                crate::tray_linux::set_badge_style(tray_badge_style);
                 Ok(revision)
             }
             Err(error) => {

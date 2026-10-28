@@ -1,0 +1,560 @@
+//! The agent's Linux StatusNotifierItem tray.
+//!
+//! Mirrors the Windows notification-area and macOS menu-bar items: the
+//! always-on agent hosts the icon, the GUI stays on demand. The icon is an
+//! ARGB32 battery badge (the same renderer Windows uses) delivered over the
+//! `org.kde.StatusNotifierItem` D-Bus interface, with the device rows in a
+//! `com.canonical.dbusmenu` menu.
+//!
+//! Whether the icon appears at all is the desktop's decision: KDE hosts SNI
+//! natively, GNOME needs the AppIndicator extension, and XFCE needs an
+//! indicator plugin. With no host the registration is a soft failure — the
+//! agent keeps working headless, exactly as it does without a tray today.
+
+use std::path::Path;
+use std::process::Command;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+
+use ksni::menu::{MenuItem, StandardItem};
+use ksni::{OfflineReason, ToolTip, Tray, TrayMethods as _};
+use openlogi_agent_core::observable::ObservableState;
+use openlogi_core::config::TrayBadgeStyle;
+use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tracing::{debug, info, warn};
+
+use crate::shutdown::{self, ShutdownRequestSender};
+use crate::tray_battery::{BRAND, Badge, BatterySummary, render_badge};
+
+/// The GUI binary installed beside the agent (package and cargo target dirs
+/// use the same layout).
+const GUI_BINARY: &str = "openlogi-desktop";
+/// The panel's icon slots. SNI hosts pick the closest bitmap; the renderer
+/// clamps to its own 64 px ceiling.
+const ICON_SIZES: [u16; 5] = [16, 22, 24, 32, 48];
+/// StatusNotifierItem carries no panel-theme signal, so the badge ring and the
+/// brand glyph assume the common dark panel. A light panel would need a
+/// theme-aware icon, which is a separate follow-up.
+const LIGHT_PANEL: bool = false;
+
+/// A live settings or inventory change for the tray thread.
+#[derive(Clone, Copy, Debug)]
+enum TrayCommand {
+    SetBattery(bool),
+    SetBadgeStyle(TrayBadgeStyle),
+}
+
+/// The channel a config reload and the inventory watcher share.
+static SENDER: OnceLock<UnboundedSender<TrayCommand>> = OnceLock::new();
+
+/// Start the tray on its own D-Bus thread. No-op when the user hid the tray
+/// preference; that takes effect on the agent's next launch, as on the other
+/// platforms.
+pub fn spawn(
+    show_in_tray: bool,
+    tray_battery: bool,
+    badge_style: TrayBadgeStyle,
+    observable: Arc<ObservableState>,
+    shutdown_tx: ShutdownRequestSender,
+) {
+    if !show_in_tray {
+        info!("tray icon disabled by preference — agent stays invisible");
+        return;
+    }
+    let (sender, commands) = mpsc::unbounded_channel();
+    if SENDER.set(sender).is_err() {
+        warn!("the Linux tray is already running — keeping the first instance");
+        return;
+    }
+    if let Err(error) = openlogi_core::worker::spawn("openlogi-tray", move |runtime| {
+        run(
+            &runtime,
+            observable,
+            shutdown_tx,
+            tray_battery,
+            badge_style,
+            commands,
+        );
+    }) {
+        warn!(%error, "could not spawn the Linux tray thread");
+    }
+}
+
+/// Apply a config reload's `tray_battery` choice. A no-op when the tray was
+/// hidden at launch (the setting is read at startup only) or had no D-Bus
+/// session to attach to.
+pub fn set_battery_readout(enabled: bool) {
+    send(TrayCommand::SetBattery(enabled));
+}
+
+/// Apply a config reload's `tray_badge_style` choice.
+pub fn set_badge_style(style: TrayBadgeStyle) {
+    send(TrayCommand::SetBadgeStyle(style));
+}
+
+fn send(command: TrayCommand) {
+    if let Some(sender) = SENDER.get() {
+        let _ = sender.send(command);
+    }
+}
+
+/// One rendered state: what the tooltip, icon, and menu read.
+#[derive(Clone)]
+struct TrayView {
+    tooltip: String,
+    icons: Vec<ksni::Icon>,
+    rows: Vec<String>,
+}
+
+impl TrayView {
+    fn build(summary: &BatterySummary, battery: bool, style: TrayBadgeStyle) -> Self {
+        if !battery {
+            return Self {
+                tooltip: String::new(),
+                icons: brand_icons(),
+                rows: Vec::new(),
+            };
+        }
+        let badge = summary.badge();
+        Self {
+            tooltip: summary.readout().unwrap_or_default(),
+            icons: ICON_SIZES
+                .iter()
+                .map(|&size| badge_icon(badge, size, style))
+                .collect(),
+            rows: summary.menu_lines().collect(),
+        }
+    }
+}
+
+struct OpenLogiTray {
+    observable: Arc<ObservableState>,
+    shutdown_tx: ShutdownRequestSender,
+    battery: bool,
+    badge_style: TrayBadgeStyle,
+    view: TrayView,
+}
+
+impl OpenLogiTray {
+    fn new(
+        observable: Arc<ObservableState>,
+        shutdown_tx: ShutdownRequestSender,
+        battery: bool,
+        badge_style: TrayBadgeStyle,
+    ) -> Self {
+        let mut tray = Self {
+            observable,
+            shutdown_tx,
+            battery,
+            badge_style,
+            view: TrayView {
+                tooltip: String::new(),
+                icons: Vec::new(),
+                rows: Vec::new(),
+            },
+        };
+        tray.refresh();
+        tray
+    }
+
+    fn refresh(&mut self) {
+        let summary = self
+            .observable
+            .read(|snapshot| BatterySummary::from_inventory(&snapshot.inventory));
+        self.view = TrayView::build(&summary, self.battery, self.badge_style);
+    }
+
+    fn apply(&mut self, command: TrayCommand) {
+        match command {
+            TrayCommand::SetBattery(enabled) => {
+                self.battery = enabled;
+                self.refresh();
+            }
+            TrayCommand::SetBadgeStyle(style) => {
+                self.badge_style = style;
+                self.refresh();
+            }
+        }
+    }
+
+    fn quit(&mut self) {
+        terminate_gui();
+        crate::overlay::evict_on_quit();
+        info!("tray Quit — requesting graceful agent shutdown");
+        shutdown::request_tray_quit(Some(&self.shutdown_tx), 0);
+    }
+}
+
+impl Tray for OpenLogiTray {
+    fn id(&self) -> String {
+        "openlogi".to_owned()
+    }
+
+    fn category(&self) -> ksni::Category {
+        ksni::Category::Hardware
+    }
+
+    fn title(&self) -> String {
+        BRAND.to_owned()
+    }
+
+    fn status(&self) -> ksni::Status {
+        ksni::Status::Active
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        self.view.icons.clone()
+    }
+
+    fn tool_tip(&self) -> ToolTip {
+        ToolTip {
+            title: BRAND.to_owned(),
+            description: self.view.tooltip.clone(),
+            ..ToolTip::default()
+        }
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        open_gui();
+    }
+
+    fn menu(&self) -> Vec<MenuItem<Self>> {
+        let mut items = Vec::new();
+        for row in &self.view.rows {
+            items.push(
+                StandardItem {
+                    label: row.clone(),
+                    enabled: false,
+                    ..StandardItem::default()
+                }
+                .into(),
+            );
+        }
+        if !self.view.rows.is_empty() {
+            items.push(MenuItem::Separator);
+        }
+        items.push(
+            StandardItem {
+                label: rust_i18n::t!("app.show_main_window").to_string(),
+                activate: Box::new(|_| open_gui()),
+                ..StandardItem::default()
+            }
+            .into(),
+        );
+        items.push(MenuItem::Separator);
+        items.push(
+            StandardItem {
+                label: rust_i18n::t!("app.quit_openlogi").to_string(),
+                activate: Box::new(|tray: &mut Self| tray.quit()),
+                ..StandardItem::default()
+            }
+            .into(),
+        );
+        items
+    }
+
+    fn watcher_offline(&self, reason: OfflineReason) -> bool {
+        debug!(?reason, "tray — no StatusNotifier host; waiting for one");
+        true
+    }
+}
+
+/// Run the tray service for the process lifetime: register with the watcher,
+/// then fold inventory changes and config reloads into it.
+fn run(
+    runtime: &tokio::runtime::Runtime,
+    observable: Arc<ObservableState>,
+    shutdown_tx: ShutdownRequestSender,
+    battery: bool,
+    badge_style: TrayBadgeStyle,
+    mut commands: UnboundedReceiver<TrayCommand>,
+) {
+    runtime.block_on(async move {
+        let mut watch = observable.subscribe();
+        let tray = OpenLogiTray::new(observable, shutdown_tx, battery, badge_style);
+        // A desktop without an SNI host is a soft failure: keep the service
+        // alive so it appears if the host starts later (a panel restart, or a
+        // GNOME session that loads its AppIndicator extension late).
+        let handle = match tray.assume_sni_available(true).spawn().await {
+            Ok(handle) => handle,
+            Err(error) => {
+                warn!(%error, "could not start the Linux tray");
+                return;
+            }
+        };
+        info!("StatusNotifierItem tray installed");
+
+        loop {
+            tokio::select! {
+                command = commands.recv() => {
+                    let Some(command) = command else {
+                        break;
+                    };
+                    if handle.update(move |tray| tray.apply(command)).await.is_none() {
+                        warn!("the Linux tray service stopped");
+                        break;
+                    }
+                }
+                changed = watch.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    if handle.update(OpenLogiTray::refresh).await.is_none() {
+                        warn!("the Linux tray service stopped");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Render `badge` at `size` as the ARGB32 pixmap SNI expects.
+fn badge_icon(badge: Badge, size: u16, style: TrayBadgeStyle) -> ksni::Icon {
+    let rgba = render_badge(badge, u32::from(size), LIGHT_PANEL, style);
+    let extent = i32::from(size);
+    argb_icon(rgba, extent, extent)
+}
+
+/// Turn straight-alpha RGBA into SNI's network-byte-order ARGB32.
+fn argb_icon(mut rgba: Vec<u8>, width: i32, height: i32) -> ksni::Icon {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.rotate_right(1);
+    }
+    ksni::Icon {
+        width,
+        height,
+        data: rgba,
+    }
+}
+
+/// The static brand glyph used while the battery readout is switched off.
+fn brand_icons() -> Vec<ksni::Icon> {
+    static DARK: OnceLock<Vec<ksni::Icon>> = OnceLock::new();
+    static LIGHT: OnceLock<Vec<ksni::Icon>> = OnceLock::new();
+    let cache = if LIGHT_PANEL { &LIGHT } else { &DARK };
+    cache
+        .get_or_init(|| {
+            let png: &[u8] = if LIGHT_PANEL {
+                include_bytes!("../assets/tray-icon@2x.png")
+            } else {
+                include_bytes!("../assets/tray-icon-white@2x.png")
+            };
+            decode_png_icon(png).into_iter().collect()
+        })
+        .clone()
+}
+
+fn decode_png_icon(bytes: &[u8]) -> Option<ksni::Icon> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buffer = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buffer).ok()?;
+    let source = &buffer[..info.buffer_size()];
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => source.to_vec(),
+        png::ColorType::GrayscaleAlpha => source
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
+            .collect(),
+        _ => return None,
+    };
+    let width = i32::try_from(info.width).ok()?;
+    let height = i32::try_from(info.height).ok()?;
+    Some(argb_icon(rgba, width, height))
+}
+
+/// Bring the GUI up. The GUI is a single-instance process, so an already
+/// running one just stays where it is; its taskbar button is the way back.
+fn open_gui() {
+    if !gui_pids().is_empty() {
+        info!("tray — the GUI is already running; use its taskbar button");
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        warn!("could not resolve the agent's own path — cannot launch the GUI");
+        return;
+    };
+    let Some(directory) = executable.parent() else {
+        return;
+    };
+    let gui = directory.join(GUI_BINARY);
+    if !gui.is_file() {
+        warn!(path = %gui.display(), "no GUI binary next to the agent");
+        return;
+    }
+    match Command::new(&gui).spawn() {
+        Ok(_) => info!(path = %gui.display(), "tray — launched the GUI"),
+        Err(error) => warn!(%error, path = %gui.display(), "tray — could not launch the GUI"),
+    }
+}
+
+/// Quit the whole app: the GUI first (its IPC retry loop would otherwise
+/// respawn the agent we are about to exit), then the agent core.
+fn terminate_gui() {
+    let pids = gui_pids();
+    if pids.is_empty() {
+        return;
+    }
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    for pid in &pids {
+        let Some(process) = system.process(*pid) else {
+            continue;
+        };
+        if process.kill_with(Signal::Term) == Some(true) {
+            info!(pid = pid.as_u32(), "tray Quit — asked the GUI to terminate");
+        } else {
+            warn!(
+                pid = pid.as_u32(),
+                "tray Quit — could not terminate the GUI"
+            );
+        }
+    }
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < deadline {
+        system.refresh_processes(ProcessesToUpdate::All, true);
+        if pids.iter().all(|pid| system.process(*pid).is_none()) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    warn!("the GUI did not exit after SIGTERM — the agent still quits");
+}
+
+/// This user's running GUI processes.
+fn gui_pids() -> Vec<Pid> {
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let own_user = system
+        .process(Pid::from_u32(std::process::id()))
+        .and_then(sysinfo::Process::user_id);
+    system
+        .processes()
+        .iter()
+        .filter(|(_, process)| {
+            is_gui_process(process) && (own_user.is_none() || process.user_id() == own_user)
+        })
+        .map(|(pid, _)| *pid)
+        .collect()
+}
+
+fn is_gui_process(process: &sysinfo::Process) -> bool {
+    process
+        .exe()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == std::ffi::OsStr::new(GUI_BINARY))
+        || process.name().to_string_lossy() == GUI_BINARY
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ksni::Tray as _;
+    use openlogi_agent_core::observable::ObservableState;
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind, PairedDevice,
+        ReceiverInfo,
+    };
+    use openlogi_ipc::InventoryHealth;
+
+    use super::{ICON_SIZES, OpenLogiTray, TrayCommand, argb_icon, badge_icon, decode_png_icon};
+    use crate::tray_battery::Badge;
+    use openlogi_core::config::TrayBadgeStyle;
+
+    fn inventory() -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".to_owned(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: 1,
+                codename: Some("MX Master 3S".to_owned()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: Some(BatteryInfo {
+                    percentage: Some(64),
+                    level: BatteryLevel::Good,
+                    status: BatteryStatus::Discharging,
+                }),
+                model_info: None,
+                capabilities: None,
+                settings_revision: 0,
+            }],
+        }
+    }
+
+    fn tray(battery: bool) -> OpenLogiTray {
+        let observable = Arc::new(ObservableState::new("test".to_owned()));
+        observable.set_inventory(InventoryHealth::Ready, &[inventory()], &[], false);
+        let (shutdown_tx, _requests) = crate::shutdown::request_channel();
+        OpenLogiTray::new(observable, shutdown_tx, battery, TrayBadgeStyle::Circle)
+    }
+
+    #[test]
+    fn rgba_becomes_network_order_argb() {
+        let icon = argb_icon(vec![1, 2, 3, 4], 1, 1);
+        assert_eq!(icon.data, [4, 1, 2, 3]);
+        assert_eq!((icon.width, icon.height), (1, 1));
+    }
+
+    #[test]
+    fn the_badge_renders_at_the_requested_size() {
+        let icon = badge_icon(Badge::none(), 22, TrayBadgeStyle::Circle);
+        assert_eq!((icon.width, icon.height), (22, 22));
+        assert_eq!(icon.data.len(), 22 * 22 * 4);
+    }
+
+    #[test]
+    fn the_tray_reads_the_agent_inventory() {
+        let tray = tray(true);
+        assert_eq!(tray.tool_tip().description, "MX Master 3S 64%");
+        assert_eq!(tray.icon_pixmap().len(), ICON_SIZES.len());
+        let first = tray.menu();
+        let ksni::MenuItem::Standard(row) = &first[0] else {
+            panic!("device row missing");
+        };
+        assert!(row.label.contains("64%"));
+        assert!(!row.enabled);
+    }
+
+    #[test]
+    fn switching_the_readout_off_restores_the_brand_icon() {
+        let mut tray = tray(true);
+        let badge = tray.icon_pixmap();
+        tray.apply(TrayCommand::SetBattery(false));
+        assert!(tray.tool_tip().description.is_empty());
+        assert_ne!(tray.icon_pixmap()[0].data, badge[0].data);
+        assert!(!tray.icon_pixmap().is_empty());
+
+        tray.apply(TrayCommand::SetBattery(true));
+        let circle = tray.icon_pixmap()[0].data.clone();
+        tray.apply(TrayCommand::SetBadgeStyle(TrayBadgeStyle::RoundedSquare));
+        assert_ne!(tray.icon_pixmap()[0].data, circle);
+    }
+
+    #[test]
+    fn the_brand_assets_decode_to_argb() {
+        for png in [
+            include_bytes!("../assets/tray-icon@2x.png").as_slice(),
+            include_bytes!("../assets/tray-icon-white@2x.png").as_slice(),
+            include_bytes!("../assets/tray-icon-prism@2x.png").as_slice(),
+        ] {
+            let icon = decode_png_icon(png).expect("the packaged tray PNG decodes");
+            assert!(icon.width > 0 && icon.height > 0);
+            assert_eq!(
+                icon.data.len(),
+                usize::try_from(icon.width * icon.height * 4).expect("bounded icon")
+            );
+        }
+    }
+}

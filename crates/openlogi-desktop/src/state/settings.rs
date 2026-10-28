@@ -48,9 +48,9 @@ impl AppState {
     /// nothing and is still reported.
     ///
     /// The callers are the menu-bar / notification-area toggle in Settings,
-    /// shown only where there's a tray (macOS + Windows), so the setter is
-    /// gated the same way to stay dead-code-clean on Linux.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    /// shown only where there's a tray (macOS, Windows, Linux), so the setter
+    /// is gated the same way to stay dead-code-clean elsewhere.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub fn commit_show_in_menu_bar(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.show_in_menu_bar == enabled {
             return StateEvent::SettingsChanged.into();

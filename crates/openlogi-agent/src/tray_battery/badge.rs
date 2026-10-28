@@ -14,7 +14,7 @@
 )]
 
 use openlogi_core::config::TrayBadgeStyle;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use openlogi_core::device::{BatteryDevice, BatteryReading, BatteryTone};
 
 /// The disc colour role. Unlike [`BatteryTone`], no reading is neutral, and a
@@ -48,7 +48,7 @@ pub(crate) struct Badge {
 impl Badge {
     /// The badge for `device`: digits when there is a percentage, a bolt while
     /// charging, otherwise a dash in the reading's tone.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn for_device(device: &BatteryDevice) -> Self {
         let Some(battery) = &device.battery else {
             return Self::none();

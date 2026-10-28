@@ -5,20 +5,20 @@ use super::{
     SettingPage,
 };
 use gpui_component::radio::{Radio, RadioGroup};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use openlogi_core::config::TrayBadgeStyle;
 use openlogi_core::config::{
     FLOW_INDICATOR_MAX_DEVICES_DEFAULT, FLOW_INDICATOR_MAX_DEVICES_MAX,
-    FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode, TrayBadgeStyle,
+    FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode,
 };
 
 pub(super) fn flow_indicator_page() -> SettingPage {
     let group = SettingGroup::new();
-    // Linux has no tray, and the macOS menu-bar readout lands with its parity
-    // work, so the switch appears only where it currently drives something.
-    #[cfg(target_os = "windows")]
+    // The tray switch and badge style apply wherever the agent hosts a tray:
+    // Windows and Linux. macOS reads the level out as menu-bar text instead.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     let group = group.item(tray_battery_item());
-    // The badge is Windows-only: macOS reads the level out as text and Linux
-    // has no tray surface.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     let group = group.item(badge_style_item());
     let group = group
         .item(flow_indicator_item())
@@ -31,7 +31,7 @@ pub(super) fn flow_indicator_page() -> SettingPage {
         .group(group)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn tray_battery_item() -> SettingItem {
     SettingItem::new(
         tr!("flow_indicator.tray_battery"),
@@ -45,7 +45,7 @@ fn tray_battery_item() -> SettingItem {
     .description(tr!("flow_indicator.tray_battery_description"))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn badge_style_item() -> SettingItem {
     SettingItem::new(
         tr!("flow_indicator.tray_badge_style"),

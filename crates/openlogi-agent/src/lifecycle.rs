@@ -665,7 +665,7 @@ impl Running {
 
     async fn handle_shutdown_request(&mut self, request: ShutdownRequest) {
         match request {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             ShutdownRequest::TrayQuit { core_guard } => {
                 self.shut_down("tray quit", Some(core_guard)).await;
             }

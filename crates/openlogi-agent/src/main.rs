@@ -42,8 +42,10 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
 mod tray_battery;
+#[cfg(target_os = "linux")]
+mod tray_linux;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 mod virtual_keyboard;
@@ -52,6 +54,8 @@ use std::sync::Arc;
 
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::config::Config;
+#[cfg(not(target_os = "macos"))]
+use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 
 fn main() {
@@ -127,7 +131,8 @@ fn main() {
     // macOS hosts the menu-bar item, which needs an NSApplication run loop on
     // the process main thread — so the async core (orchestrator, IPC, watchers,
     // hook) runs on the tokio runtime on a dedicated thread, and the main thread
-    // runs AppKit. Elsewhere there is no tray, so just block on the core.
+    // runs AppKit. Elsewhere the core owns the main thread and the tray (if
+    // any) runs on its own helper thread.
     let device_io_signal = openlogi_hid::host::device_io_signal();
     #[cfg(target_os = "macos")]
     {
@@ -176,28 +181,50 @@ fn main() {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // Windows hosts the notification-area icon on its own win32 thread
-        // (message pump included); the async core keeps the main thread.
-        #[cfg(target_os = "windows")]
-        {
-            tray_windows::spawn(
-                config.app_settings.show_in_menu_bar,
-                config.app_settings.tray_battery,
-                config.app_settings.tray_badge_style,
-                Arc::clone(&observable),
-                shutdown_tx.clone(),
-            );
-            // Native resume notifications feed the same event seam as macOS
-            // and Linux: inventory wakes immediately and replays volatile
-            // settings on its settled authoritative snapshot.
-            resume_windows::register(device_io_signal.clone());
-        }
-        #[cfg(target_os = "linux")]
-        resume_linux::register(device_io_signal.clone());
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        drop(device_io_signal);
+        start_platform_services(&config, &observable, &shutdown_tx, &device_io_signal);
         runtime.block_on(lifecycle::run(config, shutdown_requests, observable));
     }
+}
+
+/// Start the platform helpers that run beside the async core on the non-macOS
+/// targets: the tray and the native resume listener.
+#[cfg(not(target_os = "macos"))]
+fn start_platform_services(
+    config: &Config,
+    observable: &Arc<ObservableState>,
+    shutdown_tx: &crate::shutdown::ShutdownRequestSender,
+    device_io_signal: &DeviceIoSignal,
+) {
+    // Windows hosts the notification-area icon on its own win32 thread
+    // (message pump included), and Linux hosts a StatusNotifierItem on its
+    // own D-Bus thread; the async core keeps the main thread.
+    #[cfg(target_os = "windows")]
+    {
+        tray_windows::spawn(
+            config.app_settings.show_in_menu_bar,
+            config.app_settings.tray_battery,
+            config.app_settings.tray_badge_style,
+            Arc::clone(observable),
+            shutdown_tx.clone(),
+        );
+        // Native resume notifications feed the same event seam as macOS
+        // and Linux: inventory wakes immediately and replays volatile
+        // settings on its settled authoritative snapshot.
+        resume_windows::register(device_io_signal.clone());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        tray_linux::spawn(
+            config.app_settings.show_in_menu_bar,
+            config.app_settings.tray_battery,
+            config.app_settings.tray_badge_style,
+            Arc::clone(observable),
+            shutdown_tx.clone(),
+        );
+        resume_linux::register(device_io_signal.clone());
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let _ = device_io_signal;
 }
 
 #[cfg(test)]
