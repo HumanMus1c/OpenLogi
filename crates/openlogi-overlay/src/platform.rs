@@ -6,6 +6,10 @@ mod placement;
 // Keep Windows geometry tests runnable on the host; only native.rs needs Win32.
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+/// The card's own X11 window positioning: GPUI exposes no way to move a
+/// window, and no window manager moves an override-redirect one.
+#[cfg(target_os = "linux")]
+pub(crate) mod x11;
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) use placement::{NoticePlacement, RingPlacement};

@@ -6,9 +6,13 @@
 //! snapshot the GUI reads, settings from the shared `config.toml` (polled by
 //! mtime), and the position from an overlay-owned file beside it.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::SystemTime;
 
+#[cfg(not(target_os = "windows"))]
+use gpui::WindowDecorations;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement,
@@ -16,6 +20,8 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowKind,
     WindowOptions, div, hsla, point, px, rgb, size, svg,
 };
+#[cfg(target_os = "linux")]
+use gpui::{Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
 use openlogi_core::config::{AppSettings, ConfigFile, FlowIndicatorDisplayMode};
 use openlogi_core::device::{
     BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceKind, battery_devices,
@@ -29,12 +35,18 @@ use tracing::{debug, warn};
 const CARD_WIDTH: f32 = 300.0;
 const PADDING_X: f32 = 16.0;
 const PADDING_Y: f32 = 14.0;
+const BORDER: f32 = 1.0;
 const RADIUS: f32 = 12.0;
-/// One row: the 22 px line, the 9 px gap, and the 6 px bar.
-const ROW_HEIGHT: f32 = 37.0;
-const ROW_GAP: f32 = 16.0;
+/// One row: the line box, the 9 px gap, and the 6 px bar.
+///
+/// The line box is pinned because GPUI's default is 1.618x the font size: the
+/// 16 px reading would render in a 26 px line and the card's height arithmetic
+/// would come up short, clipping the last row at the window's bottom edge.
+const LINE_HEIGHT: f32 = 26.0;
 const LINE_GAP: f32 = 9.0;
 const BAR_HEIGHT: f32 = 6.0;
+const ROW_HEIGHT: f32 = LINE_HEIGHT + LINE_GAP + BAR_HEIGHT;
+const ROW_GAP: f32 = 16.0;
 const ICON_SIZE: f32 = 18.0;
 const ICON_LANE: f32 = 22.0;
 const MARGIN: f32 = 24.0;
@@ -149,7 +161,10 @@ fn card_size(rows: usize) -> Size<gpui::Pixels> {
     let count = u16::try_from(rows).unwrap_or(u16::MAX);
     let rows_height = f32::from(count) * ROW_HEIGHT;
     let gaps = f32::from(count.saturating_sub(1)) * ROW_GAP;
-    size(px(CARD_WIDTH), px(PADDING_Y * 2.0 + rows_height + gaps))
+    size(
+        px(CARD_WIDTH),
+        px(BORDER * 2.0 + PADDING_Y * 2.0 + rows_height + gaps),
+    )
 }
 
 /// The bottom-right corner of `area`, inside the screen margin.
@@ -293,11 +308,45 @@ fn tone_color(tone: BatteryTone, pal: &Palette) -> Hsla {
 /// What the widget should show: disabled, empty, or a row set.
 struct FlowIndicatorView {
     rows: Vec<Row>,
+    /// The card's X11 window, when this session is X11.
+    #[cfg(target_os = "linux")]
+    x11: Option<crate::platform::x11::CardWindow>,
+    /// A move this process performs itself: an override-redirect card has no
+    /// window manager to move it.
+    #[cfg(target_os = "linux")]
+    manual_drag: Option<ManualDrag>,
+    /// A position the X11 window manager has not put the card at yet.
+    #[cfg(target_os = "linux")]
+    pending_place: Option<PendingPlace>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct ManualDrag {
+    /// Where the pointer was when the card was pressed, in root coordinates.
+    press_root: Point<gpui::Pixels>,
+    /// Where the card was when it was pressed.
+    origin: Point<gpui::Pixels>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct PendingPlace {
+    origin: Point<gpui::Pixels>,
+    attempts: u8,
 }
 
 impl FlowIndicatorView {
     fn new(rows: Vec<Row>) -> Self {
-        Self { rows }
+        Self {
+            rows,
+            #[cfg(target_os = "linux")]
+            x11: None,
+            #[cfg(target_os = "linux")]
+            manual_drag: None,
+            #[cfg(target_os = "linux")]
+            pending_place: None,
+        }
     }
 
     fn row_view(row: &Row, pal: &Palette) -> impl IntoElement + use<> {
@@ -314,6 +363,8 @@ impl FlowIndicatorView {
                     .flex_row()
                     .items_center()
                     .gap(px(8.0))
+                    .h(px(LINE_HEIGHT))
+                    .line_height(px(LINE_HEIGHT))
                     .child(
                         div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
                             svg()
@@ -379,19 +430,150 @@ impl FlowIndicatorView {
             .py(px(PADDING_Y))
             .rounded(px(RADIUS))
             .bg(pal.card)
-            .border_1()
+            .border(px(BORDER))
             .border_color(pal.border)
             .shadow_lg()
             .window_control_area(WindowControlArea::Drag)
+            .debug_selector(|| "flow-indicator-card".into())
             .children(self.rows.iter().map(|row| Self::row_view(row, pal)))
     }
 }
 
 impl Render for FlowIndicatorView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(unused_variables, reason = "the card's drag listeners are Linux-only")
+    )]
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = Palette::for_appearance(window.appearance());
-        div().size_full().child(self.card(&pal))
+        let root = div().size_full().child(self.card(&pal));
+        #[cfg(target_os = "linux")]
+        let root = Self::with_drag(root, cx);
+        root
     }
+}
+
+#[cfg(target_os = "linux")]
+impl FlowIndicatorView {
+    /// Linux delivers no window-control hit test, so the card's `Drag` area is
+    /// inert and a move has to start from these listeners.
+    fn with_drag(root: Div, cx: &mut Context<Self>) -> Div {
+        root.on_mouse_down(MouseButton::Left, cx.listener(Self::begin_drag))
+            .on_mouse_move(cx.listener(Self::drag_to_pointer))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::end_drag))
+    }
+
+    /// A press starts the move. Wayland hands it to the compositor; on X11
+    /// this process moves the window itself, in both modes: GPUI's
+    /// `start_window_move` sends `_NET_WM_MOVERESIZE` with button 0, and
+    /// xfwm4 drives its move loop from that button number.
+    fn begin_drag(&mut self, event: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        self.pending_place = None;
+        self.manual_drag = None;
+        if self.x11.is_some() {
+            let origin = window.bounds().origin;
+            self.manual_drag = Some(ManualDrag {
+                press_root: origin + event.position,
+                origin,
+            });
+        } else {
+            window.start_window_move();
+        }
+    }
+
+    fn drag_to_pointer(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.manual_drag else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.manual_drag = None;
+            return;
+        }
+        let Some(x11) = self.x11.as_ref() else {
+            return;
+        };
+        let scale = window.scale_factor();
+        let Some(root) = x11.pointer_root(scale) else {
+            return;
+        };
+        let desired = point(
+            drag.origin.x + root.x - drag.press_root.x,
+            drag.origin.y + root.y - drag.press_root.y,
+        );
+        let card = window.bounds().size;
+        let origin = cx.primary_display().map_or(desired, |display| {
+            clamp_origin(display.visible_bounds(), card, desired)
+        });
+        x11.move_to(origin, scale);
+    }
+
+    fn end_drag(&mut self, _event: &MouseUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.manual_drag = None;
+    }
+
+    /// Retry a placement the window manager has not made: the first request
+    /// can reach it before it manages the freshly created window.
+    fn settle_place(&mut self, window: &mut Window) {
+        const ATTEMPTS: u8 = 3;
+        let Some(pending) = self.pending_place else {
+            return;
+        };
+        let origin = window.bounds().origin;
+        let at_target = (origin.x - pending.origin.x).abs() <= px(1.0)
+            && (origin.y - pending.origin.y).abs() <= px(1.0);
+        if at_target || pending.attempts + 1 >= ATTEMPTS {
+            self.pending_place = None;
+            return;
+        }
+        if let Some(x11) = self.x11.as_ref() {
+            x11.move_to(pending.origin, window.scale_factor());
+        }
+        self.pending_place = Some(PendingPlace {
+            origin: pending.origin,
+            attempts: pending.attempts + 1,
+        });
+    }
+
+    /// Take the window's X11 handle and put the card at `origin`: a window
+    /// manager places a managed window itself, so the request is retried until
+    /// it sticks.
+    fn place_on_x11(&mut self, window: &mut Window, origin: Point<gpui::Pixels>) {
+        self.x11 = crate::platform::x11::CardWindow::new(window);
+        let Some(x11) = self.x11.as_ref() else {
+            return;
+        };
+        x11.move_to(origin, window.scale_factor());
+        if !x11.is_override_redirect() {
+            self.pending_place = Some(PendingPlace {
+                origin,
+                attempts: 0,
+            });
+        }
+    }
+}
+
+impl FlowIndicatorView {
+    /// A freshly opened card: name it, and on X11 hand the window to the seam
+    /// that restores its position.
+    #[cfg(target_os = "linux")]
+    fn on_opened(&mut self, window: &mut Window, origin: Point<gpui::Pixels>) {
+        // The task list names the window after this; without it the card
+        // surfaces as "Untitled window".
+        window.set_window_title("OpenLogi - Flow Indicator");
+        self.place_on_x11(window, origin);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "the Linux version hands the window to the X11 seam"
+    )]
+    fn on_opened(&mut self, _window: &mut Window, _origin: Point<gpui::Pixels>) {}
 }
 
 /// What the widget task receives: a new agent snapshot, new config, or the
@@ -414,7 +596,13 @@ pub(crate) struct FlowIndicator {
     devices: Vec<BatteryDevice>,
     window: Option<WindowHandle<FlowIndicatorView>>,
     window_mode: Option<FlowIndicatorDisplayMode>,
+    /// Whether the open window is a Wayland layer surface, which has no
+    /// position the compositor reports or restores.
+    layer_shell: bool,
     last_saved_origin: Option<Point<gpui::Pixels>>,
+    /// Set when the user closed the card window: observations must not bring
+    /// it back until the settings change.
+    dismissed: Rc<Cell<bool>>,
 }
 
 impl FlowIndicator {
@@ -424,7 +612,9 @@ impl FlowIndicator {
             devices: Vec::new(),
             window: None,
             window_mode: None,
+            layer_shell: false,
             last_saved_origin: None,
+            dismissed: Rc::new(Cell::new(false)),
         }
     }
 
@@ -435,10 +625,22 @@ impl FlowIndicator {
                 self.sync(cx);
             }
             Command::Settings(settings) => {
+                if settings != self.settings {
+                    // A settings change is the user asking for the card again;
+                    // retire a window they closed first so it cannot pass for
+                    // the live one.
+                    self.refresh_dismissed(cx);
+                    self.dismissed.set(false);
+                }
                 self.settings = settings;
                 self.sync(cx);
             }
-            Command::Tick => self.persist_position(cx),
+            Command::Tick => {
+                self.refresh_dismissed(cx);
+                #[cfg(target_os = "linux")]
+                self.settle_place(cx);
+                self.persist_position(cx);
+            }
         }
     }
 
@@ -446,6 +648,16 @@ impl FlowIndicator {
     /// config poll: the OS owns the drag, so there is no drag-end event to
     /// hang the write on and a per-frame write would be wasteful.
     fn persist_position(&mut self, cx: &mut App) {
+        // A layer surface is placed by its anchors, not by a position.
+        if self.layer_shell {
+            return;
+        }
+        // A card the window manager has not placed yet must not overwrite the
+        // position it is being placed at.
+        #[cfg(target_os = "linux")]
+        if self.placement_pending(cx) {
+            return;
+        }
         let origin = self.window.as_ref().and_then(|handle| {
             handle
                 .update(cx, |_, window, _| window.bounds().origin)
@@ -459,6 +671,27 @@ impl FlowIndicator {
         }
         save_position(origin);
         self.last_saved_origin = Some(origin);
+    }
+
+    /// Whether the window manager has yet to put the card where it was asked.
+    #[cfg(target_os = "linux")]
+    fn placement_pending(&self, cx: &mut App) -> bool {
+        self.window
+            .as_ref()
+            .and_then(|handle| {
+                handle
+                    .update(cx, |view, _, _| view.pending_place.is_some())
+                    .ok()
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn settle_place(&mut self, cx: &mut App) {
+        let Some(handle) = self.window.as_ref() else {
+            return;
+        };
+        let _ = handle.update(cx, |view, window, _| view.settle_place(window));
     }
 
     fn rows(&self) -> Vec<Row> {
@@ -475,7 +708,46 @@ impl FlowIndicator {
         .collect()
     }
 
+    /// Retire a card the user closed from its task-list button.
+    ///
+    /// X11 destroys the window then, but GPUI keeps the removed window (and
+    /// this view) in its map — the close callback never lands — so the only
+    /// evidence is the window no longer answering on the X11 connection.
+    #[cfg(target_os = "linux")]
+    fn refresh_dismissed(&mut self, cx: &mut App) {
+        let Some(handle) = self.window.as_ref() else {
+            return;
+        };
+        let closed = handle
+            .update(cx, |view, window, _| {
+                let gone = view.x11.as_ref().is_some_and(|x11| !x11.is_alive());
+                if gone {
+                    window.remove_window();
+                }
+                gone
+            })
+            .unwrap_or(false);
+        if closed {
+            self.window = None;
+            self.window_mode = None;
+            self.layer_shell = false;
+            self.dismissed.set(true);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "only the X11 window can be closed behind the overlay's back"
+    )]
+    fn refresh_dismissed(&mut self, _cx: &mut App) {}
+
     fn sync(&mut self, cx: &mut App) {
+        self.refresh_dismissed(cx);
+        if self.dismissed.get() {
+            self.close(cx);
+            return;
+        }
         let rows = self.rows();
         if !self.settings.enabled || rows.is_empty() {
             self.close(cx);
@@ -500,12 +772,13 @@ impl FlowIndicator {
                 .ok()
         });
         self.close(cx);
-        self.open(rows, origin, cx);
+        self.open(&rows, origin, cx);
     }
 
     fn close(&mut self, cx: &mut App) {
         if let Some(handle) = self.window.take() {
-            if let Ok(origin) = handle.update(cx, |_, window, _| window.bounds().origin)
+            if !self.layer_shell
+                && let Ok(origin) = handle.update(cx, |_, window, _| window.bounds().origin)
                 && self.last_saved_origin != Some(origin)
             {
                 save_position(origin);
@@ -514,26 +787,42 @@ impl FlowIndicator {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
         self.window_mode = None;
+        self.layer_shell = false;
     }
 
-    fn open(&mut self, rows: Vec<Row>, remembered: Option<Point<gpui::Pixels>>, cx: &mut App) {
+    fn open(&mut self, rows: &[Row], remembered: Option<Point<gpui::Pixels>>, cx: &mut App) {
         let card = card_size(rows.len());
         let origin = resolve_origin(cx, remembered, card);
-        let options = window_options(self.settings.display_mode, Bounds::new(origin, card));
-        let opened = cx.open_window(options, |_, cx| cx.new(|_| FlowIndicatorView::new(rows)));
-        let handle = match opened {
-            Ok(handle) => handle,
-            Err(error) => {
-                warn!(%error, "Flow Indicator: could not open its window");
-                return;
-            }
-        };
+        let bounds = Bounds::new(origin, card);
+        // A Wayland compositor places ordinary windows itself, so ask for a
+        // layer-shell surface first (borderless, anchored bottom-right). An
+        // X11 session, or a compositor without wlr-layer-shell, gets the
+        // ordinary window.
+        let attempts = window_attempts(self.settings.display_mode, bounds);
+        let mut layer_shell = false;
+        let opened = crate::platform::open_first(
+            attempts.into_iter().map(|options| vec![options]).collect(),
+            |options| {
+                layer_shell = is_layer_shell(&options.kind);
+                cx.open_window(options, |_, cx| {
+                    cx.new(|_| FlowIndicatorView::new(rows.to_vec()))
+                })
+            },
+        );
         let mode = self.settings.display_mode;
-        if let Err(error) = handle.update(cx, |_, window, _| apply_display_mode(window, mode)) {
-            debug!(%error, "Flow Indicator: could not apply its display mode");
+        let Some(handle) = opened else {
+            return;
+        };
+        let configured = handle.update(cx, |view, window, _| {
+            apply_display_mode(window, mode);
+            view.on_opened(window, origin);
+        });
+        if let Err(error) = configured {
+            debug!(%error, "Flow Indicator: could not configure its window");
         }
         self.window = Some(handle);
         self.window_mode = Some(mode);
+        self.layer_shell = layer_shell;
     }
 }
 
@@ -573,11 +862,74 @@ fn window_options(mode: FlowIndicatorDisplayMode, bounds: Bounds<gpui::Pixels>) 
         is_movable: true,
         is_resizable: false,
         is_minimizable: false,
+        // The card draws its own chrome; a compositor that decorates
+        // server-side (KWin, labwc) must leave it borderless. X11 honours
+        // this through `_MOTIF_WM_HINTS`, Wayland through xdg-decoration.
+        window_decorations: Some(WindowDecorations::Client),
         window_background: WindowBackgroundAppearance::Transparent,
         app_id: Some("openlogi-flow-indicator".to_string()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         ..WindowOptions::default()
     }
+}
+
+/// Window options to try in order for the card.
+fn window_attempts(
+    mode: FlowIndicatorDisplayMode,
+    bounds: Bounds<gpui::Pixels>,
+) -> Vec<WindowOptions> {
+    #[cfg(target_os = "linux")]
+    if let Some(options) = layer_shell_window_options(mode, bounds) {
+        return vec![options, window_options(mode, bounds)];
+    }
+    vec![window_options(mode, bounds)]
+}
+
+/// The card as a Wayland layer surface: borderless, anchored bottom-right of
+/// the output rather than placed by the compositor.
+#[cfg(target_os = "linux")]
+fn layer_shell_window_options(
+    mode: FlowIndicatorDisplayMode,
+    bounds: Bounds<gpui::Pixels>,
+) -> Option<WindowOptions> {
+    use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
+
+    if gpui::guess_compositor() != "Wayland" || crate::platform::layer_shell_refused() {
+        return None;
+    }
+    // Normal must stay coverable by other windows, which is the bottom layer;
+    // topmost sits above them in the top layer.
+    let layer = match mode {
+        FlowIndicatorDisplayMode::Normal => Layer::Bottom,
+        FlowIndicatorDisplayMode::Topmost => Layer::Top,
+    };
+    Some(WindowOptions {
+        kind: WindowKind::LayerShell(LayerShellOptions {
+            namespace: "openlogi-flow-indicator".to_string(),
+            layer,
+            anchor: Anchor::BOTTOM | Anchor::RIGHT,
+            margin: Some((px(0.0), px(MARGIN), px(MARGIN), px(0.0))),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            ..LayerShellOptions::default()
+        }),
+        titlebar: None,
+        focus: false,
+        show: true,
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id: Some("openlogi-flow-indicator".to_string()),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        ..WindowOptions::default()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn is_layer_shell(kind: &WindowKind) -> bool {
+    matches!(kind, WindowKind::LayerShell(_))
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn is_layer_shell(_kind: &WindowKind) -> bool {
+    false
 }
 
 #[cfg(target_os = "windows")]
@@ -632,25 +984,27 @@ mod tests {
 
     #[test]
     fn the_card_height_follows_the_row_count() {
-        assert_eq!(f32::from(card_size(1).height), 28.0 + 37.0);
+        // Two 1 px borders, the 14 px padding top and bottom, 26+9+6 per row,
+        // and the 16 px gap between rows.
+        assert_eq!(f32::from(card_size(1).height), 2.0 + 28.0 + 41.0);
         assert_eq!(
             f32::from(card_size(3).height),
-            28.0 + 3.0 * 37.0 + 2.0 * 16.0
+            2.0 + 28.0 + 3.0 * 41.0 + 2.0 * 16.0
         );
         assert_eq!(
             f32::from(card_size(5).height),
-            28.0 + 5.0 * 37.0 + 4.0 * 16.0
+            2.0 + 28.0 + 5.0 * 41.0 + 4.0 * 16.0
         );
     }
 
     #[test]
     fn a_restored_position_is_clamped_to_the_screen() {
         let area = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
-        let card = size(px(300.0), px(171.0));
+        let card = size(px(300.0), px(185.0));
 
         assert_eq!(
             clamp_origin(area, card, point(px(5000.0), px(5000.0))),
-            point(px(1620.0), px(909.0))
+            point(px(1620.0), px(895.0))
         );
         assert_eq!(
             clamp_origin(area, card, point(px(-50.0), px(-50.0))),
@@ -684,5 +1038,34 @@ mod tests {
             .read_with(cx, |view, _| view.rows.len())
             .expect("window is live");
         assert_eq!(shown, 1);
+    }
+
+    /// The window is sized from `card_size`, so the laid-out card must be
+    /// exactly that tall; anything taller is clipped at the window's edge,
+    /// losing the bottom row's bar and the card's corners.
+    #[gpui::test]
+    fn the_card_fits_the_window_height_it_is_given(cx: &mut gpui::TestAppContext) {
+        use super::{FlowIndicatorView, Row};
+        use openlogi_core::device::{BatteryTone, DeviceKind};
+
+        let rows = ["Direct Mouse", "Performance Mouse", "RGB Keyboard"]
+            .into_iter()
+            .map(|name| Row {
+                name: name.into(),
+                value: "55%".into(),
+                fill: Some(55),
+                tone: BatteryTone::Normal,
+                online: true,
+                kind: DeviceKind::Mouse,
+            })
+            .collect::<Vec<_>>();
+        let window = card_size(rows.len());
+        let (_view, cx) = cx.add_window_view(|_, _| FlowIndicatorView::new(rows));
+        cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(400.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let card = cx
+            .debug_bounds("flow-indicator-card")
+            .expect("the card renders");
+        assert_eq!(card.size, window, "the card must fit its window");
     }
 }

@@ -9,7 +9,7 @@
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FontWeight, Hsla, IntoElement,
     ParentElement, Render, Size, Styled, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, div, px, svg,
+    WindowDecorations, WindowHandle, WindowKind, WindowOptions, div, px, svg,
 };
 use openlogi_core::device::LockKey;
 use openlogi_ipc::LockKeyChange;
@@ -129,6 +129,7 @@ fn window_options(cx: &mut App) -> WindowOptions {
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
+        window_decorations: Some(WindowDecorations::Client),
         window_background: WindowBackgroundAppearance::Transparent,
         app_id: Some("openlogi-lock-key-osd".to_string()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),

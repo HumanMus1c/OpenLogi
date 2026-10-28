@@ -2,7 +2,8 @@
 
 use gpui::{
     App, Bounds, Context, IntoElement, ParentElement, Render, Size, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, px,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div,
+    px,
 };
 use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_ipc::BacklightObservation;
@@ -79,6 +80,7 @@ pub(crate) fn window_options(cx: &mut App) -> WindowOptions {
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
+        window_decorations: Some(WindowDecorations::Client),
         window_background: WindowBackgroundAppearance::Transparent,
         app_id: Some("openlogi-backlight-osd".to_string()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),

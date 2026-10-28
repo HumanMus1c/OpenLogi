@@ -8,8 +8,8 @@
 use gpui::{
     Bounds, Context, Div, Entity, Hsla, InteractiveElement, IntoElement, MouseMoveEvent,
     ParentElement, Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions,
-    div, point, prelude::FluentBuilder as _, px, svg,
+    Styled, Subscription, Window, WindowBackgroundAppearance, WindowDecorations, WindowId,
+    WindowKind, WindowOptions, div, point, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
@@ -344,6 +344,7 @@ pub(crate) fn ring_window_options() -> WindowOptions {
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
+        window_decorations: Some(WindowDecorations::Client),
         window_background: WindowBackgroundAppearance::Transparent,
         app_id: Some(RING_APP_ID.to_string()),
         ..WindowOptions::default()

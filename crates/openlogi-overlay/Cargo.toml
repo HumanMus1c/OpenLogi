@@ -52,6 +52,13 @@ objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", 
 # NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).
 block2 = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The card's own X11 connection: GPUI exposes no way to move a window, and a
+# window manager neither honors the origin GPUI creates one at nor moves an
+# override-redirect window at all.
+raw-window-handle = "0.6"
+x11rb = "0.13"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }

@@ -15,7 +15,7 @@ use std::rc::Rc;
 use gpui::{
     AppContext as _, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
     Pixels, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
-    WindowBackgroundAppearance, WindowKind, WindowOptions, div, px, size, svg,
+    WindowBackgroundAppearance, WindowDecorations, WindowKind, WindowOptions, div, px, size, svg,
 };
 use openlogi_ipc::{Notice, NoticeKind};
 use openlogi_ui::action_icons::LOW_BATTERY_ICON;
@@ -153,6 +153,7 @@ pub(crate) fn notice_window_options() -> WindowOptions {
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
+        window_decorations: Some(WindowDecorations::Client),
         window_background: WindowBackgroundAppearance::Transparent,
         app_id: Some(NOTICE_APP_ID.to_string()),
         ..WindowOptions::default()

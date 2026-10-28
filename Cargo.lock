@@ -601,7 +601,7 @@ dependencies = [
  "log",
  "num-rational",
  "num-traits",
- "pastey",
+ "pastey 0.1.1",
  "rayon",
  "thiserror 2.0.18",
  "v_frame",
@@ -1780,7 +1780,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2056,7 +2056,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4208,7 +4208,7 @@ version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a1886916523694cd6ea3d175f03a1e5010699a2a4cc13696d83d7bea1d80638"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4229,6 +4229,21 @@ checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
  "bitflags 2.13.1",
  "libc",
+]
+
+[[package]]
+name = "ksni"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bcc1cb43797140f74b711f1c4a49f48a7a7429f211c5fb78264e7bcd1e99caf"
+dependencies = [
+ "arc-swap",
+ "crossbeam-queue",
+ "futures-util",
+ "pastey 0.2.3",
+ "serde",
+ "tokio",
+ "zbus",
 ]
 
 [[package]]
@@ -4907,7 +4922,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5551,6 +5566,7 @@ dependencies = [
  "embed-resource",
  "futures",
  "interprocess",
+ "ksni",
  "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -5568,6 +5584,7 @@ dependencies = [
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",
+ "png 0.18.1",
  "rust-i18n",
  "serde_json",
  "succession",
@@ -5935,6 +5952,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]
@@ -6053,6 +6071,12 @@ name = "pastey"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "path-absolutize"
@@ -7130,7 +7154,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7197,7 +7221,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8208,7 +8232,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8407,6 +8431,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -9601,7 +9626,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10676,6 +10701,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",
