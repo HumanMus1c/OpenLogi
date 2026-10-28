@@ -6,15 +6,22 @@ The macOS menu-bar readout (title beside the glyph, capped device rows, live
 `tray_battery` toggle) is implemented but not yet compiled or run on macOS
 hardware. Windows live checks done on a 125%-DPI dark/light taskbar: live
 tooltip, badge render, theme-change refresh, and Explorer-restart re-add.
-Linux: the full non-desktop workspace compiles and passes Clippy/tests on
-WSLg (Ubuntu 26.04, Wayland + X11); the overlay connects to the mock agent,
-opens a window on both backends, and persists its position. Pixel-level
-verification needs a native Linux desktop — WSLg's RDP compositor does not
-show the per-pixel-alpha pop-up content. Remaining: macOS hardware
-verification, native-Linux desktop verification (drag, real-compositor
-z-order), and the 100/150/200% DPI matrix beyond the observed 125%. GPUI
-exposes no bottom-most window layer, so there is no Desktop display mode;
-the card's position lives in `flow-indicator.toml` beside `config.toml`.
+Linux (2026-10-28) was verified in real compositors — an XFCE/X11 session
+over xrdp and a nested labwc (wlroots) inside WSLg, the latter because the
+VM has no `/dev/dri` and WSLg's copy mode only presents software (pixman)
+surfaces. The card renders, updates live, closes on the settings switch,
+shows offline rows with their last reading and hides when empty; Normal is
+coverable and Topmost stays above a terminal. Wayland now uses a layer
+surface: borderless, anchored bottom-right (24 px), Normal on the bottom
+layer and Topmost on the top layer. X11 and the plain-window fallback are
+borderless through client-side decorations. Still missing on Linux: card
+drag (GPUI has no window-control-area drag on Wayland or X11) and position
+restore (the WM/compositor places ordinary windows; layer surfaces are
+anchored). Remaining: macOS hardware verification, GNOME/KDE desktops
+(GNOME has no wlr-layer-shell; the plain fallback applies), the 100/150/200%
+DPI matrix beyond the observed 125%, and drag. GPUI exposes no bottom-most
+window layer, so there is no Desktop display mode; the card's position lives
+in `flow-indicator.toml` beside `config.toml`.
 
 The visual reference is **vigil-watt** (MIT): its tray icon renders the lowest
 battery percentage as a coloured badge, its tray menu lists device readings, and
@@ -168,7 +175,9 @@ The first implementation uses a vigil-watt-style badge:
 - macOS: the status item can show a title (`87%` / `⚡`); no bitmap text
   renderer is needed. This is a follow-up PR so the Windows renderer does not
   block the menu-bar side.
-- Linux: no tray surface; only the widget applies.
+- Linux: a StatusNotifierItem tray (KDE natively; GNOME via the AppIndicator
+  extension; XFCE via an indicator plugin) plus the widget. Without an SNI
+  host the tray is simply absent; the widget still applies.
 
 ### 3.3 Floating widget
 
@@ -504,6 +513,150 @@ from the real window; a headless render is not visual proof.
 - **OpenLogi:** MIT/Apache-2.0. The new presentation code follows the workspace
   license; no GPL-only asset enters the tree.
 - No new system permission, elevation, network request, or telemetry is needed.
+
+## 12. Linux verification log (2026-10-28)
+
+Environment: Ubuntu 26.04 under WSL2. Wayland was tested in a nested labwc
+0.9.3 inside WSLg (`WLR_BACKENDS=wayland WLR_RENDERER=pixman`; the VM has no
+`/dev/dri`, so WSLg runs in copy mode and only software surfaces are visible
+in the host window). X11 was tested over xrdp into XFCE (`DISPLAY=:10`,
+xrdp on 3390; `PrivateTmp` gives the Xorg socket a writable `/tmp`). Both
+runs used the mock agent and the overlay; screenshots came from inside the
+compositor (`grim`) and the X11 root (`scrot`).
+
+Results:
+
+- Rendering: 3 and 4 rows, percentages, bars, charging bolt, 100% green,
+  offline rows with their last reading and the `Offline` tag, and the
+  low-battery notice. Mock console changes reach the card live.
+  `flow_indicator = false` closes the window; restoring it reopens.
+- Empty state: every device offline with `flow_indicator_show_offline =
+  false` hides the window.
+- Normal vs Topmost: X11 Normal is a managed, coverable window and Topmost
+  is override-redirect above a terminal. Wayland layer-shell Normal (bottom
+  layer) is covered by a terminal; Topmost (top layer) stays above it.
+- Drag (before the fix below): dragging the card body moves nothing on
+  either backend. Before the decoration change an X11/labwc title-bar drag
+  moved the window; with client-side decorations there is no title bar, so
+  the card could not be moved on Linux at all.
+- Position (before the fix below): an X11 title-bar move updates
+  `flow-indicator.toml`, but a restart opens at the WM's placement and the
+  file is overwritten — restore does not round-trip. A layer surface has no
+  position; its anchor decides.
+
+### X11 drag and position restore (2026-10-28, second round)
+
+The X11 half of gaps 2 and 3 is fixed by an overlay-owned second X11
+connection (`crates/openlogi-overlay/src/platform/x11.rs`). GPUI's move entry
+point is unusable here: `Window::start_window_move` sends
+`_NET_WM_MOVERESIZE` with button 0, and xfwm4 (4.20, read from
+`src/netwm.c:clientNetMoveResize`) drives its move loop from that button
+number, so the drag never starts. `on_hit_test_window_control` stays a no-op
+on both X11 and Wayland. The overlay therefore moves the window itself with
+`ConfigureWindow` on every pointer motion, which works for both kinds: a
+managed window becomes a `ConfigureRequest` the WM applies (xfwm4 honors it
+for a client's own window) and an override-redirect `PopUp` simply moves.
+The same request performs position restore after open, retried on the
+one-second tick because the first request can reach the WM before it manages
+the freshly created window; saving is paused while a placement is pending so
+the WM's own placement cannot overwrite the saved position.
+
+Verified live on xrdp/XFCE (1920×1080, scale 1):
+
+- Normal: first run opens at the requested bottom-right (1596, 885) instead
+  of the WM's centred placement; a pointer drag of (+150, +100) lands exactly
+  (+150, +100); `flow-indicator.toml` follows; a restart restores the dragged
+  position.
+- Topmost: the window is override-redirect; the same drag and restore both
+  round-trip.
+- Taskbar: the managed card is a normal task-list window titled
+  `OpenLogi - Flow Indicator`, so it can be minimized, moved between
+  workspaces and closed like any other window. Closing it retires the card
+  until a settings change: X11 destroys the window without the overlay's
+  close callback ever running (GPUI keeps the removed window in its map), so
+  the overlay notices the closed window on its one-second tick by asking the
+  X11 connection (`BadWindow`) and removes the stale window itself. A card in
+  Topmost mode is override-redirect and therefore never gets a task-list
+  button.
+- Wayland (layer shell) is unchanged by this: the seam only matches an Xcb
+  raw handle, and the Wayland path still calls `start_window_move`, which is
+  a no-op on a layer surface. Wayland drag interaction remains unverified
+  (needs a real pointer in the nested compositor).
+
+Gaps found, and their status after the 2026-10-28 fix:
+
+1. **Server-side title bars** (KWin/labwc SSD, X11 WM frames) — fixed by
+   requesting client-side decorations for the card and the other overlay
+   windows; X11 applies `_MOTIF_WM_HINTS`, Wayland sets xdg-decoration.
+2. **No card drag on Linux** — fixed on X11 (both display modes); Wayland
+   layer surfaces are anchored by the protocol and stay fixed, and an
+   ordinary Wayland toplevel gets the compositor's `_move`. Wayland
+   interaction unverified.
+3. **Position memory** — fixed on X11 (saved position survives a restart in
+   both modes). Layer surfaces have no position to save; an ordinary Wayland
+   toplevel is placed by the compositor.
+4. **Topmost** — fixed on Wayland with `Layer::Top`; X11 already worked
+   through `WindowKind::PopUp` (override-redirect). A compositor without
+   wlr-layer-shell falls back to an ordinary window, where topmost remains
+   unimplemented.
+
+### Card clipped at the window's bottom edge (2026-10-28, third round)
+
+`card_size` assumed a 22 px row line (the icon lane) and no border, but
+GPUI's default text line height is 1.618x the font size: the 16 px reading
+lays out in a 26 px line. Three rows are 185 px tall while the window was
+171 px, so the window edge clipped the last row's bar and the bottom padding.
+This was not XFCE-specific; it applied wherever the card was drawn.
+
+The card's arithmetic now adds the 26 px line box and both 1 px borders, and
+`row_view` pins the line box with `line_height`/`height` so the layout and
+`card_size` cannot drift. A `gpui::test` renders three rows and asserts the
+laid-out card height equals `card_size`; xrdp/XFCE screenshots before and
+after the fix show 1 px versus 14 px of card below the last bar (window
+300x171 -> 300x185).
+
+### The tray on Linux (2026-10-28, fourth round)
+
+The plan's last platform piece is the tray itself. Linux now hosts the same
+readout as a StatusNotifierItem (`crates/openlogi-agent/src/tray_linux.rs`,
+via `ksni`): one implementation for X11 and Wayland, because the protocol is
+D-Bus-only, and the multi-size `IconPixmap` bitmaps the badge already
+produces for Windows are what every SNI host renders. A desktop without an
+SNI host is a soft failure — the service waits and registers when a watcher
+appears.
+
+Verified live in the xrdp/XFCE session. XFCE 4.20's `systray` plugin ships an
+SNI watcher (the `wrapper-2.0` helper owns `org.kde.StatusNotifierWatcher`),
+so this desktop needs no indicator bridge:
+
+- Registration and rendering: the real agent (empty inventory) registers and
+  shows the brand icon; a throwaway example feeding one synthetic 64% device
+  renders the blue circle badge in the panel, through the same pixmap path
+  Windows uses.
+- Left click delivers `Activate`. The bus shows the panel's SNI host calling
+  `Activate` on the item, and the handler spawns the GUI found next to the
+  tray binary — the window mapped on the X11 desktop. An earlier "clicks do
+  nothing" reading was two artifacts stacked: the icon's hit area is the
+  roughly 22 px systray slot (a click a few pixels right lands on empty
+  panel and opens the panel's own menu), and a harness without a tracing
+  subscriber hides `open_gui`'s warnings.
+- Right click delivers the menu. The panel renders the dbusmenu with the
+  disabled device row, Show Main Window, and Quit OpenLogi
+  (`AboutToShowGroup`/`EventGroup` on the wire), and activating an entry
+  runs its callback.
+- Menu Quit ends the agent gracefully — after a fix. The shared
+  `request_tray_quit` blocked its caller until the core finished teardown,
+  which is a panic inside the ksni runtime ("Cannot block the current
+  thread from within a runtime"); the request itself was already delivered,
+  so the shutdown completed and only the panic line betrayed the wrong
+  shape. The macOS/Windows form keeps blocking (their callbacks own plain
+  OS threads); the Linux form hands the request over and returns, leaving
+  the lifecycle's exit path in charge. Re-verified live: clean exit, no
+  panic, and the item leaves the watcher.
+
+Hosts without an environment here (KDE, GNOME + its AppIndicator extension,
+waybar) remain unverified; CONFIGURATION.md now states the host requirement
+instead of claiming Linux has no tray.
 
 ## Appendix: vigil-watt reference
 
