@@ -121,6 +121,7 @@ struct TrayView {
 
 impl TrayView {
     fn build(summary: &TrayReadout, battery: bool, style: TrayBadgeStyle) -> Self {
+        let style = desktop_style(style);
         if !battery {
             return Self {
                 tooltip: String::new(),
@@ -344,6 +345,66 @@ fn run(
     });
 }
 
+/// The style the running desktop can actually render.
+///
+/// XFCE's systray scales every tray item into the panel's icon slot, so the
+/// wide face is unreadable there and falls back to the plain badge. Other
+/// desktops keep the configured style — the wide face stays an opt-in
+/// experiment, confined to the environments that can show it.
+fn supported_style(style: TrayBadgeStyle, desktop: &str) -> TrayBadgeStyle {
+    let xfce = desktop.to_ascii_lowercase().contains("xfce");
+    if style == TrayBadgeStyle::Wide && xfce {
+        TrayBadgeStyle::Circle
+    } else {
+        style
+    }
+}
+
+/// [`supported_style`] against the session's desktop, read once.
+fn desktop_style(style: TrayBadgeStyle) -> TrayBadgeStyle {
+    static DESKTOP: OnceLock<String> = OnceLock::new();
+    static FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
+    let desktop = DESKTOP.get_or_init(desktop_name);
+    let supported = supported_style(style, desktop);
+    if supported != style && FALLBACK_LOGGED.set(()).is_ok() {
+        info!(
+            desktop = %desktop,
+            "this desktop scales tray items into the panel's icon slot — using the plain tray badge instead of the wide face"
+        );
+    }
+    supported
+}
+
+/// The session's desktop name. The environment is the primary signal; an
+/// agent started outside the desktop's own environment (a terminal, a user
+/// unit) still finds XFCE through its panel process, which is the SNI host
+/// whose icon slot the style has to fit.
+fn desktop_name() -> String {
+    let from_env = [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ]
+    .iter()
+    .find_map(|name| std::env::var(name).ok())
+    .filter(|value| !value.trim().is_empty());
+    if let Some(desktop) = from_env {
+        return desktop;
+    }
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    if system.processes().values().any(|process| {
+        process
+            .name()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("xfce4-panel")
+    }) {
+        return "XFCE".to_owned();
+    }
+    String::new()
+}
+
 /// Render `badge` at `size` as the ARGB32 pixmap SNI expects.
 fn badge_icon(badge: Badge, size: u16, style: TrayBadgeStyle) -> ksni::Icon {
     let rgba = render_badge(badge, u32::from(size), LIGHT_PANEL, style);
@@ -509,7 +570,8 @@ mod tests {
     use openlogi_ipc::InventoryHealth;
 
     use super::{
-        ICON_SIZES, OpenLogiTray, TrayCommand, WIDE_HEIGHTS, argb_icon, badge_icon, decode_png_icon,
+        ICON_SIZES, OpenLogiTray, TrayCommand, WIDE_HEIGHTS, argb_icon, badge_icon,
+        decode_png_icon, supported_style,
     };
     use crate::tray_readout::Badge;
     use openlogi_core::config::TrayBadgeStyle;
@@ -593,6 +655,32 @@ mod tests {
         let circle = tray.icon_pixmap()[0].data.clone();
         tray.apply(TrayCommand::BadgeStyle(TrayBadgeStyle::RoundedSquare));
         assert_ne!(tray.icon_pixmap()[0].data, circle);
+    }
+
+    #[test]
+    fn xfce_keeps_the_plain_badge_instead_of_the_wide_face() {
+        use openlogi_core::config::TrayBadgeStyle;
+
+        for desktop in ["XFCE", "XFCE:GNOME", "xfce"] {
+            assert_eq!(
+                supported_style(TrayBadgeStyle::Wide, desktop),
+                TrayBadgeStyle::Circle,
+                "{desktop}"
+            );
+        }
+        // The square badge is a plain icon and stays as configured.
+        assert_eq!(
+            supported_style(TrayBadgeStyle::RoundedSquare, "XFCE"),
+            TrayBadgeStyle::RoundedSquare
+        );
+        // Desktops that can keep the aspect ratio keep the wide face.
+        for desktop in ["ubuntu:GNOME", "KDE", "sway"] {
+            assert_eq!(
+                supported_style(TrayBadgeStyle::Wide, desktop),
+                TrayBadgeStyle::Wide,
+                "{desktop}"
+            );
+        }
     }
 
     #[test]

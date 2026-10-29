@@ -684,6 +684,17 @@ instead of claiming Linux has no tray.
   the setting said. Verified live: the agent logs `helper started`, the card
   renders with the demo devices, and switching `flow_indicator` off/on closes
   and reopens it within the one-second config poll.
+- **Names follow the surfaces.** The low-battery notice uses the persisted
+  product name (custom name first, then the settings app's name, then the
+  firmware codename) in both the production orchestrator and the demo mock.
+  The canonical demo's never-online mouse now carries a real product codename
+  (`MX Anywhere 3S`) instead of a synthetic one, so its offline row is named
+  like the rest.
+- **XFCE keeps the plain badge.** `tray_badge_style = "wide"` is confined to
+  desktops that can show it: when the session is XFCE (the environment, or an
+  `xfce4-panel` host process when the agent was started outside the desktop's
+  environment) the tray falls back to the circle badge, which is what XFCE's
+  icon-slot sizing can display.
 - **Wide Linux face** (`tray_badge_style = "wide"`, config file only): one
   SNI pixmap carries the name, a progress bar, and the percentage
   (142x22 px at the panel slot, 284x44 for 2x). The face itself renders as
