@@ -713,6 +713,34 @@ instead of claiming Linux has no tray.
   hosts that keep a wide item's aspect ratio at a usable size (KDE, waybar)
   remain untested.
 
+### GNOME appearance and the tray label (2026-10-30)
+
+- **The card follows the desktop style, including a late settings portal.**
+  GPUI reads `org.freedesktop.appearance color-scheme` once when its Linux
+  platform client starts. The overlay autostarts with the session, and in the
+  headless GNOME 50 session `xdg-desktop-portal` was D-Bus-activated almost an
+  hour later, so that read failed and the card kept the light palette for the
+  whole session. A later style change only reached GPUI's window state and
+  nothing repainted the card. `crates/openlogi-overlay/src/appearance.rs` now
+  owns the decision on Linux: a watcher retries the portal read (2 s, 30
+  attempts per connection) and then follows `SettingChanged`; the card's
+  one-second tick repaints it when the mode flips. macOS/Windows keep the
+  window's own appearance and now repaint through
+  `observe_window_appearance`. Verified in the GNOME session with Mutter
+  ScreenCast captures: dark card in a dark session, light card after a live
+  switch to light and dark again after switching back; an overlay launched
+  after the portal was up opened dark, the login-launched one stayed light.
+- **GNOME shows no SNI tooltips.** The AppIndicator extension's README states
+  tooltips are deliberately unimplemented, so hovering the badge never shows
+  the device tip there (the `ToolTip` property is still served for hosts that
+  render it, e.g. KDE). The extension does render the Ayatana extension
+  property `XAyatanaLabel` next to the icon. A lab prototype (patched ksni)
+  showed `MX Master 3S 77%` beside the badge in the GNOME top bar and updated
+  it live through `PropertiesChanged`; that label is the GNOME form of the wide
+  face. Shipping it needs ksni to expose the property: upstream PRs #42/#47 are
+  open and ksni 0.3.7 has no extension hook, so the repo would need a vendored
+  fork or a pinned fork dependency.
+
 ## Appendix: vigil-watt reference
 
 - Tray: lowest online non-system device; 32×32 GDI+ disc; white percentage or
