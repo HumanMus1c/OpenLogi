@@ -677,6 +677,13 @@ instead of claiming Linux has no tray.
   now reloads the agent after an identity or custom-name save so the rows
   follow without a restart. Verified on the D-Bus menu
   (`MX Master 3S  77%`, `MX Keys  100%`, `MX Vertical  55%`).
+- **The demo tree now hosts the overlay.** The debug agent starts the overlay
+  supervisor at the same arming point as the production lifecycle (and evicts
+  the helper on a tray Quit). Before this, the demo path never spawned an
+  overlay, so the Flow Indicator could not appear in the debug tree whatever
+  the setting said. Verified live: the agent logs `helper started`, the card
+  renders with the demo devices, and switching `flow_indicator` off/on closes
+  and reopens it within the one-second config poll.
 - **Wide Linux face** (`tray_badge_style = "wide"`, config file only): one
   SNI pixmap carries the name, a progress bar, and the percentage
   (142x22 px at the panel slot, 284x44 for 2x). The face itself renders as

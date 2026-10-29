@@ -23,6 +23,7 @@ use openlogi_agent::mock;
 use openlogi_agent_core::observable::ObservableState;
 use tracing::{info, warn};
 
+use crate::overlay;
 use crate::shutdown::{ShutdownRequest, ShutdownRequests, ShutdownSignals};
 
 /// Whether this agent serves the scripted demo devices: debug builds by
@@ -88,6 +89,10 @@ pub(crate) async fn run(
     // there is no arming ladder to climb.
     #[cfg(target_os = "macos")]
     let _ = armed_tx.send(());
+    // The production lifecycle starts the overlay at its arming point; the
+    // demo must too, or the Flow Indicator can never appear in the debug tree
+    // no matter what the setting says.
+    overlay::spawn();
     let mut signals = ShutdownSignals::install();
     info!(
         "serving the scripted demo devices — {}=0 drives real hardware",
@@ -117,6 +122,7 @@ fn handle_shutdown_request(request: ShutdownRequest) {
         ShutdownRequest::TrayQuit { core_guard } => {
             // Held to the exit, as the lifecycle holds it through teardown.
             let _core_guard = core_guard;
+            overlay::evict_on_quit();
             info!("tray quit — demo agent leaving");
         }
         ShutdownRequest::Uninstalled => {
