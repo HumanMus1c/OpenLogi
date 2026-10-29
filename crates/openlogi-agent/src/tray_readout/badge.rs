@@ -14,11 +14,12 @@
 )]
 
 use openlogi_core::config::TrayBadgeStyle;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use openlogi_core::device::{BatteryDevice, BatteryReading, BatteryTone};
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+use openlogi_core::device::{BatteryColor, BatteryDevice, BatteryReading, BatteryTone};
 
-/// The disc colour role. Unlike [`BatteryTone`], no reading is neutral, and a
-/// healthy reading gets the brand accent instead of the primary text colour.
+/// The disc colour role. Unlike [`BatteryTone`], a healthy *percentage* gets
+/// the green the three-stage band gives it; the brand accent is left for a
+/// level-only healthy reading, which has no percentage to band.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BadgeTone {
     Accent,
@@ -47,17 +48,19 @@ pub(crate) struct Badge {
 
 impl Badge {
     /// The badge for `device`: digits when there is a percentage, a bolt while
-    /// charging, otherwise a dash in the reading's tone.
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    /// charging, otherwise a dash — painted with the shared colour role, so a
+    /// percentage shows its three-stage band (green from 70%, amber from 40%,
+    /// red below) and a level-only reading keeps its firmware tone.
+    #[cfg(any(target_os = "windows", target_os = "linux", test))]
     pub(crate) fn for_device(device: &BatteryDevice) -> Self {
         let Some(battery) = &device.battery else {
             return Self::none();
         };
-        let tone = match battery.tone() {
-            BatteryTone::Charging | BatteryTone::Full => BadgeTone::Green,
-            BatteryTone::Low => BadgeTone::Amber,
-            BatteryTone::Critical | BatteryTone::Error => BadgeTone::Red,
-            BatteryTone::Normal => BadgeTone::Accent,
+        let tone = match battery.color() {
+            BatteryColor::Green => BadgeTone::Green,
+            BatteryColor::Amber => BadgeTone::Amber,
+            BatteryColor::Red => BadgeTone::Red,
+            BatteryColor::Neutral => BadgeTone::Accent,
         };
         let text = if battery.tone() == BatteryTone::Charging {
             BadgeText::Charging
@@ -180,14 +183,21 @@ pub(crate) fn render(
         }
     }
 
-    downsample(&pixels, n, size)
+    downsample(&pixels, n, size, size)
 }
 
 /// The signed distance to a centred rounded square's edge: the standard
 /// rounded-rectangle SDF, negative inside.
 fn rounded_square_edge(dx: f32, dy: f32, half: f32, corner: f32) -> f32 {
-    let qx = dx.abs() - (half - corner);
-    let qy = dy.abs() - (half - corner);
+    rounded_rect_edge(dx, dy, half, half, corner)
+}
+
+/// The signed distance to a centred rounded rectangle's edge, negative
+/// inside. `corner` is capped at the shorter half-extent.
+fn rounded_rect_edge(dx: f32, dy: f32, half_width: f32, half_height: f32, corner: f32) -> f32 {
+    let corner = corner.min(half_width).min(half_height);
+    let qx = dx.abs() - (half_width - corner);
+    let qy = dy.abs() - (half_height - corner);
     let (outside_x, outside_y) = (qx.max(0.0), qy.max(0.0));
     (outside_x * outside_x + outside_y * outside_y).sqrt() + qx.max(qy).min(0.0) - corner
 }
@@ -285,19 +295,21 @@ fn point_in_polygon(dx: f32, dy: f32, scale: f32) -> bool {
 }
 
 /// Box-downsample premultiplied colour, then unpremultiply so edge pixels keep
-/// their hue instead of fading towards black.
-fn downsample(source: &[u8], n: u32, size: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (size * size) as usize * 4];
+/// their hue instead of fading towards black. The source canvas is
+/// `canvas_width`×`canvas_height` supersampled pixels; the result is
+/// `width`×`height`.
+fn downsample(source: &[u8], canvas_width: u32, width: u32, height: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (width * height) as usize * 4];
     let ss_area = SS * SS;
-    for y in 0..size {
-        for x in 0..size {
+    for y in 0..height {
+        for x in 0..width {
             let mut sum_r = 0u32;
             let mut sum_g = 0u32;
             let mut sum_b = 0u32;
             let mut sum_a = 0u32;
             for sy in 0..SS {
                 for sx in 0..SS {
-                    let offset = (((y * SS + sy) * n + x * SS + sx) * 4) as usize;
+                    let offset = (((y * SS + sy) * canvas_width + x * SS + sx) * 4) as usize;
                     let alpha = u32::from(source[offset + 3]);
                     sum_r += u32::from(source[offset]) * alpha;
                     sum_g += u32::from(source[offset + 1]) * alpha;
@@ -305,7 +317,7 @@ fn downsample(source: &[u8], n: u32, size: u32) -> Vec<u8> {
                     sum_a += alpha;
                 }
             }
-            let offset = ((y * size + x) * 4) as usize;
+            let offset = ((y * width + x) * 4) as usize;
             let (Some(red), Some(green), Some(blue)) = (
                 sum_r.checked_div(sum_a),
                 sum_g.checked_div(sum_a),
@@ -477,5 +489,88 @@ mod tests {
         let face = Badge::none();
         assert_eq!(face.tone, BadgeTone::Neutral);
         assert_eq!(face.text, BadgeText::Dash);
+    }
+
+    fn named_device(
+        name: Option<&str>,
+        percentage: Option<u8>,
+        level: openlogi_core::device::BatteryLevel,
+        status: openlogi_core::device::BatteryStatus,
+    ) -> openlogi_core::device::BatteryDevice {
+        use openlogi_core::device::{BatteryDevice, BatteryInfo, DeviceKind};
+
+        BatteryDevice {
+            name: name.map(str::to_owned),
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: Some(BatteryInfo {
+                percentage,
+                level,
+                status,
+            }),
+        }
+    }
+
+    fn device(
+        percentage: Option<u8>,
+        level: openlogi_core::device::BatteryLevel,
+        status: openlogi_core::device::BatteryStatus,
+    ) -> openlogi_core::device::BatteryDevice {
+        named_device(Some("MX Master 3S"), percentage, level, status)
+    }
+
+    #[test]
+    fn a_percentage_badge_paints_its_three_stage_band() {
+        use openlogi_core::device::{BatteryLevel, BatteryStatus};
+
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+        for (percentage, tone) in [
+            (100, BadgeTone::Green),
+            (70, BadgeTone::Green),
+            (69, BadgeTone::Amber),
+            (40, BadgeTone::Amber),
+            (39, BadgeTone::Red),
+            (1, BadgeTone::Red),
+        ] {
+            let badge = Badge::for_device(&device(Some(percentage), good, discharging));
+            assert_eq!(
+                badge,
+                Badge {
+                    text: BadgeText::Percent(percentage),
+                    tone,
+                },
+                "{percentage}%"
+            );
+        }
+
+        // Charging stays the green bolt whatever the band says; a fault is
+        // red; a level-only healthy reading keeps the brand accent.
+        assert_eq!(
+            Badge::for_device(&device(Some(45), good, BatteryStatus::Charging)),
+            Badge {
+                text: BadgeText::Charging,
+                tone: BadgeTone::Green,
+            }
+        );
+        assert_eq!(
+            Badge::for_device(&device(Some(85), good, BatteryStatus::Error)).tone,
+            BadgeTone::Red
+        );
+        assert_eq!(
+            Badge::for_device(&device(None, BatteryLevel::Good, discharging)),
+            Badge {
+                text: BadgeText::Dash,
+                tone: BadgeTone::Accent,
+            }
+        );
+        assert_eq!(
+            Badge::for_device(&device(None, BatteryLevel::Low, discharging)).tone,
+            BadgeTone::Amber
+        );
+        assert_eq!(
+            Badge::for_device(&device(None, BatteryLevel::Critical, discharging)).tone,
+            BadgeTone::Red
+        );
     }
 }
