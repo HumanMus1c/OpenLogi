@@ -208,7 +208,9 @@ impl AppState {
         self.config.edit(|config| {
             config.set_device_custom_name(record_key, custom_name.clone());
         });
-        if !self.persist_config("device name") {
+        // The tray names rows from the persisted custom name, so the write
+        // must reach the agent, not just the file.
+        if !self.persist_and_reload("device name") {
             return StateEvent::InventoryChanged.into();
         }
         for record in self

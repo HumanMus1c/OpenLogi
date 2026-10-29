@@ -101,9 +101,11 @@ fn main() -> Result<()> {
                 let now = flow_indicator::config_stamp();
                 if now != stamp {
                     stamp = now;
-                    if let Some(settings) = flow_indicator::load_settings()
+                    if let Some((settings, config)) = flow_indicator::load_settings()
                         && flow_commands
-                            .send(flow_indicator::Command::Settings(settings))
+                            .send(flow_indicator::Command::Settings(Box::new((
+                                settings, config,
+                            ))))
                             .is_err()
                     {
                         break;
@@ -116,9 +118,8 @@ fn main() -> Result<()> {
         })
         .detach();
         cx.spawn(async move |cx| {
-            let mut indicator = flow_indicator::FlowIndicator::new(
-                flow_indicator::load_settings().unwrap_or_default(),
-            );
+            let (settings, config) = flow_indicator::load_settings().unwrap_or_default();
+            let mut indicator = flow_indicator::FlowIndicator::new(settings, Some(config));
             while let Some(command) = flow_command_rx.recv().await {
                 cx.update(|cx| indicator.handle(command, cx));
             }

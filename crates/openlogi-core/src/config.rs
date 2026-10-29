@@ -40,7 +40,7 @@ pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
 pub use function_key::FunctionKey;
-pub use identity::canonical_device_key;
+pub use identity::{battery_devices_named, canonical_device_key};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;

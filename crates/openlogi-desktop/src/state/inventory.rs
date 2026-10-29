@@ -117,7 +117,9 @@ impl AppState {
                 return StateEvents::none();
             }
         } else if identities_changed {
-            self.persist_config("device identity");
+            // The tray names rows from these persisted identities, so the
+            // write must reach the agent, not just the file.
+            self.persist_and_reload("device identity");
         }
         // Whole-record equality, not a field allowlist. Most fields of a
         // `DeviceRecord` are rendered somewhere, so almost any of them

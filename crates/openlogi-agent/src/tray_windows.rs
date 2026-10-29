@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_core::config::TrayBadgeStyle;
+use openlogi_core::config::{Config, TrayBadgeStyle};
 use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
@@ -103,6 +103,10 @@ static TRAY_BADGE_STYLE: AtomicU8 = AtomicU8::new(0);
 /// One refresh message at a time: an inventory burst coalesces into a single
 /// re-read.
 static UPDATE_PENDING: AtomicBool = AtomicBool::new(false);
+/// The config the rows name devices from, replaced on every reload. The
+/// tray thread reads it while the IPC server writes it, so it is behind a
+/// lock rather than an atomic.
+static CONFIG: std::sync::RwLock<Option<Arc<Config>>> = std::sync::RwLock::new(None);
 
 /// The current badge shape, for the icon key and the renderer.
 fn badge_style() -> TrayBadgeStyle {
@@ -140,10 +144,12 @@ pub fn spawn(
     show_in_tray: bool,
     tray_battery: bool,
     badge_style: TrayBadgeStyle,
+    config: Arc<Config>,
     observable: Arc<ObservableState>,
     shutdown_tx: ShutdownRequestSender,
 ) {
     TRAY_BATTERY.store(tray_battery, Ordering::Relaxed);
+    set_config(config);
     TRAY_BADGE_STYLE.store(
         match badge_style {
             TrayBadgeStyle::Circle => 0,
@@ -168,14 +174,17 @@ pub fn spawn(
 /// stores the value the next read will use.
 pub fn set_battery_readout(enabled: bool) {
     TRAY_BATTERY.store(enabled, Ordering::Relaxed);
-    let hwnd = TRAY_HWND.load(Ordering::Relaxed) as HWND;
-    if hwnd.is_null() {
-        return;
+    wake();
+}
+
+/// Replace the config the menu rows resolve device names from. Wakes the tray
+/// thread so a renamed device shows up without waiting for the next inventory
+/// change.
+pub fn set_config(config: Arc<Config>) {
+    if let Ok(mut current) = CONFIG.write() {
+        *current = Some(config);
     }
-    // SAFETY: PostMessageW is safe from any thread, and the handle is the
-    // window this process created; zero — the not-yet-created and already-
-    // ended cases — is checked above.
-    unsafe { PostMessageW(hwnd, WM_TRAY_UPDATE, 0, 0) };
+    wake();
 }
 
 /// Apply a config reload's `tray_badge_style` choice. Same seam as
@@ -189,6 +198,11 @@ pub fn set_badge_style(style: TrayBadgeStyle) {
         },
         Ordering::Relaxed,
     );
+    wake();
+}
+
+/// Ask the tray thread to re-read the snapshot, when its window exists.
+fn wake() {
     let hwnd = TRAY_HWND.load(Ordering::Relaxed) as HWND;
     if hwnd.is_null() {
         return;
@@ -433,12 +447,23 @@ fn notify_icon(hwnd: HWND, add: bool, icon: HICON, tip: &str) -> bool {
     }
 }
 
+/// The config the rows resolve names from, when one has been installed.
+fn current_config() -> Option<Arc<Config>> {
+    CONFIG.read().ok().and_then(|config| config.clone())
+}
+
 /// The tooltip and badge read one snapshot so they cannot disagree.
 fn current_summary() -> Option<TrayReadout> {
+    let config = current_config();
     OBSERVABLE.with_borrow(|observable| {
         observable.as_ref().map(|observable| {
             observable.read(|snapshot| {
-                TrayReadout::from_parts(&snapshot.inventory, &snapshot.standalone, &snapshot.lights)
+                TrayReadout::from_parts(
+                    &snapshot.inventory,
+                    &snapshot.standalone,
+                    &snapshot.lights,
+                    config.as_deref(),
+                )
             })
         })
     })
@@ -613,6 +638,7 @@ unsafe fn show_menu(hwnd: HWND) {
         );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         let rows: Vec<String> = if TRAY_BATTERY.load(Ordering::Relaxed) {
+            let config = current_config();
             OBSERVABLE.with_borrow(|observable| {
                 observable.as_ref().map_or_else(Vec::new, |observable| {
                     observable.read(|snapshot| {
@@ -620,6 +646,7 @@ unsafe fn show_menu(hwnd: HWND) {
                             &snapshot.inventory,
                             &snapshot.standalone,
                             &snapshot.lights,
+                            config.as_deref(),
                         )
                         .menu_lines()
                         .collect()

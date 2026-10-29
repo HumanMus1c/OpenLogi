@@ -219,10 +219,14 @@ mod tests {
             "the tray badge needs the online mouse's battery"
         );
         // The tray's menu lists the light after the battery devices.
-        let rows: Vec<String> =
-            TrayReadout::from_parts(&snapshot.inventory, &snapshot.standalone, &snapshot.lights)
-                .menu_lines()
-                .collect();
+        let rows: Vec<String> = TrayReadout::from_parts(
+            &snapshot.inventory,
+            &snapshot.standalone,
+            &snapshot.lights,
+            None,
+        )
+        .menu_lines()
+        .collect();
         assert_eq!(rows.len(), 5);
         assert!(rows[4].contains(rust_i18n::t!("common.on").as_ref()));
     }

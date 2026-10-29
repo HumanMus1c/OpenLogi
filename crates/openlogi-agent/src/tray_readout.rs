@@ -7,9 +7,10 @@
 //! out as its power and brightness the way the lighting panel does. The
 //! platform sides own only the icon, tooltip, and menu plumbing.
 
+use openlogi_core::config::{Config, battery_devices_named};
 use openlogi_core::device::{
     BatteryDevice, BatteryTone, BatteryValue, DeviceInventory, DeviceKind, LightState,
-    StandaloneDevice, battery_devices, first_battery_readout, prettify_codename,
+    StandaloneDevice, first_battery_readout, prettify_codename,
 };
 use openlogi_ipc::ObservedLight;
 
@@ -183,13 +184,20 @@ pub(crate) struct TrayReadout {
 }
 
 impl TrayReadout {
+    /// Build the readout from one snapshot. `config` supplies the product
+    /// names the settings app persisted; `None` (no config yet) keeps the
+    /// firmware codenames the rows showed before.
     pub(crate) fn from_parts(
         inventory: &[DeviceInventory],
         standalone: &[StandaloneDevice],
         lights: &[ObservedLight],
+        config: Option<&Config>,
     ) -> Self {
         Self {
-            devices: battery_devices(inventory),
+            devices: config.map_or_else(
+                || openlogi_core::device::battery_devices(inventory),
+                |config| battery_devices_named(inventory, config),
+            ),
             lights: light_rows(standalone, lights),
         }
     }
@@ -308,7 +316,7 @@ mod tests {
     }
 
     fn summary(devices: Vec<PairedDevice>) -> TrayReadout {
-        TrayReadout::from_parts(&[inventory(devices)], &[], &[])
+        TrayReadout::from_parts(&[inventory(devices)], &[], &[], None)
     }
 
     #[test]
@@ -480,8 +488,90 @@ mod tests {
     }
 
     #[test]
+    fn a_persisted_product_name_replaces_the_codename() {
+        use openlogi_core::config::{Config, DeviceIdentity};
+        use openlogi_core::device::Capabilities;
+        use openlogi_core::device_order::PhysicalDeviceKey;
+
+        let mut config = Config::default();
+        let key = PhysicalDeviceKey::parse("unit:4f4c4401").expect("a physical device key");
+        config.adopt_route(&key, "receiver:ol-bolt-uid-0001:slot:1", None);
+        config.set_device_identity(
+            key.as_str(),
+            DeviceIdentity {
+                display_name: "MX Master 3S".to_owned(),
+                model_info: None,
+                codename: Some("Synthetic Performance Mouse".to_owned()),
+                kind: DeviceKind::Mouse,
+                capabilities: Capabilities::default(),
+                light_capabilities: None,
+                driver_id: None,
+                registry_model_id: None,
+            },
+        );
+
+        let device = || {
+            paired(
+                1,
+                Some("Synthetic Performance Mouse"),
+                DeviceKind::Mouse,
+                true,
+                Some(battery(
+                    Some(64),
+                    BatteryLevel::Good,
+                    BatteryStatus::Discharging,
+                )),
+            )
+        };
+        let with_uid = |devices: Vec<PairedDevice>| {
+            let mut inventory = inventory(devices);
+            inventory.receiver.unique_id = Some("ol-bolt-uid-0001".to_owned());
+            inventory
+        };
+
+        // The persisted name resolves through the same route/identity path the
+        // settings app uses, so the row reads like the device's card.
+        let readout = TrayReadout::from_parts(&[with_uid(vec![device()])], &[], &[], Some(&config));
+        assert_eq!(
+            readout.tooltip().as_deref(),
+            Some("OpenLogi · MX Master 3S 64%")
+        );
+
+        // A user-assigned name outranks the product name, and clearing it
+        // restores the product name.
+        config.set_device_custom_name(key.as_str(), Some("Office mouse".to_owned()));
+        let readout = TrayReadout::from_parts(&[with_uid(vec![device()])], &[], &[], Some(&config));
+        assert_eq!(
+            readout.tooltip().as_deref(),
+            Some("OpenLogi · Office mouse 64%")
+        );
+        config.set_device_custom_name(key.as_str(), None);
+
+        // An unknown device (no entry) and a run without a config keep the
+        // prettified codename.
+        let unknown = paired(
+            2,
+            Some("Synthetic Offline Mouse"),
+            DeviceKind::Mouse,
+            false,
+            None,
+        );
+        let rows: Vec<String> =
+            TrayReadout::from_parts(&[with_uid(vec![unknown])], &[], &[], Some(&config))
+                .menu_lines()
+                .collect();
+        assert!(rows[0].starts_with("Synthetic Offline Mouse"));
+
+        let rows: Vec<String> =
+            TrayReadout::from_parts(&[with_uid(vec![device()])], &[], &[], None)
+                .menu_lines()
+                .collect();
+        assert!(rows[0].starts_with("Synthetic Performance Mouse"));
+    }
+
+    #[test]
     fn nothing_to_read_out_falls_back_to_the_brand_tip() {
-        assert_eq!(TrayReadout::from_parts(&[], &[], &[]).tooltip(), None);
+        assert_eq!(TrayReadout::from_parts(&[], &[], &[], None).tooltip(), None);
         assert_eq!(
             summary(vec![paired(
                 1,
@@ -584,7 +674,7 @@ mod tests {
         assert_eq!(error.title(), None);
 
         // No device with a readout keeps the glyph.
-        assert_eq!(TrayReadout::from_parts(&[], &[], &[]).title(), None);
+        assert_eq!(TrayReadout::from_parts(&[], &[], &[], None).title(), None);
     }
 
     fn percent_range() -> LightCapabilities {
@@ -646,7 +736,7 @@ mod tests {
         standalone: &[StandaloneDevice],
         lights: &[ObservedLight],
     ) -> TrayReadout {
-        TrayReadout::from_parts(&[inventory(devices.to_vec())], standalone, lights)
+        TrayReadout::from_parts(&[inventory(devices.to_vec())], standalone, lights, None)
     }
 
     #[test]

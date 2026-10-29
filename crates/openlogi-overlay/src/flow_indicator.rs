@@ -22,10 +22,12 @@ use gpui::{
 };
 #[cfg(target_os = "linux")]
 use gpui::{Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
-use openlogi_core::config::{AppSettings, ConfigFile, FlowIndicatorDisplayMode};
+use openlogi_core::config::{
+    AppSettings, Config, ConfigFile, FlowIndicatorDisplayMode, battery_devices_named,
+};
 use openlogi_core::device::{
-    BatteryColor, BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceKind,
-    battery_devices, flow_indicator_devices,
+    BatteryColor, BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceInventory,
+    DeviceKind, battery_devices, flow_indicator_devices,
 };
 use openlogi_ipc::Observation;
 use serde::{Deserialize, Serialize};
@@ -88,11 +90,11 @@ impl From<&AppSettings> for Settings {
     }
 }
 
-/// Read the widget settings from the shared config. A missing or invalid file
-/// keeps the caller's last-good settings.
-pub(crate) fn load_settings() -> Option<Settings> {
+/// Read the widget settings and the device names from the shared config. A
+/// missing or invalid file keeps the caller's last-good values.
+pub(crate) fn load_settings() -> Option<(Settings, Config)> {
     match ConfigFile::load_or_default() {
-        Ok((config, _)) => Some(Settings::from(&config.app_settings)),
+        Ok((config, _)) => Some((Settings::from(&config.app_settings), config)),
         Err(error) => {
             warn!(%error, "Flow Indicator: keeping the last-good config");
             None
@@ -579,7 +581,7 @@ impl FlowIndicatorView {
 /// once-a-second position tick.
 pub(crate) enum Command {
     Observation(Box<Observation>),
-    Settings(Settings),
+    Settings(Box<(Settings, Config)>),
     Tick,
 }
 
@@ -592,7 +594,9 @@ pub(crate) enum Command {
 /// through `App::update`, the same context the notice windows open from.
 pub(crate) struct FlowIndicator {
     settings: Settings,
-    devices: Vec<BatteryDevice>,
+    /// The config that names the rows; `None` until the first successful read.
+    config: Option<Config>,
+    inventory: Vec<DeviceInventory>,
     window: Option<WindowHandle<FlowIndicatorView>>,
     window_mode: Option<FlowIndicatorDisplayMode>,
     /// Whether the open window is a Wayland layer surface, which has no
@@ -605,10 +609,11 @@ pub(crate) struct FlowIndicator {
 }
 
 impl FlowIndicator {
-    pub(crate) fn new(settings: Settings) -> Self {
+    pub(crate) fn new(settings: Settings, config: Option<Config>) -> Self {
         Self {
             settings,
-            devices: Vec::new(),
+            config,
+            inventory: Vec::new(),
             window: None,
             window_mode: None,
             layer_shell: false,
@@ -620,10 +625,11 @@ impl FlowIndicator {
     pub(crate) fn handle(&mut self, command: Command, cx: &mut App) {
         match command {
             Command::Observation(observation) => {
-                self.devices = battery_devices(&observation.snapshot.inventory);
+                self.inventory.clone_from(&observation.snapshot.inventory);
                 self.sync(cx);
             }
-            Command::Settings(settings) => {
+            Command::Settings(snapshot) => {
+                let (settings, config) = *snapshot;
                 if settings != self.settings {
                     // A settings change is the user asking for the card again;
                     // retire a window they closed first so it cannot pass for
@@ -632,6 +638,7 @@ impl FlowIndicator {
                     self.dismissed.set(false);
                 }
                 self.settings = settings;
+                self.config = Some(config);
                 self.sync(cx);
             }
             Command::Tick => {
@@ -697,8 +704,12 @@ impl FlowIndicator {
         if !self.settings.enabled {
             return Vec::new();
         }
+        let devices = self.config.as_ref().map_or_else(
+            || battery_devices(&self.inventory),
+            |config| battery_devices_named(&self.inventory, config),
+        );
         flow_indicator_devices(
-            &self.devices,
+            &devices,
             self.settings.show_offline,
             self.settings.max_devices,
         )

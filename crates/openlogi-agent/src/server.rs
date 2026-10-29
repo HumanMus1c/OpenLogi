@@ -121,6 +121,10 @@ impl AgentServer {
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
+                // The tray names its rows from the persisted device names, so
+                // it receives the reloaded config after the core accepts it.
+                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+                let tray_config = std::sync::Arc::new(config.clone());
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
                     Some(saved) => self
@@ -156,6 +160,12 @@ impl AgentServer {
                 crate::tray_linux::set_battery_readout(tray_battery);
                 #[cfg(target_os = "linux")]
                 crate::tray_linux::set_badge_style(tray_badge_style);
+                #[cfg(target_os = "windows")]
+                crate::tray_windows::set_config(std::sync::Arc::clone(&tray_config));
+                #[cfg(target_os = "macos")]
+                crate::tray::set_config(std::sync::Arc::clone(&tray_config));
+                #[cfg(target_os = "linux")]
+                crate::tray_linux::set_config(std::sync::Arc::clone(&tray_config));
                 Ok(revision)
             }
             Err(error) => {

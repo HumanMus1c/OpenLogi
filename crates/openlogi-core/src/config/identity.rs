@@ -10,10 +10,29 @@ use crate::binding::{Action, ButtonId};
 use crate::config::{Config, DeviceConfig};
 #[cfg(test)]
 use crate::config::{LightSettings, Lighting, LinkConfig};
-use crate::device::Capabilities;
+use crate::device::{BatteryDevice, Capabilities, DeviceInventory, PairedDevice};
 use crate::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
+use crate::hid::DeviceRoute;
 #[cfg(test)]
 use crate::hid::Dpi;
+
+/// Every paired device in `inventory`, in inventory order, with the settings
+/// app's persisted name preferred over the firmware codename.
+#[must_use]
+pub fn battery_devices_named(inventory: &[DeviceInventory], config: &Config) -> Vec<BatteryDevice> {
+    inventory
+        .iter()
+        .flat_map(|inventory| {
+            inventory.paired.iter().map(move |paired| {
+                let mut device = BatteryDevice::from_paired(paired);
+                if let Some(name) = config.paired_display_name(inventory, paired) {
+                    device.name = Some(name);
+                }
+                device
+            })
+        })
+        .collect()
+}
 
 impl DeviceIdentity {
     /// This identity as a transport-free configuration key, or `None` when the
@@ -141,6 +160,35 @@ impl Config {
             return Some(key);
         }
         stable.physical_key()
+    }
+
+    /// The display name the settings app persisted for `paired`, resolved
+    /// through the same route/identity path the GUI names its cards by.
+    ///
+    /// A user-assigned custom name outranks the product name the asset
+    /// registry resolved; `None` means the device has no entry (or no name),
+    /// and the caller keeps the firmware codename.
+    #[must_use]
+    pub fn paired_display_name(
+        &self,
+        inventory: &DeviceInventory,
+        paired: &PairedDevice,
+    ) -> Option<String> {
+        let route = DeviceRoute::for_slot(inventory, paired.slot);
+        let model = paired.model_info.as_ref();
+        let serial = model.and_then(|model| model.serial_number.as_deref());
+        let unit_id = model.map_or([0; 4], |model| model.unit_id);
+        let stable = DeviceStableId::from_parts(route.as_ref(), paired.slot, serial, unit_id);
+        let identity = DeviceIdentity::from_parts(serial, unit_id);
+        let key = self.resolve_device_key(&stable, paired.online.then_some(&identity))?;
+        if let Some(custom) = self.device_custom_name(key.as_str()) {
+            let custom = custom.trim();
+            if !custom.is_empty() {
+                return Some(custom.to_owned());
+            }
+        }
+        let name = self.device_identity(key.as_str())?.display_name.trim();
+        (!name.is_empty()).then(|| name.to_owned())
     }
 
     /// Record that the device keyed `canonical` was reached by `route_key`,

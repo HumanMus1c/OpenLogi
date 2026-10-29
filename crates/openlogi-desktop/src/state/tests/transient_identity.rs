@@ -198,9 +198,25 @@ fn a_route_shared_by_two_online_twins_is_never_adopted() {
             "{key} must not claim a route its twin equally owns"
         );
     }
+    // The first snapshot does capture both devices' identities, and that
+    // write must reach the agent: the tray names its rows from them. Exactly
+    // one reload, then the repeated snapshot below must be silent.
+    assert!(
+        receiver.try_recv().is_ok(),
+        "the captured identities must reload once"
+    );
+    let _ = state.refresh_inventories(
+        &[
+            direct_inventory([1, 1, 1, 1]),
+            direct_inventory([2, 2, 2, 2]),
+        ],
+        &[],
+        &resolver,
+        &[],
+    );
     assert!(
         receiver.try_recv().is_err(),
-        "a route that was never adopted must not trigger a persist/reload"
+        "an unchanged snapshot must not persist or reload again"
     );
 }
 

@@ -149,8 +149,10 @@ fn main() -> ExitCode {
         let app_icon = config.app_settings.app_icon;
         let tray_battery = config.app_settings.tray_battery;
         // The tray reads the same state cell the IPC server hands out; clone
-        // before the core thread moves the last handle.
+        // before the core thread moves the last handle. It names device rows
+        // from the config, which is replaced on reload through the same seam.
         let tray_observable = Arc::clone(&observable);
+        let tray_config = Arc::new(config.clone());
         // The tray waits for the core to declare the agent *armed*: a dormant
         // agent (launch_at_login off, started at login, no client yet) must
         // not put an icon in the menu bar only to vanish seconds later. A
@@ -185,6 +187,7 @@ fn main() -> ExitCode {
                 show_in_menu_bar,
                 app_icon,
                 tray_battery,
+                tray_config,
                 tray_observable,
                 device_io_signal,
                 shutdown_tx,
@@ -250,13 +253,17 @@ fn start_platform_services(
 ) {
     // Windows hosts the notification-area icon on its own win32 thread
     // (message pump included), and Linux hosts a StatusNotifierItem on its
-    // own D-Bus thread; the async core keeps the main thread.
+    // own D-Bus thread; the async core keeps the main thread. The tray names
+    // its device rows from the config, which a reload replaces.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let tray_config = Arc::new(config.clone());
     #[cfg(target_os = "windows")]
     {
         tray_windows::spawn(
             config.app_settings.show_in_menu_bar,
             config.app_settings.tray_battery,
             config.app_settings.tray_badge_style,
+            Arc::clone(&tray_config),
             Arc::clone(observable),
             shutdown_tx.clone(),
         );
@@ -271,6 +278,7 @@ fn start_platform_services(
             config.app_settings.show_in_menu_bar,
             config.app_settings.tray_battery,
             config.app_settings.tray_badge_style,
+            Arc::clone(&tray_config),
             Arc::clone(observable),
             shutdown_tx.clone(),
         );

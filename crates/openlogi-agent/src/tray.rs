@@ -40,7 +40,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSString};
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::brand::{self, DeeplinkCommand};
-use openlogi_core::config::AppIcon;
+use openlogi_core::config::{AppIcon, Config};
 use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 
@@ -77,6 +77,9 @@ thread_local! {
     /// Kept separately because the AppKit loop still exists when the status
     /// item is hidden by preference.
     static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
+    /// The config the menu rows name devices from, replaced on every reload.
+    /// Main-thread only, like the menu it feeds.
+    static CONFIG: RefCell<Option<Arc<Config>>> = const { RefCell::new(None) };
 }
 
 /// The menu-bar glyph for `icon`: a monochrome template the system tints for
@@ -137,6 +140,16 @@ pub fn set_battery_readout(enabled: bool) {
     DispatchQueue::main().exec_async(refresh_battery_readout);
 }
 
+/// Replace the config the menu rows resolve device names from. Same seam as
+/// [`set_battery_readout`]: the value is stored for the next refresh and the
+/// main queue re-reads the summary immediately.
+pub fn set_config(config: Arc<Config>) {
+    DispatchQueue::main().exec_async(move || {
+        CONFIG.with_borrow_mut(|slot| *slot = Some(config));
+        refresh_battery_readout();
+    });
+}
+
 /// Re-read the battery summary and restyle the title and menu. Runs on the
 /// main queue; a no-op when the item is hidden or the loop never started.
 fn refresh_battery_readout() {
@@ -157,8 +170,14 @@ fn refresh_battery_readout() {
 /// The tray readout for one observable snapshot, read on the calling
 /// (main) thread.
 fn current_summary(observable: &ObservableState) -> TrayReadout {
+    let config = CONFIG.with_borrow(Clone::clone);
     observable.read(|snapshot| {
-        TrayReadout::from_parts(&snapshot.inventory, &snapshot.standalone, &snapshot.lights)
+        TrayReadout::from_parts(
+            &snapshot.inventory,
+            &snapshot.standalone,
+            &snapshot.lights,
+            config.as_deref(),
+        )
     })
 }
 
@@ -332,11 +351,13 @@ pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
     tray_battery: bool,
+    config: Arc<Config>,
     observable: Arc<ObservableState>,
     device_io_signal: DeviceIoSignal,
     shutdown_tx: ShutdownRequestSender,
 ) -> ! {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
+    CONFIG.with_borrow_mut(|slot| *slot = Some(config));
     TRAY_BATTERY.store(tray_battery, Ordering::Relaxed);
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");

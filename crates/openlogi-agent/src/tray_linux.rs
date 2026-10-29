@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use ksni::menu::{MenuItem, StandardItem};
 use ksni::{OfflineReason, ToolTip, Tray, TrayMethods as _};
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_core::config::TrayBadgeStyle;
+use openlogi_core::config::{Config, TrayBadgeStyle};
 use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
@@ -39,10 +39,12 @@ const ICON_SIZES: [u16; 5] = [16, 22, 24, 32, 48];
 const LIGHT_PANEL: bool = false;
 
 /// A live settings or inventory change for the tray thread.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum TrayCommand {
-    SetBattery(bool),
-    SetBadgeStyle(TrayBadgeStyle),
+    Battery(bool),
+    BadgeStyle(TrayBadgeStyle),
+    /// A config reload changed the persisted device names the rows show.
+    Config(Arc<Config>),
 }
 
 /// The channel a config reload and the inventory watcher share.
@@ -55,6 +57,7 @@ pub fn spawn(
     show_in_tray: bool,
     tray_battery: bool,
     badge_style: TrayBadgeStyle,
+    config: Arc<Config>,
     observable: Arc<ObservableState>,
     shutdown_tx: ShutdownRequestSender,
 ) {
@@ -74,6 +77,7 @@ pub fn spawn(
             shutdown_tx,
             tray_battery,
             badge_style,
+            config,
             commands,
         );
     }) {
@@ -85,12 +89,17 @@ pub fn spawn(
 /// hidden at launch (the setting is read at startup only) or had no D-Bus
 /// session to attach to.
 pub fn set_battery_readout(enabled: bool) {
-    send(TrayCommand::SetBattery(enabled));
+    send(TrayCommand::Battery(enabled));
 }
 
 /// Apply a config reload's `tray_badge_style` choice.
 pub fn set_badge_style(style: TrayBadgeStyle) {
-    send(TrayCommand::SetBadgeStyle(style));
+    send(TrayCommand::BadgeStyle(style));
+}
+
+/// Hand a reloaded config to the tray, so rows pick up changed device names.
+pub fn set_config(config: Arc<Config>) {
+    send(TrayCommand::Config(config));
 }
 
 fn send(command: TrayCommand) {
@@ -133,6 +142,7 @@ struct OpenLogiTray {
     shutdown_tx: ShutdownRequestSender,
     battery: bool,
     badge_style: TrayBadgeStyle,
+    config: Arc<Config>,
     view: TrayView,
 }
 
@@ -142,12 +152,14 @@ impl OpenLogiTray {
         shutdown_tx: ShutdownRequestSender,
         battery: bool,
         badge_style: TrayBadgeStyle,
+        config: Arc<Config>,
     ) -> Self {
         let mut tray = Self {
             observable,
             shutdown_tx,
             battery,
             badge_style,
+            config,
             view: TrayView {
                 tooltip: String::new(),
                 icons: Vec::new(),
@@ -160,19 +172,28 @@ impl OpenLogiTray {
 
     fn refresh(&mut self) {
         let summary = self.observable.read(|snapshot| {
-            TrayReadout::from_parts(&snapshot.inventory, &snapshot.standalone, &snapshot.lights)
+            TrayReadout::from_parts(
+                &snapshot.inventory,
+                &snapshot.standalone,
+                &snapshot.lights,
+                Some(&self.config),
+            )
         });
         self.view = TrayView::build(&summary, self.battery, self.badge_style);
     }
 
     fn apply(&mut self, command: TrayCommand) {
         match command {
-            TrayCommand::SetBattery(enabled) => {
+            TrayCommand::Battery(enabled) => {
                 self.battery = enabled;
                 self.refresh();
             }
-            TrayCommand::SetBadgeStyle(style) => {
+            TrayCommand::BadgeStyle(style) => {
                 self.badge_style = style;
+                self.refresh();
+            }
+            TrayCommand::Config(config) => {
+                self.config = config;
                 self.refresh();
             }
         }
@@ -268,11 +289,12 @@ fn run(
     shutdown_tx: ShutdownRequestSender,
     battery: bool,
     badge_style: TrayBadgeStyle,
+    config: Arc<Config>,
     mut commands: UnboundedReceiver<TrayCommand>,
 ) {
     runtime.block_on(async move {
         let mut watch = observable.subscribe();
-        let tray = OpenLogiTray::new(observable, shutdown_tx, battery, badge_style);
+        let tray = OpenLogiTray::new(observable, shutdown_tx, battery, badge_style, config);
         // A desktop without an SNI host is a soft failure: keep the service
         // alive so it appears if the host starts later (a panel restart, or a
         // GNOME session that loads its AppIndicator extension late).
@@ -463,7 +485,9 @@ mod tests {
     };
     use openlogi_ipc::InventoryHealth;
 
-    use super::{ICON_SIZES, OpenLogiTray, TrayCommand, argb_icon, badge_icon, decode_png_icon};
+    use super::{
+        ICON_SIZES, OpenLogiTray, TrayCommand, argb_icon, badge_icon, decode_png_icon,
+    };
     use crate::tray_readout::Badge;
     use openlogi_core::config::TrayBadgeStyle;
 
@@ -497,7 +521,13 @@ mod tests {
         let observable = Arc::new(ObservableState::new("test".to_owned()));
         observable.set_inventory(InventoryHealth::Ready, &[inventory()], &[], false);
         let (shutdown_tx, _requests) = crate::shutdown::request_channel();
-        OpenLogiTray::new(observable, shutdown_tx, battery, TrayBadgeStyle::Circle)
+        OpenLogiTray::new(
+            observable,
+            shutdown_tx,
+            battery,
+            TrayBadgeStyle::Circle,
+            std::sync::Arc::new(openlogi_core::config::Config::default()),
+        )
     }
 
     #[test]
@@ -531,14 +561,14 @@ mod tests {
     fn switching_the_readout_off_restores_the_brand_icon() {
         let mut tray = tray(true);
         let badge = tray.icon_pixmap();
-        tray.apply(TrayCommand::SetBattery(false));
+        tray.apply(TrayCommand::Battery(false));
         assert!(tray.tool_tip().description.is_empty());
         assert_ne!(tray.icon_pixmap()[0].data, badge[0].data);
         assert!(!tray.icon_pixmap().is_empty());
 
-        tray.apply(TrayCommand::SetBattery(true));
+        tray.apply(TrayCommand::Battery(true));
         let circle = tray.icon_pixmap()[0].data.clone();
-        tray.apply(TrayCommand::SetBadgeStyle(TrayBadgeStyle::RoundedSquare));
+        tray.apply(TrayCommand::BadgeStyle(TrayBadgeStyle::RoundedSquare));
         assert_ne!(tray.icon_pixmap()[0].data, circle);
     }
 
