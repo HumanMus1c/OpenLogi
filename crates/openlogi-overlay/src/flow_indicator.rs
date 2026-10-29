@@ -24,8 +24,8 @@ use gpui::{
 use gpui::{Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
 use openlogi_core::config::{AppSettings, ConfigFile, FlowIndicatorDisplayMode};
 use openlogi_core::device::{
-    BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceKind, battery_devices,
-    flow_indicator_devices,
+    BatteryColor, BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceKind,
+    battery_devices, flow_indicator_devices,
 };
 use openlogi_ipc::Observation;
 use serde::{Deserialize, Serialize};
@@ -208,7 +208,8 @@ struct Row {
     name: SharedString,
     value: SharedString,
     fill: Option<u8>,
-    tone: BatteryTone,
+    color: BatteryColor,
+    charging: bool,
     online: bool,
     kind: DeviceKind,
 }
@@ -217,6 +218,7 @@ impl Row {
     fn from(device: &BatteryDevice) -> Self {
         let battery = device.battery.as_ref();
         let tone = battery.map_or(BatteryTone::Normal, BatteryInfo::tone);
+        let color = battery.map_or(BatteryColor::Neutral, BatteryInfo::color);
         let mut value = battery.map_or_else(|| "–".to_owned(), value_text);
         let mut fill = battery.and_then(BatteryInfo::bar_percentage);
         if tone == BatteryTone::Error {
@@ -233,14 +235,11 @@ impl Row {
             name: name.into(),
             value: value.into(),
             fill,
-            tone,
+            color,
+            charging: tone == BatteryTone::Charging,
             online: device.online,
             kind: device.kind,
         }
-    }
-
-    fn charging(&self) -> bool {
-        self.tone == BatteryTone::Charging
     }
 }
 
@@ -296,12 +295,12 @@ impl Palette {
     }
 }
 
-fn tone_color(tone: BatteryTone, pal: &Palette) -> Hsla {
-    match tone {
-        BatteryTone::Charging | BatteryTone::Full => rgb(0x22_C5_5E).into(),
-        BatteryTone::Low => rgb(0xEA_B3_08).into(),
-        BatteryTone::Critical | BatteryTone::Error => rgb(0xEF_44_44).into(),
-        BatteryTone::Normal => pal.text,
+fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
+    match color {
+        BatteryColor::Green => rgb(0x22_C5_5E).into(),
+        BatteryColor::Amber => rgb(0xEA_B3_08).into(),
+        BatteryColor::Red => rgb(0xEF_44_44).into(),
+        BatteryColor::Neutral => pal.text,
     }
 }
 
@@ -350,7 +349,7 @@ impl FlowIndicatorView {
     }
 
     fn row_view(row: &Row, pal: &Palette) -> impl IntoElement + use<> {
-        let color = tone_color(row.tone, pal);
+        let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
         div()
@@ -383,7 +382,7 @@ impl FlowIndicatorView {
                             .text_color(pal.text)
                             .child(row.name.clone()),
                     )
-                    .when(row.online && row.charging(), |line| {
+                    .when(row.online && row.charging, |line| {
                         line.child(
                             svg()
                                 .path(BOLT_ICON)
@@ -1022,13 +1021,14 @@ mod tests {
     #[gpui::test]
     fn the_card_window_renders_its_rows(cx: &mut gpui::TestAppContext) {
         use super::{FlowIndicatorView, Row};
-        use openlogi_core::device::{BatteryTone, DeviceKind};
+        use openlogi_core::device::{BatteryColor, DeviceKind};
 
         let rows = vec![Row {
             name: "MX Master 3S".into(),
             value: "87%".into(),
             fill: Some(87),
-            tone: BatteryTone::Normal,
+            color: BatteryColor::Green,
+            charging: false,
             online: true,
             kind: DeviceKind::Mouse,
         }];
@@ -1046,7 +1046,7 @@ mod tests {
     #[gpui::test]
     fn the_card_fits_the_window_height_it_is_given(cx: &mut gpui::TestAppContext) {
         use super::{FlowIndicatorView, Row};
-        use openlogi_core::device::{BatteryTone, DeviceKind};
+        use openlogi_core::device::{BatteryColor, DeviceKind};
 
         let rows = ["Direct Mouse", "Performance Mouse", "RGB Keyboard"]
             .into_iter()
@@ -1054,7 +1054,8 @@ mod tests {
                 name: name.into(),
                 value: "55%".into(),
                 fill: Some(55),
-                tone: BatteryTone::Normal,
+                color: BatteryColor::Amber,
+                charging: false,
                 online: true,
                 kind: DeviceKind::Mouse,
             })
