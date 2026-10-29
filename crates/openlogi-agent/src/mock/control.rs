@@ -298,7 +298,9 @@ impl State {
     }
 
     /// Take in every online device's battery as the agent's watch does, and
-    /// answer the notices now due.
+    /// answer the notices now due. Names follow the settings app's precedence
+    /// (custom name, persisted product name, then codename), read fresh from
+    /// the config so a rename reaches the next notice.
     fn low_battery_notices(&mut self, settings: &AppSettings) -> Vec<NoticeKind> {
         let mut due = Vec::new();
         for target in self.targets() {
@@ -309,8 +311,13 @@ impl State {
                 .low_battery
                 .take_reading(settings, &target.route.to_string(), &battery)
             {
+                let name = self
+                    .names
+                    .get(&target.route.to_string())
+                    .cloned()
+                    .or(target.name);
                 due.push(NoticeKind::LowBattery {
-                    name: target.name,
+                    name,
                     kind: target.kind,
                     battery,
                 });

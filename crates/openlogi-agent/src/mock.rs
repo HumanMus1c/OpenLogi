@@ -214,15 +214,38 @@ pub fn main_from_args(args: impl Iterator<Item = OsString>) -> ExitCode {
 /// `--fixture` profile with frozen test time.
 pub fn state_from_args(args: impl Iterator<Item = OsString>) -> Result<State, String> {
     let scenario = DisableKeysScenario::from_env()?;
-    if let Some(path) = parse_fixture_arg(args)? {
+    let mut state = if let Some(path) = parse_fixture_arg(args)? {
         let profile = load_fixture_profile(&path)?;
         State::with_disable_keys_scenario(profile, MockClock::Test(Duration::ZERO), scenario)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?
     } else {
         let profile = built_in_profile()?;
         State::with_disable_keys_scenario(profile, MockClock::Demo(Instant::now()), scenario)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?
+    };
+    state.names = persisted_names(&state);
+    Ok(state)
+}
+
+/// The product names the settings app persisted for this profile's paired
+/// devices, keyed by route. An unreadable config leaves the map empty and the
+/// rows keep their codenames.
+fn persisted_names(state: &State) -> std::collections::HashMap<String, String> {
+    let Ok((config, _)) = openlogi_core::config::ConfigFile::load_or_default() else {
+        return std::collections::HashMap::new();
+    };
+    let mut names = std::collections::HashMap::new();
+    for inventory in state.render_inventory() {
+        for device in &inventory.paired {
+            let Some(route) = DeviceRoute::for_slot(&inventory, device.slot) else {
+                continue;
+            };
+            if let Some(name) = config.paired_display_name(&inventory, device) {
+                names.insert(route.to_string(), name);
+            }
+        }
     }
+    names
 }
 
 fn parse_fixture_arg(mut args: impl Iterator<Item = OsString>) -> Result<Option<PathBuf>, String> {
@@ -438,6 +461,11 @@ pub struct State {
     /// Which batteries the console's readings have announced, as the agent
     /// keeps it.
     low_battery: LowBatteryWatch,
+    /// Persisted product names for the profile's paired devices, keyed by
+    /// route. The demo fills this once at startup from the settings app's
+    /// config (the tray and GUI resolve names live); unit tests leave it
+    /// empty so they never read the developer's config.
+    names: std::collections::HashMap<String, String>,
     disable_keys_scenario: DisableKeysScenario,
     disable_keys_reads: u64,
     disable_keys_writes: u64,
@@ -478,6 +506,7 @@ impl State {
             faults: Vec::new(),
             lights,
             low_battery: LowBatteryWatch::default(),
+            names: std::collections::HashMap::new(),
             disable_keys_scenario,
             disable_keys_reads: 0,
             disable_keys_writes: 0,
