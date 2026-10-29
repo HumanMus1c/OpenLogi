@@ -58,6 +58,9 @@ block2 = { workspace = true }
 # override-redirect window at all.
 raw-window-handle = "0.6"
 x11rb = "0.13"
+# The settings portal, read directly: GPUI's one-shot appearance query races
+# the portal at login and never retries (see `appearance.rs`).
+zbus = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"

@@ -16,6 +16,7 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
+mod appearance;
 mod backlight;
 mod flow_indicator;
 mod ipc;
@@ -55,6 +56,9 @@ fn main() -> Result<()> {
     openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
+    // Started before the window loop: at login the settings portal can appear
+    // seconds after us, and the card must already know the mode when it opens.
+    let appearance = appearance::Appearance::start();
     let ipc::Handle {
         mut invocations,
         mut backlights,
@@ -119,7 +123,8 @@ fn main() -> Result<()> {
         .detach();
         cx.spawn(async move |cx| {
             let (settings, config) = flow_indicator::load_settings().unwrap_or_default();
-            let mut indicator = flow_indicator::FlowIndicator::new(settings, Some(config));
+            let mut indicator =
+                flow_indicator::FlowIndicator::new(settings, Some(config), appearance);
             while let Some(command) = flow_command_rx.recv().await {
                 cx.update(|cx| indicator.handle(command, cx));
             }

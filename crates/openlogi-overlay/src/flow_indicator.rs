@@ -9,6 +9,7 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 #[cfg(not(target_os = "windows"))]
@@ -16,9 +17,9 @@ use gpui::WindowDecorations;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement, Point, Render, SharedString, Size, Styled, Window, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowKind,
-    WindowOptions, div, hsla, point, px, rgb, size, svg,
+    ParentElement, Point, Render, SharedString, Size, Styled, Subscription, Window,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle,
+    WindowKind, WindowOptions, div, hsla, point, px, rgb, size, svg,
 };
 #[cfg(target_os = "linux")]
 use gpui::{Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
@@ -32,6 +33,8 @@ use openlogi_core::device::{
 use openlogi_ipc::Observation;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
+
+use crate::appearance::Appearance;
 
 /// Card width at 100% scale.
 const CARD_WIDTH: f32 = 300.0;
@@ -273,11 +276,8 @@ struct Palette {
 }
 
 impl Palette {
-    fn for_appearance(appearance: WindowAppearance) -> Self {
-        if matches!(
-            appearance,
-            WindowAppearance::Dark | WindowAppearance::VibrantDark
-        ) {
+    fn for_dark(dark: bool) -> Self {
+        if dark {
             Self {
                 card: hsla(0.0, 0.0, 0.10, 0.94),
                 text: rgb(0xF5_F5_F7).into(),
@@ -309,6 +309,12 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
 /// What the widget should show: disabled, empty, or a row set.
 struct FlowIndicatorView {
     rows: Vec<Row>,
+    /// The desktop's mode, watched because the window's own report can be
+    /// stuck at Light for a session started before the settings portal.
+    appearance: Arc<Appearance>,
+    /// Repaints on the platform's own appearance change; the watched mode
+    /// repaints through the tick instead.
+    appearance_subscription: Option<Subscription>,
     /// The card's X11 window, when this session is X11.
     #[cfg(target_os = "linux")]
     x11: Option<crate::platform::x11::CardWindow>,
@@ -338,9 +344,11 @@ struct PendingPlace {
 }
 
 impl FlowIndicatorView {
-    fn new(rows: Vec<Row>) -> Self {
+    fn new(rows: Vec<Row>, appearance: Arc<Appearance>) -> Self {
         Self {
             rows,
+            appearance,
+            appearance_subscription: None,
             #[cfg(target_os = "linux")]
             x11: None,
             #[cfg(target_os = "linux")]
@@ -348,6 +356,25 @@ impl FlowIndicatorView {
             #[cfg(target_os = "linux")]
             pending_place: None,
         }
+    }
+
+    /// Repaint when the platform reports an appearance change (the live path
+    /// on macOS and Windows).
+    fn observe_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.appearance_subscription =
+            Some(cx.observe_window_appearance(window, |_, _, cx| cx.notify()));
+    }
+
+    /// The watched mode wins once the desktop has reported one; until then
+    /// (and on platforms without a watcher) the window's own appearance is
+    /// the best answer available.
+    fn dark_mode(&self, window: &Window) -> bool {
+        self.appearance.is_dark().unwrap_or_else(|| {
+            matches!(
+                window.appearance(),
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            )
+        })
     }
 
     fn row_view(row: &Row, pal: &Palette) -> impl IntoElement + use<> {
@@ -446,7 +473,7 @@ impl Render for FlowIndicatorView {
         expect(unused_variables, reason = "the card's drag listeners are Linux-only")
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let pal = Palette::for_appearance(window.appearance());
+        let pal = Palette::for_dark(self.dark_mode(window));
         let root = div().size_full().child(self.card(&pal));
         #[cfg(target_os = "linux")]
         let root = Self::with_drag(root, cx);
@@ -597,6 +624,10 @@ pub(crate) struct FlowIndicator {
     /// The config that names the rows; `None` until the first successful read.
     config: Option<Config>,
     inventory: Vec<DeviceInventory>,
+    /// The desktop's light/dark mode, shared with the view that paints it.
+    appearance: Arc<Appearance>,
+    /// The appearance revision the open card last painted.
+    appearance_revision: u64,
     window: Option<WindowHandle<FlowIndicatorView>>,
     window_mode: Option<FlowIndicatorDisplayMode>,
     /// Whether the open window is a Wayland layer surface, which has no
@@ -609,11 +640,17 @@ pub(crate) struct FlowIndicator {
 }
 
 impl FlowIndicator {
-    pub(crate) fn new(settings: Settings, config: Option<Config>) -> Self {
+    pub(crate) fn new(
+        settings: Settings,
+        config: Option<Config>,
+        appearance: Arc<Appearance>,
+    ) -> Self {
         Self {
             settings,
             config,
             inventory: Vec::new(),
+            appearance_revision: appearance.revision(),
+            appearance,
             window: None,
             window_mode: None,
             layer_shell: false,
@@ -646,7 +683,22 @@ impl FlowIndicator {
                 #[cfg(target_os = "linux")]
                 self.settle_place(cx);
                 self.persist_position(cx);
+                self.follow_appearance(cx);
             }
+        }
+    }
+
+    /// Repaint the open card when the watched mode flips. The platform's own
+    /// appearance signal repaints through the view's subscription; this covers
+    /// the mode the watcher owns (and a portal that was late to the bus).
+    fn follow_appearance(&mut self, cx: &mut App) {
+        let revision = self.appearance.revision();
+        if revision == self.appearance_revision {
+            return;
+        }
+        self.appearance_revision = revision;
+        if let Some(handle) = self.window.as_ref() {
+            let _ = handle.update(cx, |_, _, cx| cx.notify());
         }
     }
 
@@ -810,12 +862,13 @@ impl FlowIndicator {
         // ordinary window.
         let attempts = window_attempts(self.settings.display_mode, bounds);
         let mut layer_shell = false;
+        let appearance = Arc::clone(&self.appearance);
         let opened = crate::platform::open_first(
             attempts.into_iter().map(|options| vec![options]).collect(),
             |options| {
                 layer_shell = is_layer_shell(&options.kind);
                 cx.open_window(options, |_, cx| {
-                    cx.new(|_| FlowIndicatorView::new(rows.to_vec()))
+                    cx.new(|_| FlowIndicatorView::new(rows.to_vec(), Arc::clone(&appearance)))
                 })
             },
         );
@@ -823,8 +876,9 @@ impl FlowIndicator {
         let Some(handle) = opened else {
             return;
         };
-        let configured = handle.update(cx, |view, window, _| {
+        let configured = handle.update(cx, |view, window, cx| {
             apply_display_mode(window, mode);
+            view.observe_appearance(window, cx);
             view.on_opened(window, origin);
         });
         if let Err(error) = configured {
@@ -989,6 +1043,8 @@ fn apply_display_mode(_window: &mut Window, _mode: FlowIndicatorDisplayMode) {}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{SavedPosition, card_size, clamp_origin};
     use gpui::{Bounds, point, px, size};
 
@@ -1043,7 +1099,9 @@ mod tests {
             online: true,
             kind: DeviceKind::Mouse,
         }];
-        let window = cx.add_window(|_, _| FlowIndicatorView::new(rows));
+        let window = cx.add_window(|_, _| {
+            FlowIndicatorView::new(rows, Arc::new(crate::appearance::Appearance::new()))
+        });
         cx.run_until_parked();
         let shown = window
             .read_with(cx, |view, _| view.rows.len())
@@ -1072,7 +1130,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let window = card_size(rows.len());
-        let (_view, cx) = cx.add_window_view(|_, _| FlowIndicatorView::new(rows));
+        let (_view, cx) = cx.add_window_view(|_, _| {
+            FlowIndicatorView::new(rows, Arc::new(crate::appearance::Appearance::new()))
+        });
         cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(400.0)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let card = cx
