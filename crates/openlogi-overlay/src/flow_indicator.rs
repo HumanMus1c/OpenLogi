@@ -406,7 +406,9 @@ impl FlowIndicatorView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.0))
+                            // The device name carries the row; it reads at the
+                            // same size as the value beside it.
+                            .text_size(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(pal.text)
                             .child(row.name.clone()),
