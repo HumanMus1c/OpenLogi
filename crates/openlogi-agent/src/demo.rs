@@ -80,7 +80,7 @@ pub(crate) async fn run(
             exit_demo(1);
         }
     };
-    let agent = mock::MockAgent::new(state);
+    let agent = mock::MockAgent::new(state).with_config_reload(crate::reload::apply_tray_settings);
     // The console is inert when stdin is not interactive (a GUI-spawned
     // agent): it stops at EOF and the demo keeps serving.
     mock::spawn_console(agent.clone());

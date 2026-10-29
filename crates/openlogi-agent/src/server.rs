@@ -114,17 +114,9 @@ impl AgentServer {
             Ok((config, file)) => {
                 let revision = file.revision();
                 let launch_at_login = config.app_settings.launch_at_login;
-                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-                let tray_battery = config.app_settings.tray_battery;
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
-                let tray_badge_style = config.app_settings.tray_badge_style;
-                #[cfg(target_os = "macos")]
-                let app_icon = config.app_settings.app_icon;
-                let language = config.app_settings.language.clone();
                 // The tray names its rows from the persisted device names, so
                 // it receives the reloaded config after the core accepts it.
-                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-                let tray_config = std::sync::Arc::new(config.clone());
+                let reloaded = std::sync::Arc::new(config.clone());
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
                     Some(saved) => self
@@ -137,35 +129,9 @@ impl AgentServer {
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::autostart::reconcile(launch_at_login);
-                // So does the app icon, and the menu-bar item is ours to
-                // restyle — the GUI can only reach the Dock and the bundle.
-                #[cfg(target_os = "macos")]
-                crate::tray::set_icon(app_icon);
-                // And the interface language: re-resolve the process locale
-                // (the Windows popup rebuilds per show and picks it up alone)
-                // and rebuild the macOS menu, whose titles were stamped at
-                // install.
-                openlogi_core::locale::activate(language.as_deref());
-                #[cfg(target_os = "macos")]
-                crate::tray::relocalize();
-                // The tray's readout is a live setting; the language is
-                // resolved first so its words are rebuilt in the new locale.
-                #[cfg(target_os = "windows")]
-                crate::tray_windows::set_battery_readout(tray_battery);
-                #[cfg(target_os = "windows")]
-                crate::tray_windows::set_badge_style(tray_badge_style);
-                #[cfg(target_os = "macos")]
-                crate::tray::set_battery_readout(tray_battery);
-                #[cfg(target_os = "linux")]
-                crate::tray_linux::set_battery_readout(tray_battery);
-                #[cfg(target_os = "linux")]
-                crate::tray_linux::set_badge_style(tray_badge_style);
-                #[cfg(target_os = "windows")]
-                crate::tray_windows::set_config(std::sync::Arc::clone(&tray_config));
-                #[cfg(target_os = "macos")]
-                crate::tray::set_config(std::sync::Arc::clone(&tray_config));
-                #[cfg(target_os = "linux")]
-                crate::tray_linux::set_config(std::sync::Arc::clone(&tray_config));
+                // The tray's readout, badge style, names, and language are
+                // live settings; the demo tree applies the same function.
+                crate::reload::apply_tray_settings(&reloaded);
                 Ok(revision)
             }
             Err(error) => {

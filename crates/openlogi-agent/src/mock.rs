@@ -1004,6 +1004,10 @@ fn agent_status() -> AgentStatus {
     }
 }
 
+/// The process-side effect of a GUI config save: what the host binary applies
+/// outside this library (the tray).
+type ConfigReload = Arc<dyn Fn(&Config) + Send + Sync>;
+
 /// The scripted [`Agent`] implementation, cloned per connection.
 #[derive(Clone)]
 pub struct MockAgent {
@@ -1023,6 +1027,10 @@ pub struct MockAgent {
     /// Where the console and the demo read the user's settings: the config
     /// file, as the agent reads it. Tests set their own.
     settings: fn() -> AppSettings,
+    /// What a GUI save should apply outside this library — the demo agent
+    /// points it at the tray it hosts; the standalone mock binary leaves it
+    /// empty.
+    config_reload: Option<ConfigReload>,
 }
 
 impl MockAgent {
@@ -1042,6 +1050,27 @@ impl MockAgent {
             backlight: BacklightOverlayManager::default(),
             disconnects: Arc::new(disconnects),
             settings: app_settings,
+            config_reload: None,
+        }
+    }
+
+    /// Install what a GUI save applies outside this library, so the demo tree
+    /// reacts to the settings changes the real agent applies on reload (the
+    /// Linux tray's readout and badge style, for one).
+    #[must_use]
+    pub fn with_config_reload(mut self, hook: impl Fn(&Config) + Send + Sync + 'static) -> Self {
+        self.config_reload = Some(Arc::new(hook));
+        self
+    }
+
+    /// Re-read the file the GUI just saved and hand it to the host's hook.
+    fn apply_reloaded_config(&self) {
+        let Some(hook) = self.config_reload.as_ref() else {
+            return;
+        };
+        match openlogi_core::config::ConfigFile::load_or_default() {
+            Ok((config, _)) => hook(&config),
+            Err(error) => warn!(%error, "config reload: could not read config.toml"),
         }
     }
 
@@ -1141,19 +1170,22 @@ impl Agent for MockAgent {
     }
 
     async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
-        let mut state = self.state.lock().await;
-        state.reload_calls += 1;
-        if state.disable_keys_scenario == DisableKeysScenario::ReloadFailsOnce
-            && state.reload_calls == 2
         {
-            return Err(ConfigReloadError {
-                message: "scripted Disable Keys reload failure".into(),
-            });
+            let mut state = self.state.lock().await;
+            state.reload_calls += 1;
+            if state.disable_keys_scenario == DisableKeysScenario::ReloadFailsOnce
+                && state.reload_calls == 2
+            {
+                return Err(ConfigReloadError {
+                    message: "scripted Disable Keys reload failure".into(),
+                });
+            }
+            info!(
+                call = state.reload_calls,
+                "reload_config (inventory unchanged in the mock)"
+            );
         }
-        info!(
-            call = state.reload_calls,
-            "reload_config (no-op in the mock)"
-        );
+        self.apply_reloaded_config();
         Ok(())
     }
 
@@ -1406,13 +1438,14 @@ impl Agent for MockAgent {
         info!(%route, slot, "rename_easy_switch_host");
         Ok(stored.clone())
     }
-    /// The mock reports no changes on its lights, so it has none to keep.
+    /// The mock reports no changes on its lights, so it has none to keep; the
+    /// settings the host applies (the tray) still follow the save.
     async fn reload_saved_config(
         self,
         _: Context,
         _saved: SavedConfig,
     ) -> Result<(), ConfigReloadError> {
-        info!("reload_saved_config (no-op in the mock)");
+        self.apply_reloaded_config();
         Ok(())
     }
 
@@ -1421,7 +1454,7 @@ impl Agent for MockAgent {
         _: Context,
         _saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError> {
-        info!("reload_saved_config_with_verdict (accepted no-op in the mock)");
+        self.apply_reloaded_config();
         Ok(SavedConfigVerdict::Accepted)
     }
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {

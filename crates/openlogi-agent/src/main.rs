@@ -29,6 +29,7 @@ mod lifecycle;
 mod logging;
 mod overlay;
 mod pairing;
+mod reload;
 #[cfg(target_os = "linux")]
 mod resume_linux;
 #[cfg(target_os = "windows")]
