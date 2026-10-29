@@ -745,6 +745,26 @@ instead of claiming Linux has no tray.
   badge and follows the reading (80% → 79% → 77%); XFCE and KDE keep their
   previous faces.
 
+- **The demo tree applies GUI saves to its tray.** The mock's config-reload
+  RPCs used to be accepted no-ops, so changing the tray readout or badge style
+  in a debug session only took effect after an agent restart, while the real
+  agent applies them live. The tray-facing part of a reload now lives in one
+  function (`openlogi-agent::reload::apply_tray_settings`), called by the real
+  handler and installed as the mock's reload hook by the demo agent. Verified
+  live: with `tray_badge_style = "wide"` the label read `MX Master 3S 80%`;
+  after switching the file to `rounded_square` and letting the running GUI
+  send its startup reload, the label cleared on the same agent.
+- **The card's device name matches its value.** The name was 13 px beside a
+  16 px percentage; it now renders at 16 px too, so a row reads as one line.
+- **GNOME tray icons live in a 16 px box.** The AppIndicator extension draws
+  every item at `Panel.PANEL_ICON_SIZE` (16 px) unless its `icon-size` setting
+  says otherwise (default 0 = 16). With Ubuntu's text scaling at 1.18 the
+  label text outgrows the badge; setting
+  `org.gnome.shell.extensions.appindicator icon-size` to 20 matches it (18/20/
+  22 all render, verified by screenshots; reset to 0 afterwards). The SNI
+  protocol has no per-item size, so this is a host setting, not something the
+  tray can override.
+
 ## Appendix: vigil-watt reference
 
 - Tray: lowest online non-system device; 32×32 GDI+ disc; white percentage or
