@@ -1,14 +1,17 @@
-//! The battery readout the tray shows.
+//! The readouts the tray shows: the device rows the menu lists, the tooltip,
+//! and the icon.
 //!
-//! The selection and wording are pure over the inventory snapshot, so the
+//! The selection and wording are pure over the observable snapshot, so the
 //! rules the settings app uses ([`BatteryInfo::reading`] and
-//! [`BatteryInfo::tone`]) are the rules the tray renders. The Win32 side owns
-//! only the icon, tooltip, and menu plumbing.
+//! [`BatteryInfo::tone`]) are the rules the tray renders, and a light reads
+//! out as its power and brightness the way the lighting panel does. The
+//! platform sides own only the icon, tooltip, and menu plumbing.
 
 use openlogi_core::device::{
-    BatteryDevice, BatteryTone, BatteryValue, DeviceInventory, battery_devices,
-    first_battery_readout,
+    BatteryDevice, BatteryTone, BatteryValue, DeviceInventory, DeviceKind, LightState,
+    StandaloneDevice, battery_devices, first_battery_readout, prettify_codename,
 };
+use openlogi_ipc::ObservedLight;
 
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 mod badge;
@@ -47,6 +50,73 @@ fn value(device: &BatteryDevice) -> String {
             .translation_key()
             .map_or_else(|| "–".to_owned(), |key| rust_i18n::t!(key).to_string()),
     }
+}
+
+/// One standalone light the menu lists: the identity a row needs, plus what
+/// the light last read back (`None` while it reads nothing — raw-report
+/// only, or not yet watched).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LightRow {
+    name: String,
+    online: bool,
+    state: Option<LightState>,
+}
+
+/// The menu's name for a standalone light: its tidied display name, or the
+/// localized kind when the OS descriptor reported none.
+fn light_name(device: &StandaloneDevice) -> String {
+    let name = prettify_codename(&device.display_name);
+    if name.is_empty() {
+        rust_i18n::t!(device.kind.translation_key()).to_string()
+    } else {
+        name
+    }
+}
+
+/// Collect the menu's light rows: every standalone light in standalone
+/// order, with its readback matched by route.
+fn light_rows(standalone: &[StandaloneDevice], lights: &[ObservedLight]) -> Vec<LightRow> {
+    standalone
+        .iter()
+        .filter(|device| device.kind == DeviceKind::Light)
+        .map(|device| LightRow {
+            name: light_name(device),
+            online: device.online,
+            state: lights
+                .iter()
+                .find(|light| light.route == device.route())
+                .map(|light| light.state),
+        })
+        .collect()
+}
+
+/// The value slot of a light row: the on word with the brightness the
+/// settings app would show (normalized over the light's own range), the off
+/// word alone, or the dash for no readback.
+fn light_value(state: Option<LightState>) -> String {
+    let Some(state) = state else {
+        return "–".to_owned();
+    };
+    if !state.on {
+        return rust_i18n::t!("common.off").to_string();
+    }
+    let on = rust_i18n::t!("common.on");
+    let percent = state
+        .brightness
+        .zip(state.capabilities.brightness)
+        .and_then(|(native, range)| range.percent_for_native(native));
+    percent.map_or_else(|| on.to_string(), |percent| format!("{on} · {percent}%"))
+}
+
+/// One disabled menu line for a light: name, then the power/brightness
+/// value, then the offline word.
+fn light_menu_line(row: &LightRow) -> String {
+    let mut line = format!("{}  {}", row.name, light_value(row.state));
+    if !row.online {
+        line.push_str("  · ");
+        line.push_str(&rust_i18n::t!("device.offline"));
+    }
+    line
 }
 
 fn shows_charging(device: &BatteryDevice) -> bool {
@@ -104,16 +174,23 @@ fn tooltip_readout(device: &BatteryDevice) -> Option<String> {
     Some(text)
 }
 
-/// What the tray shows for one inventory snapshot.
+/// What the tray shows for one observable snapshot: the battery devices and
+/// the standalone lights, with the rules that render them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BatterySummary {
+pub(crate) struct TrayReadout {
     devices: Vec<BatteryDevice>,
+    lights: Vec<LightRow>,
 }
 
-impl BatterySummary {
-    pub(crate) fn from_inventory(inventory: &[DeviceInventory]) -> Self {
+impl TrayReadout {
+    pub(crate) fn from_parts(
+        inventory: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
+        lights: &[ObservedLight],
+    ) -> Self {
         Self {
             devices: battery_devices(inventory),
+            lights: light_rows(standalone, lights),
         }
     }
 
@@ -125,18 +202,24 @@ impl BatterySummary {
     /// something to show.
     #[cfg(any(target_os = "windows", target_os = "macos", test))]
     pub(crate) fn tooltip(&self) -> Option<String> {
-        self.readout().map(|readout| format!("{BRAND} · {readout}"))
+        self.battery_readout()
+            .map(|readout| format!("{BRAND} · {readout}"))
     }
 
-    /// The readout without the brand prefix, for surfaces that carry the brand
-    /// separately (the Linux tray's tooltip title).
-    pub(crate) fn readout(&self) -> Option<String> {
+    /// The battery readout without the brand prefix, for surfaces that carry
+    /// the brand separately (the Linux tray's tooltip title).
+    pub(crate) fn battery_readout(&self) -> Option<String> {
         first_battery_readout(&self.devices).and_then(tooltip_readout)
     }
 
-    /// The menu's device rows in inventory order, capped.
+    /// The menu's device rows: the battery devices in inventory order, then
+    /// the standalone lights, capped together.
     pub(crate) fn menu_lines(&self) -> impl Iterator<Item = String> + '_ {
-        self.devices.iter().take(MAX_MENU_ROWS).map(menu_line)
+        self.devices
+            .iter()
+            .map(menu_line)
+            .chain(self.lights.iter().map(light_menu_line))
+            .take(MAX_MENU_ROWS)
     }
 
     /// The badge for the device the tooltip reads out, or a neutral dash when
@@ -167,19 +250,22 @@ impl BatterySummary {
     }
 
     /// Whether any device row would be listed.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn has_rows(&self) -> bool {
-        !self.devices.is_empty()
+        !self.devices.is_empty() || !self.lights.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BatterySummary, MAX_MENU_ROWS};
+    use super::{MAX_MENU_ROWS, TrayReadout};
     use openlogi_core::device::{
-        BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind, PairedDevice,
-        ReceiverInfo,
+        BatteryInfo, BatteryLevel, BatteryStatus, ChangedOnLight, DeviceInventory, DeviceKind,
+        LightCapabilities, LightState, LightValueRange, LightValueUnit, PairedDevice,
+        RawDeviceAddress, ReceiverInfo, StandaloneDevice,
     };
+    use openlogi_core::hid::DeviceRoute;
+    use openlogi_ipc::ObservedLight;
 
     fn battery(percentage: Option<u8>, level: BatteryLevel, status: BatteryStatus) -> BatteryInfo {
         BatteryInfo {
@@ -221,8 +307,8 @@ mod tests {
         }
     }
 
-    fn summary(devices: Vec<PairedDevice>) -> BatterySummary {
-        BatterySummary::from_inventory(&[inventory(devices)])
+    fn summary(devices: Vec<PairedDevice>) -> TrayReadout {
+        TrayReadout::from_parts(&[inventory(devices)], &[], &[])
     }
 
     #[test]
@@ -395,7 +481,7 @@ mod tests {
 
     #[test]
     fn nothing_to_read_out_falls_back_to_the_brand_tip() {
-        assert_eq!(BatterySummary::from_inventory(&[]).tooltip(), None);
+        assert_eq!(TrayReadout::from_parts(&[], &[], &[]).tooltip(), None);
         assert_eq!(
             summary(vec![paired(
                 1,
@@ -498,6 +584,251 @@ mod tests {
         assert_eq!(error.title(), None);
 
         // No device with a readout keeps the glyph.
-        assert_eq!(BatterySummary::from_inventory(&[]).title(), None);
+        assert_eq!(TrayReadout::from_parts(&[], &[], &[]).title(), None);
+    }
+
+    fn percent_range() -> LightCapabilities {
+        LightCapabilities {
+            power: true,
+            brightness: Some(
+                LightValueRange::new(0, 100, 1, LightValueUnit::Percent).expect("percent range"),
+            ),
+            ..LightCapabilities::default()
+        }
+    }
+
+    fn light_state(
+        capabilities: LightCapabilities,
+        on: bool,
+        brightness: Option<u16>,
+    ) -> LightState {
+        LightState {
+            capabilities,
+            on,
+            brightness,
+            temperature_kelvin: None,
+            brightness_limit: None,
+        }
+    }
+
+    fn standalone_light(name: &str, online: bool) -> StandaloneDevice {
+        StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:glow-1".to_owned(),
+            },
+            display_name: name.to_owned(),
+            manufacturer: None,
+            serial_number: None,
+            unit_id: [1, 2, 3, 4],
+            kind: DeviceKind::Light,
+            online,
+            capabilities: None,
+            light_capabilities: None,
+            driver_id: "litra".to_owned(),
+            registry_model_id: None,
+        }
+    }
+
+    fn observed(route: DeviceRoute, state: LightState) -> ObservedLight {
+        ObservedLight {
+            route,
+            state,
+            changed_on_light: ChangedOnLight::default(),
+        }
+    }
+
+    fn summary_with_lights(
+        devices: &[PairedDevice],
+        standalone: &[StandaloneDevice],
+        lights: &[ObservedLight],
+    ) -> TrayReadout {
+        TrayReadout::from_parts(&[inventory(devices.to_vec())], standalone, lights)
+    }
+
+    #[test]
+    fn a_lit_light_reads_out_as_on_with_its_brightness() {
+        let device = standalone_light("Synthetic Studio Light", true);
+        let route = device.route();
+        let rows: Vec<String> = summary_with_lights(
+            &[],
+            &[device],
+            &[observed(
+                route,
+                light_state(percent_range(), true, Some(42)),
+            )],
+        )
+        .menu_lines()
+        .collect();
+
+        assert_eq!(
+            rows,
+            vec![format!(
+                "Synthetic Studio Light  {} · 42%",
+                rust_i18n::t!("common.on")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_lumen_range_reads_out_as_a_normalized_percent() {
+        let capabilities = LightCapabilities {
+            power: true,
+            brightness: Some(
+                LightValueRange::new(20, 150, 1, LightValueUnit::Lumens).expect("lumen range"),
+            ),
+            ..LightCapabilities::default()
+        };
+        let mut device = standalone_light("Studio Light", true);
+        device.light_capabilities = Some(capabilities);
+        let route = device.route();
+        let rows: Vec<String> = summary_with_lights(
+            &[],
+            &[device],
+            &[observed(route, light_state(capabilities, true, Some(150)))],
+        )
+        .menu_lines()
+        .collect();
+
+        assert!(rows[0].ends_with(&format!("{} · 100%", rust_i18n::t!("common.on"))));
+    }
+
+    #[test]
+    fn an_off_light_reads_out_as_the_off_word_without_a_percent() {
+        let device = standalone_light("Studio Light", true);
+        let route = device.route();
+        let rows: Vec<String> = summary_with_lights(
+            &[],
+            &[device],
+            &[observed(
+                route,
+                light_state(percent_range(), false, Some(42)),
+            )],
+        )
+        .menu_lines()
+        .collect();
+
+        assert_eq!(
+            rows,
+            vec![format!("Studio Light  {}", rust_i18n::t!("common.off"))]
+        );
+    }
+
+    #[test]
+    fn a_light_without_a_readback_shows_the_dash() {
+        let rows: Vec<String> =
+            summary_with_lights(&[], &[standalone_light("Studio Light", true)], &[])
+                .menu_lines()
+                .collect();
+
+        assert_eq!(rows, vec!["Studio Light  –"]);
+    }
+
+    #[test]
+    fn an_offline_light_keeps_its_row_with_the_offline_word() {
+        let rows: Vec<String> =
+            summary_with_lights(&[], &[standalone_light("Studio Light", false)], &[])
+                .menu_lines()
+                .collect();
+
+        assert_eq!(
+            rows,
+            vec![format!(
+                "Studio Light  –  · {}",
+                rust_i18n::t!("device.offline")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_nameless_light_falls_back_to_the_kind() {
+        let rows: Vec<String> = summary_with_lights(&[], &[standalone_light("", true)], &[])
+            .menu_lines()
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![format!("{}  –", rust_i18n::t!("device.lighting"))]
+        );
+    }
+
+    #[test]
+    fn lights_list_after_the_battery_devices() {
+        let rows: Vec<String> = summary_with_lights(
+            &[paired(
+                1,
+                Some("MX Master 3S"),
+                DeviceKind::Mouse,
+                true,
+                Some(battery(
+                    Some(90),
+                    BatteryLevel::Good,
+                    BatteryStatus::Discharging,
+                )),
+            )],
+            &[standalone_light("Studio Light", true)],
+            &[],
+        )
+        .menu_lines()
+        .collect();
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].starts_with("MX Master 3S"));
+        assert!(rows[1].starts_with("Studio Light"));
+    }
+
+    #[test]
+    fn lights_have_no_battery_readout_so_the_brand_tip_stays() {
+        let device = standalone_light("Studio Light", true);
+        let route = device.route();
+        let summary = summary_with_lights(
+            &[],
+            &[device],
+            &[observed(
+                route,
+                light_state(percent_range(), true, Some(42)),
+            )],
+        );
+
+        assert_eq!(summary.tooltip(), None);
+        assert_eq!(summary.battery_readout(), None);
+        assert_eq!(summary.title(), None);
+        assert!(summary.has_rows());
+    }
+
+    #[test]
+    fn the_cap_covers_battery_rows_and_lights_together() {
+        let devices: Vec<PairedDevice> = (1..=6)
+            .map(|slot| {
+                paired(
+                    slot,
+                    Some(&format!("Device {slot}")),
+                    DeviceKind::Mouse,
+                    true,
+                    Some(battery(
+                        Some(90),
+                        BatteryLevel::Good,
+                        BatteryStatus::Discharging,
+                    )),
+                )
+            })
+            .collect();
+        let standalone: Vec<StandaloneDevice> = (0..2)
+            .map(|n| standalone_light(&format!("Light {n}"), true))
+            .collect();
+        let lights: Vec<ObservedLight> = standalone
+            .iter()
+            .map(|device| observed(device.route(), light_state(percent_range(), true, None)))
+            .collect();
+        let rows: Vec<String> = summary_with_lights(&devices, &standalone, &lights)
+            .menu_lines()
+            .collect();
+
+        assert_eq!(rows.len(), MAX_MENU_ROWS);
+        assert!(rows[MAX_MENU_ROWS - 1].contains("Device 6"));
+        assert!(rows.iter().all(|row| !row.contains("Light")));
     }
 }

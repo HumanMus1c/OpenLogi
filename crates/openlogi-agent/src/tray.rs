@@ -47,7 +47,7 @@ use tracing::{info, warn};
 use crate::activity_macos::{self, ActivityGate};
 use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item;
-use crate::tray_battery::BatterySummary;
+use crate::tray_readout::TrayReadout;
 
 /// Whether the menu-bar item carries the battery readout (title beside the
 /// glyph plus the device rows). Live-toggled from the IPC server's config
@@ -154,10 +154,12 @@ fn refresh_battery_readout() {
     });
 }
 
-/// The battery readout for one inventory snapshot, read on the calling
+/// The tray readout for one observable snapshot, read on the calling
 /// (main) thread.
-fn current_summary(observable: &ObservableState) -> BatterySummary {
-    observable.read(|snapshot| BatterySummary::from_inventory(&snapshot.inventory))
+fn current_summary(observable: &ObservableState) -> TrayReadout {
+    observable.read(|snapshot| {
+        TrayReadout::from_parts(&snapshot.inventory, &snapshot.standalone, &snapshot.lights)
+    })
 }
 
 /// The watcher mirrors the Windows tray's state watcher: `ObservableState`
@@ -435,18 +437,18 @@ fn install_status_item(
 
 /// Build the tray menu with the current locale's titles. The one constructor
 /// for both the install and a [`relocalize`] or battery-refresh rebuild, so
-/// the three cannot drift. `battery` supplies the disabled device rows above
+/// the three cannot drift. `readout` supplies the disabled device rows above
 /// the first separator; `None` (or the setting off) leaves the menu as it was
 /// before the readout existed.
 fn build_menu(
     mtm: MainThreadMarker,
     target: &MenuTarget,
-    battery: Option<&BatterySummary>,
+    readout: Option<&TrayReadout>,
 ) -> Retained<objc2_app_kit::NSMenu> {
     let menu = status_item::new_menu(mtm);
 
     if TRAY_BATTERY.load(Ordering::Relaxed)
-        && let Some(summary) = battery.filter(|summary| summary.has_rows())
+        && let Some(summary) = readout.filter(|summary| summary.has_rows())
     {
         for line in summary.menu_lines() {
             menu.addItem(&status_item::new_disabled_item(mtm, &line));

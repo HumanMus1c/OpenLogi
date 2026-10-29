@@ -25,7 +25,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
 
 use crate::shutdown::{self, ShutdownRequestSender};
-use crate::tray_battery::{BRAND, Badge, BatterySummary, render_badge};
+use crate::tray_readout::{BRAND, Badge, TrayReadout, render_badge};
 
 /// The GUI binary installed beside the agent (package and cargo target dirs
 /// use the same layout).
@@ -108,7 +108,7 @@ struct TrayView {
 }
 
 impl TrayView {
-    fn build(summary: &BatterySummary, battery: bool, style: TrayBadgeStyle) -> Self {
+    fn build(summary: &TrayReadout, battery: bool, style: TrayBadgeStyle) -> Self {
         if !battery {
             return Self {
                 tooltip: String::new(),
@@ -118,7 +118,7 @@ impl TrayView {
         }
         let badge = summary.badge();
         Self {
-            tooltip: summary.readout().unwrap_or_default(),
+            tooltip: summary.battery_readout().unwrap_or_default(),
             icons: ICON_SIZES
                 .iter()
                 .map(|&size| badge_icon(badge, size, style))
@@ -159,9 +159,9 @@ impl OpenLogiTray {
     }
 
     fn refresh(&mut self) {
-        let summary = self
-            .observable
-            .read(|snapshot| BatterySummary::from_inventory(&snapshot.inventory));
+        let summary = self.observable.read(|snapshot| {
+            TrayReadout::from_parts(&snapshot.inventory, &snapshot.standalone, &snapshot.lights)
+        });
         self.view = TrayView::build(&summary, self.battery, self.badge_style);
     }
 
@@ -464,7 +464,7 @@ mod tests {
     use openlogi_ipc::InventoryHealth;
 
     use super::{ICON_SIZES, OpenLogiTray, TrayCommand, argb_icon, badge_icon, decode_png_icon};
-    use crate::tray_battery::Badge;
+    use crate::tray_readout::Badge;
     use openlogi_core::config::TrayBadgeStyle;
 
     fn inventory() -> DeviceInventory {

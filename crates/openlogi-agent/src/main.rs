@@ -46,10 +46,10 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
-mod tray_battery;
 #[cfg(target_os = "linux")]
 mod tray_linux;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
+mod tray_readout;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 mod virtual_keyboard;

@@ -173,6 +173,8 @@ fn exit_demo(status: i32) -> ! {
 mod tests {
     use openlogi_ipc::InventoryHealth;
 
+    use crate::tray_readout::TrayReadout;
+
     use super::*;
 
     #[test]
@@ -208,9 +210,20 @@ mod tests {
             4
         );
         assert_eq!(snapshot.standalone.len(), 1);
+        // The light publishes its readback, so the tray can show its power
+        // and brightness instead of a battery.
+        assert_eq!(snapshot.lights.len(), 1);
+        assert!(snapshot.lights[0].state.on);
         assert!(
             snapshot.inventory[0].paired[0].battery.is_some(),
             "the tray badge needs the online mouse's battery"
         );
+        // The tray's menu lists the light after the battery devices.
+        let rows: Vec<String> =
+            TrayReadout::from_parts(&snapshot.inventory, &snapshot.standalone, &snapshot.lights)
+                .menu_lines()
+                .collect();
+        assert_eq!(rows.len(), 5);
+        assert!(rows[4].contains(rust_i18n::t!("common.on").as_ref()));
     }
 }

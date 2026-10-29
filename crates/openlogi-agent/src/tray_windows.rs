@@ -49,7 +49,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::shutdown::{self, ShutdownRequestSender};
-use crate::tray_battery::{Badge, BatterySummary, create_icon, destroy_icon, render_badge};
+use crate::tray_readout::{Badge, TrayReadout, create_icon, destroy_icon, render_badge};
 
 /// What the installed icon represents. The theme flag and badge style are
 /// part of the key so a taskbar theme change or a style reload rebuilds the
@@ -434,30 +434,32 @@ fn notify_icon(hwnd: HWND, add: bool, icon: HICON, tip: &str) -> bool {
 }
 
 /// The tooltip and badge read one snapshot so they cannot disagree.
-fn current_summary() -> Option<BatterySummary> {
+fn current_summary() -> Option<TrayReadout> {
     OBSERVABLE.with_borrow(|observable| {
         observable.as_ref().map(|observable| {
-            observable.read(|snapshot| BatterySummary::from_inventory(&snapshot.inventory))
+            observable.read(|snapshot| {
+                TrayReadout::from_parts(&snapshot.inventory, &snapshot.standalone, &snapshot.lights)
+            })
         })
     })
 }
 
-fn tip_for(summary: Option<&BatterySummary>) -> String {
+fn tip_for(summary: Option<&TrayReadout>) -> String {
     if !TRAY_BATTERY.load(Ordering::Relaxed) {
         return BRAND_TIP.to_owned();
     }
     summary
-        .and_then(BatterySummary::tooltip)
+        .and_then(TrayReadout::tooltip)
         .unwrap_or_else(|| BRAND_TIP.to_owned())
 }
 
-fn desired_key(hwnd: HWND, summary: Option<&BatterySummary>) -> IconKey {
+fn desired_key(hwnd: HWND, summary: Option<&TrayReadout>) -> IconKey {
     let light = taskbar_is_light();
     if !TRAY_BATTERY.load(Ordering::Relaxed) {
         return IconKey::Brand { light };
     }
     IconKey::Badge {
-        badge: summary.map_or_else(Badge::none, BatterySummary::badge),
+        badge: summary.map_or_else(Badge::none, TrayReadout::badge),
         size: small_icon_size(hwnd),
         light,
         style: badge_style(),
@@ -614,9 +616,13 @@ unsafe fn show_menu(hwnd: HWND) {
             OBSERVABLE.with_borrow(|observable| {
                 observable.as_ref().map_or_else(Vec::new, |observable| {
                     observable.read(|snapshot| {
-                        BatterySummary::from_inventory(&snapshot.inventory)
-                            .menu_lines()
-                            .collect()
+                        TrayReadout::from_parts(
+                            &snapshot.inventory,
+                            &snapshot.standalone,
+                            &snapshot.lights,
+                        )
+                        .menu_lines()
+                        .collect()
                     })
                 })
             })
