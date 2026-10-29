@@ -389,6 +389,62 @@ pub enum BatteryTone {
     Error,
 }
 
+/// The three-stage colour band a measured percentage maps to.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray, and the floating widget on the same band for the
+/// same percentage: 70% and above is healthy, 40% up to 70% is mid, and
+/// anything below 40% is low. Level-only readings have no percentage to
+/// band — [`BatteryInfo::color`] falls back to the firmware level for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryStage {
+    /// 70% and above.
+    Healthy,
+    /// 40% up to, but not including, 70%.
+    Mid,
+    /// Below 40%.
+    Low,
+}
+
+/// The percentage at or above which a reading is healthy.
+const HEALTHY_PERCENT: u8 = 70;
+/// The percentage at or above which a reading is in the middle band.
+const MID_PERCENT: u8 = 40;
+
+impl BatteryStage {
+    /// The band `percentage` falls in.
+    #[must_use]
+    pub const fn for_percentage(percentage: u8) -> Self {
+        if percentage >= HEALTHY_PERCENT {
+            Self::Healthy
+        } else if percentage >= MID_PERCENT {
+            Self::Mid
+        } else {
+            Self::Low
+        }
+    }
+}
+
+/// The colour role a battery surface paints a reading with.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray badge, and the floating widget on one colour for
+/// one reading. Status roles win over the percentage band: charging and
+/// charge complete paint green, a fault paints red, and only a discharging
+/// percentage takes its [`BatteryStage`]. A level-only reading keeps its
+/// firmware meaning, or stays neutral when the firmware reports nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryColor {
+    /// Charging, charge complete, or a healthy percentage.
+    Green,
+    /// A percentage in the middle band, or a firmware low level.
+    Amber,
+    /// A charging fault, a critical firmware level, or a low percentage.
+    Red,
+    /// Neither a percentage nor an urgent firmware level.
+    Neutral,
+}
+
 /// The charge at or below which a discharging battery needs attention.
 const LOW_BATTERY_PERCENT: u8 = 20;
 
@@ -441,6 +497,46 @@ impl BatteryInfo {
                     BatteryTone::Normal
                 }
             }
+        }
+    }
+
+    /// The three-stage colour band this reading's percentage falls in.
+    ///
+    /// `None` for a level-only or missing reading: there is no percentage to
+    /// band, so a surface asks [`Self::color`] instead, which falls back to
+    /// the firmware level.
+    #[must_use]
+    pub fn stage(&self) -> Option<BatteryStage> {
+        match self.reading() {
+            BatteryReading::Percent(percentage) => Some(BatteryStage::for_percentage(percentage)),
+            BatteryReading::Level(_) | BatteryReading::NoReading => None,
+        }
+    }
+
+    /// The colour role a surface paints this reading with.
+    ///
+    /// Precedence is status first, then the percentage band, then the
+    /// firmware level: a charging 45% device paints green (the bolt explains
+    /// why) rather than the band's amber, and a fault paints red even while
+    /// the firmware still reports a healthy percentage.
+    #[must_use]
+    pub fn color(&self) -> BatteryColor {
+        match self.status {
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full => {
+                BatteryColor::Green
+            }
+            BatteryStatus::Error => BatteryColor::Red,
+            BatteryStatus::Discharging | BatteryStatus::Unknown => match self.stage() {
+                Some(BatteryStage::Healthy) => BatteryColor::Green,
+                Some(BatteryStage::Mid) => BatteryColor::Amber,
+                Some(BatteryStage::Low) => BatteryColor::Red,
+                None => match self.level {
+                    BatteryLevel::Critical => BatteryColor::Red,
+                    BatteryLevel::Low => BatteryColor::Amber,
+                    BatteryLevel::Full => BatteryColor::Green,
+                    BatteryLevel::Good | BatteryLevel::Unknown => BatteryColor::Neutral,
+                },
+            },
         }
     }
 
@@ -919,10 +1015,11 @@ pub struct DeviceInventory {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryDevice, BatteryInfo, BatteryLevel, BatteryReading, BatteryStatus, BatteryTone,
-        BatteryValue, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-        LightValueRange, LightValueUnit, LockKey, ModelTransport, PairedDevice, ReceiverInfo,
-        battery_devices, first_battery_readout, flow_indicator_devices, prettify_codename,
+        BatteryColor, BatteryDevice, BatteryInfo, BatteryLevel, BatteryReading, BatteryStage,
+        BatteryStatus, BatteryTone, BatteryValue, Capabilities, DeviceInventory, DeviceKind,
+        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
+        ModelTransport, PairedDevice, ReceiverInfo, battery_devices, first_battery_readout,
+        flow_indicator_devices, prettify_codename,
     };
 
     #[test]
@@ -1155,6 +1252,80 @@ mod tests {
             let battery = reading_battery(percentage, level, status);
             assert_eq!(battery.tone(), expected, "{battery:?}");
         }
+    }
+
+    #[test]
+    fn a_percentage_bands_at_seventy_and_forty() {
+        use BatteryStage::{Healthy, Low, Mid};
+
+        for (percentage, expected) in [
+            (100, Healthy),
+            (70, Healthy),
+            (69, Mid),
+            (40, Mid),
+            (39, Low),
+            (1, Low),
+            (0, Low),
+        ] {
+            assert_eq!(
+                BatteryStage::for_percentage(percentage),
+                expected,
+                "{percentage}%"
+            );
+        }
+
+        // The band reads the measured percentage only: a level-only reading,
+        // and a charging cold start the percentage can't describe, have none.
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+        assert_eq!(
+            reading_battery(Some(69), good, discharging).stage(),
+            Some(Mid)
+        );
+        assert_eq!(
+            reading_battery(None, BatteryLevel::Low, discharging).stage(),
+            None
+        );
+        assert_eq!(
+            reading_battery(Some(0), good, BatteryStatus::Charging).stage(),
+            None
+        );
+    }
+
+    #[test]
+    fn colours_follow_status_first_and_then_the_percentage_band() {
+        use BatteryColor::{Amber, Green, Neutral, Red};
+
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+        let color = |percentage, level, status| reading_battery(percentage, level, status).color();
+
+        // A discharging percentage takes its band.
+        assert_eq!(color(Some(87), good, discharging), Green);
+        assert_eq!(color(Some(70), good, discharging), Green);
+        assert_eq!(color(Some(69), good, discharging), Amber);
+        assert_eq!(color(Some(40), good, discharging), Amber);
+        assert_eq!(color(Some(39), good, discharging), Red);
+        assert_eq!(color(Some(1), good, discharging), Red);
+        // Charging wins over the band: the bolt already explains the colour.
+        assert_eq!(color(Some(45), good, BatteryStatus::Charging), Green);
+        assert_eq!(color(Some(5), good, BatteryStatus::ChargingSlow), Green);
+        assert_eq!(color(Some(100), good, BatteryStatus::Full), Green);
+        // A fault paints red even while the firmware still reports a value.
+        assert_eq!(color(Some(80), good, BatteryStatus::Error), Red);
+        assert_eq!(
+            color(None, BatteryLevel::Unknown, BatteryStatus::Error),
+            Red
+        );
+        // Level-only readings keep the firmware's own meaning.
+        assert_eq!(color(None, good, discharging), Neutral);
+        assert_eq!(color(None, BatteryLevel::Low, discharging), Amber);
+        assert_eq!(color(None, BatteryLevel::Critical, discharging), Red);
+        assert_eq!(color(None, BatteryLevel::Full, discharging), Green);
+        assert_eq!(
+            color(None, BatteryLevel::Unknown, BatteryStatus::Unknown),
+            Neutral
+        );
     }
 
     #[test]
