@@ -695,6 +695,15 @@ instead of claiming Linux has no tray.
   `xfce4-panel` host process when the agent was started outside the desktop's
   environment) the tray falls back to the circle badge, which is what XFCE's
   icon-slot sizing can display.
+- **GNOME on Ubuntu 26.04 is Wayland-only.** GNOME 50 ships no X11 session
+  (`/usr/share/xsessions` has none, only `wayland-sessions`), and xrdp serves
+  X11, so the RDP session stays XFCE; the X session-manager alternative was
+  restored to `startxfce4` after checking. The AppIndicator extension
+  (`gnome-shell-ubuntu-extensions`) is installed and enabled, and a headless
+  GNOME Shell accepted the agent's SNI item
+  (`RegisteredStatusNotifierItems`); the extension supports `IconPixmap`,
+  `Activate`, and dbusmenu, so the tray is protocol-compatible. A visual
+  GNOME check still needs a real Wayland session.
 - **Wide Linux face** (`tray_badge_style = "wide"`, config file only): one
   SNI pixmap carries the name, a progress bar, and the percentage
   (142x22 px at the panel slot, 284x44 for 2x). The face itself renders as
