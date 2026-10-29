@@ -97,12 +97,13 @@ optional physical device key.
   `"circle"` draws the disc inscribed in the system's icon slot;
   `"rounded_square"` draws a full-bleed rounded square that carries the same
   visual weight as the square-ish icons around it. `"wide"` is a Linux-only
-  face showing the device name, a progress bar, and the value in one row; it
-  is set from this file only (Settings offers the two square styles). XFCE's
-  systray scales every item into the panel's icon slot, so XFCE keeps the
-  circle badge; other desktops render the wide face, whose legibility depends
-  on the host. Windows keeps the circle badge for it. macOS shows a text
-  title.
+  face showing the device name and its value: GNOME's AppIndicator extension
+  paints it as a text label beside the circle badge (that extension shows no
+  hover tooltip), XFCE keeps the circle badge because its systray scales every
+  item into the panel's icon slot, and other desktops render one wide pixmap
+  whose legibility depends on the host. It is set from this file only
+  (Settings offers the two square styles). Windows keeps the circle badge for
+  it; macOS shows a text title.
 - `flow_indicator` (default `true`): a floating card listing the devices the
   agent has detected, their battery percentages, and charging state. It lives
   in the overlay process, so it stays available with the settings window

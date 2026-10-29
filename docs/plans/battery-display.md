@@ -730,16 +730,20 @@ instead of claiming Linux has no tray.
   ScreenCast captures: dark card in a dark session, light card after a live
   switch to light and dark again after switching back; an overlay launched
   after the portal was up opened dark, the login-launched one stayed light.
-- **GNOME shows no SNI tooltips.** The AppIndicator extension's README states
-  tooltips are deliberately unimplemented, so hovering the badge never shows
-  the device tip there (the `ToolTip` property is still served for hosts that
-  render it, e.g. KDE). The extension does render the Ayatana extension
-  property `XAyatanaLabel` next to the icon. A lab prototype (patched ksni)
-  showed `MX Master 3S 77%` beside the badge in the GNOME top bar and updated
-  it live through `PropertiesChanged`; that label is the GNOME form of the wide
-  face. Shipping it needs ksni to expose the property: upstream PRs #42/#47 are
-  open and ksni 0.3.7 has no extension hook, so the repo would need a vendored
-  fork or a pinned fork dependency.
+- **GNOME shows no SNI tooltips; the wide face becomes a label there.** The
+  AppIndicator extension's README states tooltips are deliberately
+  unimplemented, so hovering the badge never shows the device tip (the
+  `ToolTip` property is still served for hosts that render it, e.g. KDE). The
+  extension does render the Ayatana extension property `XAyatanaLabel` next to
+  the icon, so `tray_badge_style = "wide"` now means "label" on GNOME: the
+  circle badge plus `MX Master 3S 77%` in the top bar, updated live. `ksni`
+  0.3.7 has no extension hook (upstream PRs #42/#47 are open), so
+  `vendor/ksni` carries upstream 0.3.7 plus the label properties,
+  `XAyatanaNewLabel`, and the `PropertiesChanged` entry GNOME actually
+  repaints from; the root `[patch.crates-io]` entry wires it in. Verified in
+  the headless GNOME session: the panel shows `MX Master 3S 80%` beside the
+  badge and follows the reading (80% → 79% → 77%); XFCE and KDE keep their
+  previous faces.
 
 ## Appendix: vigil-watt reference
 

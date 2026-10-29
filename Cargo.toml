@@ -117,6 +117,12 @@ gpui-base = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744
 gpui-kit-assets = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
 gpui-component-macros = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
 
+# The wide Linux tray face needs the Ayatana label extension, which upstream
+# ksni does not expose yet (PRs #42/#47). The copy under `vendor/ksni` is
+# upstream 0.3.7 plus that one patch; drop the entry once upstream ships it.
+[patch.crates-io]
+ksni = { path = "vendor/ksni" }
+
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely
 # needs FFI can opt in locally with `#[expect(unsafe_code, reason = "…")]`.

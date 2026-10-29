@@ -60,6 +60,8 @@ objc2-security = { workspace = true, features = ["AuthSession"] }
 openlogi-inject = { path = "../openlogi-inject" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Patched in `vendor/ksni`: the wide tray face needs the Ayatana label property,
+# which upstream ksni does not expose (see vendor/ksni/AGENTS.md).
 ksni = "0.3.7"
 png = "0.18"
 zbus = "5"

@@ -7,6 +7,9 @@ ignore-hidden = false
 # produces false positives and repeats every source key across all catalogs.
 extend-exclude = [
   ".git",
+  # Third-party source kept as upstream wrote it (the patched ksni copy); its
+  # identifiers and comments are not ours to respell.
+  "vendor",
   "crates/openlogi-ui/locales/*.toml",
   "!crates/openlogi-ui/locales/en.toml",
   "docs/README.*.md",

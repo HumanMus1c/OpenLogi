@@ -111,39 +111,86 @@ fn send(command: TrayCommand) {
     }
 }
 
-/// One rendered state: what the tooltip, icon, and menu read.
+/// How the running host can show the configured style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Face {
+    /// A square badge icon.
+    Badge(TrayBadgeStyle),
+    /// A wide pixmap carrying the readout.
+    Wide,
+    /// A square badge icon plus the Ayatana label (GNOME's AppIndicator
+    /// extension, which renders no SNI tooltip and sizes every pixmap into a
+    /// square icon slot).
+    Label,
+}
+
+impl Face {
+    fn for_host(style: TrayBadgeStyle, desktop: &str) -> Self {
+        if style != TrayBadgeStyle::Wide {
+            return Self::Badge(style);
+        }
+        let desktop = desktop.to_ascii_lowercase();
+        // XFCE first: `XFCE:GNOME` is an XFCE panel hosting the tray, and its
+        // systray scales every pixmap into the icon slot.
+        if desktop.contains("xfce") {
+            Self::Badge(TrayBadgeStyle::Circle)
+        } else if desktop.contains("gnome") {
+            Self::Label
+        } else {
+            Self::Wide
+        }
+    }
+}
+
+/// One rendered state: what the tooltip, label, icon, and menu read.
 #[derive(Clone)]
 struct TrayView {
     tooltip: String,
+    label: String,
     icons: Vec<ksni::Icon>,
     rows: Vec<String>,
 }
 
 impl TrayView {
-    fn build(summary: &TrayReadout, battery: bool, style: TrayBadgeStyle) -> Self {
-        let style = desktop_style(style);
+    fn build(summary: &TrayReadout, battery: bool, face: Face) -> Self {
         if !battery {
             return Self {
                 tooltip: String::new(),
+                label: String::new(),
                 icons: brand_icons(),
                 rows: Vec::new(),
             };
         }
-        let icons = if style == TrayBadgeStyle::Wide {
-            let badge = summary.wide_badge();
-            WIDE_HEIGHTS
-                .iter()
-                .map(|&height| wide_icon(&badge, height))
-                .collect()
-        } else {
-            let badge = summary.badge();
-            ICON_SIZES
-                .iter()
-                .map(|&size| badge_icon(badge, size, style))
-                .collect()
+        let icons = match face {
+            Face::Wide => {
+                let badge = summary.wide_badge();
+                WIDE_HEIGHTS
+                    .iter()
+                    .map(|&height| wide_icon(&badge, height))
+                    .collect()
+            }
+            Face::Badge(style) => {
+                let badge = summary.badge();
+                ICON_SIZES
+                    .iter()
+                    .map(|&size| badge_icon(badge, size, style))
+                    .collect()
+            }
+            Face::Label => {
+                let badge = summary.badge();
+                ICON_SIZES
+                    .iter()
+                    .map(|&size| badge_icon(badge, size, TrayBadgeStyle::Circle))
+                    .collect()
+            }
         };
         Self {
             tooltip: summary.battery_readout().unwrap_or_default(),
+            label: if face == Face::Label {
+                summary.battery_readout().unwrap_or_default()
+            } else {
+                String::new()
+            },
             icons,
             rows: summary.menu_lines().collect(),
         }
@@ -155,6 +202,7 @@ struct OpenLogiTray {
     shutdown_tx: ShutdownRequestSender,
     battery: bool,
     badge_style: TrayBadgeStyle,
+    face: Face,
     config: Arc<Config>,
     view: TrayView,
 }
@@ -167,14 +215,23 @@ impl OpenLogiTray {
         badge_style: TrayBadgeStyle,
         config: Arc<Config>,
     ) -> Self {
+        let face = Face::for_host(badge_style, desktop());
+        if face != Face::Badge(badge_style) {
+            info!(
+                ?face,
+                "tray — the configured style renders as this host's face"
+            );
+        }
         let mut tray = Self {
             observable,
             shutdown_tx,
             battery,
             badge_style,
+            face,
             config,
             view: TrayView {
                 tooltip: String::new(),
+                label: String::new(),
                 icons: Vec::new(),
                 rows: Vec::new(),
             },
@@ -192,7 +249,7 @@ impl OpenLogiTray {
                 Some(&self.config),
             )
         });
-        self.view = TrayView::build(&summary, self.battery, self.badge_style);
+        self.view = TrayView::build(&summary, self.battery, self.face);
     }
 
     fn apply(&mut self, command: TrayCommand) {
@@ -203,6 +260,7 @@ impl OpenLogiTray {
             }
             TrayCommand::BadgeStyle(style) => {
                 self.badge_style = style;
+                self.face = Face::for_host(style, desktop());
                 self.refresh();
             }
             TrayCommand::Config(config) => {
@@ -247,6 +305,14 @@ impl Tray for OpenLogiTray {
             description: self.view.tooltip.clone(),
             ..ToolTip::default()
         }
+    }
+
+    fn label(&self) -> String {
+        self.view.label.clone()
+    }
+
+    fn label_guide(&self) -> String {
+        self.view.label.clone()
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
@@ -345,40 +411,17 @@ fn run(
     });
 }
 
-/// The style the running desktop can actually render.
-///
-/// XFCE's systray scales every tray item into the panel's icon slot, so the
-/// wide face is unreadable there and falls back to the plain badge. Other
-/// desktops keep the configured style — the wide face stays an opt-in
-/// experiment, confined to the environments that can show it.
-fn supported_style(style: TrayBadgeStyle, desktop: &str) -> TrayBadgeStyle {
-    let xfce = desktop.to_ascii_lowercase().contains("xfce");
-    if style == TrayBadgeStyle::Wide && xfce {
-        TrayBadgeStyle::Circle
-    } else {
-        style
-    }
-}
-
-/// [`supported_style`] against the session's desktop, read once.
-fn desktop_style(style: TrayBadgeStyle) -> TrayBadgeStyle {
+/// The session's desktop name, read once: it decides which face the host can
+/// render (see [`Face::for_host`]).
+fn desktop() -> &'static str {
     static DESKTOP: OnceLock<String> = OnceLock::new();
-    static FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
-    let desktop = DESKTOP.get_or_init(desktop_name);
-    let supported = supported_style(style, desktop);
-    if supported != style && FALLBACK_LOGGED.set(()).is_ok() {
-        info!(
-            desktop = %desktop,
-            "this desktop scales tray items into the panel's icon slot — using the plain tray badge instead of the wide face"
-        );
-    }
-    supported
+    DESKTOP.get_or_init(desktop_name)
 }
 
 /// The session's desktop name. The environment is the primary signal; an
 /// agent started outside the desktop's own environment (a terminal, a user
 /// unit) still finds XFCE through its panel process, which is the SNI host
-/// whose icon slot the style has to fit.
+/// whose face the tray has to fit.
 fn desktop_name() -> String {
     let from_env = [
         "XDG_CURRENT_DESKTOP",
@@ -570,8 +613,8 @@ mod tests {
     use openlogi_ipc::InventoryHealth;
 
     use super::{
-        ICON_SIZES, OpenLogiTray, TrayCommand, WIDE_HEIGHTS, argb_icon, badge_icon,
-        decode_png_icon, supported_style,
+        Face, ICON_SIZES, OpenLogiTray, TrayCommand, WIDE_HEIGHTS, argb_icon, badge_icon,
+        decode_png_icon,
     };
     use crate::tray_readout::Badge;
     use openlogi_core::config::TrayBadgeStyle;
@@ -658,35 +701,78 @@ mod tests {
     }
 
     #[test]
-    fn xfce_keeps_the_plain_badge_instead_of_the_wide_face() {
+    fn each_host_gets_the_face_it_can_render() {
         use openlogi_core::config::TrayBadgeStyle;
 
+        // XFCE's systray scales a wide pixmap into its icon slot.
         for desktop in ["XFCE", "XFCE:GNOME", "xfce"] {
             assert_eq!(
-                supported_style(TrayBadgeStyle::Wide, desktop),
-                TrayBadgeStyle::Circle,
+                Face::for_host(TrayBadgeStyle::Wide, desktop),
+                Face::Badge(TrayBadgeStyle::Circle),
                 "{desktop}"
             );
         }
-        // The square badge is a plain icon and stays as configured.
-        assert_eq!(
-            supported_style(TrayBadgeStyle::RoundedSquare, "XFCE"),
-            TrayBadgeStyle::RoundedSquare
-        );
-        // Desktops that can keep the aspect ratio keep the wide face.
-        for desktop in ["ubuntu:GNOME", "KDE", "sway"] {
+        // GNOME's AppIndicator extension paints the Ayatana label, not a
+        // wide pixmap (and no tooltip either).
+        for desktop in ["ubuntu:GNOME", "GNOME", "gnome:GNOME"] {
             assert_eq!(
-                supported_style(TrayBadgeStyle::Wide, desktop),
-                TrayBadgeStyle::Wide,
+                Face::for_host(TrayBadgeStyle::Wide, desktop),
+                Face::Label,
+                "{desktop}"
+            );
+        }
+        // Hosts that can keep the aspect ratio keep the wide face itself.
+        for desktop in ["KDE", "sway", "wayfire"] {
+            assert_eq!(
+                Face::for_host(TrayBadgeStyle::Wide, desktop),
+                Face::Wide,
+                "{desktop}"
+            );
+        }
+        // The plain badge styles are host-independent.
+        for desktop in ["XFCE", "ubuntu:GNOME", "KDE", ""] {
+            assert_eq!(
+                Face::for_host(TrayBadgeStyle::RoundedSquare, desktop),
+                Face::Badge(TrayBadgeStyle::RoundedSquare),
                 "{desktop}"
             );
         }
     }
 
     #[test]
+    fn the_gnome_label_names_the_device_behind_a_square_badge() {
+        let mut tray = tray(true);
+        tray.face = Face::Label;
+        tray.refresh();
+
+        assert_eq!(tray.label(), "MX Master 3S 64%");
+        let icons = tray.icon_pixmap();
+        assert_eq!(icons.len(), ICON_SIZES.len());
+        for icon in &icons {
+            assert_eq!(
+                icon.width, icon.height,
+                "GNOME sizes every pixmap into a square slot: {}x{}",
+                icon.width, icon.height
+            );
+        }
+
+        // Switching the readout off clears the label with the badge.
+        tray.apply(TrayCommand::Battery(false));
+        assert!(tray.label().is_empty());
+        // A plain badge style never grows a label.
+        tray.apply(TrayCommand::Battery(true));
+        tray.face = Face::Badge(TrayBadgeStyle::Circle);
+        tray.refresh();
+        assert!(tray.label().is_empty());
+    }
+
+    #[test]
     fn the_wide_style_renders_the_name_the_bar_and_the_value_in_one_row() {
         let mut tray = tray(true);
-        tray.apply(TrayCommand::BadgeStyle(TrayBadgeStyle::Wide));
+        // Pin the wide face: `Face::for_host` would pick the GNOME label when
+        // the test host is a GNOME desktop.
+        tray.face = Face::Wide;
+        tray.refresh();
         let icons = tray.icon_pixmap();
         assert_eq!(icons.len(), WIDE_HEIGHTS.len());
         for icon in &icons {
