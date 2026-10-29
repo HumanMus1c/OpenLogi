@@ -137,38 +137,50 @@ The agent's input-hook watchdog gives CoreGraphics permission probes a 10-second
 
 ## Developing the GUI without hardware
 
-`openlogi-agent-mock` serves the real agent IPC contract from a scripted
-in-memory inventory, so the desktop app can be developed with no Logitech
-device (or receiver) attached:
+The build tree owns the device source ("Device source: debug tree vs release
+tree" in the [agent guide](../AGENTS.md)): a **debug** build of
+`openlogi-agent` serves the scripted demo devices — the real agent IPC
+contract from an in-memory inventory, with no HID or input-hook I/O — while a
+**release** build always drives real devices. A debug run of the full suite
+needs no Logitech device (or receiver) attached and never touches one:
 
 ```sh
-cargo run -p openlogi-agent --bin openlogi-agent-mock   # then, in another terminal:
-OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop
+cargo run -p openlogi-desktop   # debug: the GUI spawns the demo agent itself
 ```
 
-The mock defaults itself to the `openlogi-dev` profile (as if `OPENLOGI_PROFILE=dev`
-were set), which is the profile the dev app bundle already uses — so it meets the
-dev GUI on the dev socket, and an installed *release* build, which is on the
-production profile, keeps running untouched. (A locally built bundle installed
-into `/Applications` carries `-dev` identifiers and therefore shares the dev
-profile: it and the mock contend for the same lock, and whichever starts second
-exits.) `OPENLOGI_DEV_AGENT=0` keeps the runner from building and embedding
-the real agent for the GUI to auto-spawn; add `OPENLOGI_ALLOW_EXTERNAL_AGENT=1`
-if your installed production agent is running, since the runner's guard against
-it predates the profile split and cannot know the dev GUI is on a separate
-socket. Pass `OPENLOGI_PROFILE=prod` to serve the production socket instead; the
-mock then contends for the production agent's single-instance lock and refuses
-to start while it is running.
+The demo replaces only the device layer: the IPC server, the tray, shutdown
+handling, and the `-mock` version marker are the agent's own, and the profile
+resolves exactly as a production agent's does. The tray badge and hover card
+show demo batteries exactly as they would show real ones.
+`OPENLOGI_MOCK_DEVICES=0` opts a debug build back onto real hardware.
+
+`openlogi-agent-mock` remains as the standalone dev tool for the cases where
+the process must be the mock from the start — loading a semantic fixture
+(`--fixture profile.json`, frozen test time), or serving a chosen profile
+socket. It defaults itself to the `openlogi-dev` profile (as if
+`OPENLOGI_PROFILE=dev` were set), which is the profile the macOS dev app bundle
+already uses — so it meets the dev GUI on the dev socket, and an installed
+*release* build, which is on the production profile, keeps running untouched.
+(A locally built bundle installed into `/Applications` carries `-dev`
+identifiers and therefore shares the dev profile: it and the mock contend for
+the same lock, and whichever starts second exits.) `OPENLOGI_DEV_AGENT=0` keeps
+the runner from building and embedding the real agent for the GUI to
+auto-spawn; add `OPENLOGI_ALLOW_EXTERNAL_AGENT=1` if your installed production
+agent is running, since the runner's guard against it predates the profile
+split and cannot know the dev GUI is on a separate socket. Pass
+`OPENLOGI_PROFILE=prod` to serve the production socket instead; the mock then
+contends for the production agent's single-instance lock and refuses to start
+while it is running.
 
 The script covers an online mouse (DPI and SmartShift writes persist and read
 back, battery drains so poll-driven repaints are visible), an offline mouse, a
 lighting-capable keyboard, a directly-attached device, and a full Bolt pairing
 flow (discovery → passkey → paired). Its agent version carries a `-mock` suffix,
-so a mock session is identifiable in the UI. It is a dev tool only and is never
-bundled.
+so a mock session is identifiable in the UI. The demo mode exists only in debug
+builds, and the mock binary is never bundled.
 
-While the mock runs, type a command in its terminal and press Enter to change
-what it reports. `help` lists the commands, and `devices` numbers the devices
+While the demo agent or the mock runs, type a command in its terminal and
+press Enter to change what it reports. `help` lists the commands, and `devices` numbers the devices
 that the other commands address:
 
 ```text

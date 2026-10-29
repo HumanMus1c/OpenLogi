@@ -25,3 +25,9 @@ pub const ASSETS: &str = "OPENLOGI_ASSETS";
 /// Pins the GUI's device renders to one depot regardless of what is attached
 /// — a development convenience read in two places.
 pub const FORCE_DEPOT: &str = "OPENLOGI_FORCE_DEPOT";
+
+/// Opts a debug-build agent out of the scripted demo devices (`0`) or back
+/// onto them (`1`). The build tree owns the default — a debug build serves the
+/// demo devices, a release build always drives real hardware — and a release
+/// build ignores this variable.
+pub const MOCK_DEVICES: &str = "OPENLOGI_MOCK_DEVICES";

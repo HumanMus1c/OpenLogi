@@ -5,6 +5,9 @@
 //! launchd autostart, and (macOS) hosts the menu-bar status item. The async
 //! core walks the state machine in `lifecycle` on a tokio runtime; on macOS
 //! the process main thread hosts the AppKit run loop the menu bar requires.
+//!
+//! In a debug build the agent serves the scripted demo devices instead of real
+//! hardware — see [`demo`]; release builds always drive real devices.
 
 // Without this Windows runs the exe as a console app and pops a terminal
 // window whenever the GUI's sibling spawn or the Run-key autostart starts the
@@ -19,6 +22,7 @@
 mod activity_macos;
 mod autostart;
 mod binary_watch;
+mod demo;
 #[cfg(target_os = "macos")]
 mod input_monitoring;
 mod lifecycle;
@@ -50,49 +54,43 @@ mod tray_linux;
 mod tray_windows;
 mod virtual_keyboard;
 
+use std::ffi::OsString;
+use std::process::ExitCode;
 use std::sync::Arc;
 
+use openlogi_agent::mock;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::config::Config;
+use openlogi_core::single_instance::InstanceGuard;
 #[cfg(not(target_os = "macos"))]
 use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 
-fn main() {
+fn main() -> ExitCode {
     // A probe instance answers and leaves before any agent machinery — log,
     // singleton lock, devices — starts.
     #[cfg(target_os = "macos")]
     if input_monitoring::answer_probe_if_asked() {
-        return;
+        return ExitCode::SUCCESS;
     }
     logging::init();
+
+    // The build tree owns the device source: a debug build serves the scripted
+    // demo devices so feature testing never needs (or touches) hardware, a
+    // release build always drives real devices. `OPENLOGI_MOCK_DEVICES`
+    // overrides within a debug build only. The args travel with the demo —
+    // it accepts the mock's `--fixture` — and are ignored otherwise.
+    let demo = demo::requested();
+    let demo_args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
     // Single-instance guard: the agent owns all device I/O, the CGEventTap, and
     // the IPC socket, so a second agent must never start — launchd's KeepAlive
     // racing the GUI's one-shot auto-spawn could otherwise bring up two, and the
     // loser would steal the socket and install a duplicate event tap. Held for
     // the whole process; the OS releases it on exit (crash-recovery is free).
-    let _guard = match openlogi_core::single_instance::acquire(
-        openlogi_core::single_instance::Role::Agent,
-    ) {
-        Ok(g) => g,
-        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
-            // The holder may be a leftover from before this binary's update —
-            // a pre-self-restart agent never exits on its own, and it would
-            // wedge the (newer) GUI on its connecting screen forever. If it
-            // provably speaks an older protocol, replace it; otherwise exit
-            // as the duplicate we are.
-            let Some(g) = takeover::try_replace_stale() else {
-                info!(path = %path.display(), "another openlogi-agent is already running — exiting");
-                return;
-            };
-            info!("replaced a stale agent — continuing as the new one");
-            g
-        }
-        Err(e) => {
-            warn!(error = %e, "single-instance check failed — exiting");
-            return;
-        }
+    let _guard = match acquire_agent_lock(demo) {
+        Ok(guard) => guard,
+        Err(exit) => return exit,
     };
 
     // Every non-signal process transition reports to the lifecycle owner. In
@@ -114,8 +112,13 @@ fn main() {
     openlogi_core::locale::activate(config.app_settings.language.as_deref());
 
     // The tray and the IPC server read the same cell; construct it before the
-    // tray thread starts so the first tooltip already has a live handle.
-    let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
+    // tray thread starts so the first tooltip already has a live handle. The
+    // demo marks its version so no surface can mistake it for a live one.
+    let observable = Arc::new(ObservableState::new(if demo {
+        format!("{}{}", env!("CARGO_PKG_VERSION"), mock::VERSION_SUFFIX)
+    } else {
+        env!("CARGO_PKG_VERSION").to_string()
+    }));
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -124,7 +127,7 @@ fn main() {
         Ok(rt) => rt,
         Err(e) => {
             warn!(error = %e, "tokio runtime init failed; agent exiting");
-            return;
+            return ExitCode::SUCCESS;
         }
     };
 
@@ -157,16 +160,25 @@ fn main() {
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(
-                    config,
-                    shutdown_requests,
-                    observable,
-                    armed_tx,
-                ));
+                if demo {
+                    runtime.block_on(demo::run(
+                        demo_args,
+                        shutdown_requests,
+                        observable,
+                        armed_tx,
+                    ));
+                } else {
+                    runtime.block_on(lifecycle::run(
+                        config,
+                        shutdown_requests,
+                        observable,
+                        armed_tx,
+                    ));
+                }
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
-            return;
+            return ExitCode::SUCCESS;
         }
         if armed_rx.recv().is_ok() {
             tray::run_app_loop(
@@ -182,7 +194,48 @@ fn main() {
     #[cfg(not(target_os = "macos"))]
     {
         start_platform_services(&config, &observable, &shutdown_tx, &device_io_signal);
-        runtime.block_on(lifecycle::run(config, shutdown_requests, observable));
+        if demo {
+            runtime.block_on(demo::run(demo_args, shutdown_requests, observable));
+        } else {
+            runtime.block_on(lifecycle::run(config, shutdown_requests, observable));
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Take the agent's singleton lock, or hand back the code to exit with.
+///
+/// A demo agent leaves a running holder in place — the takeover escape hatch
+/// already refuses in debug builds, and two agents would fight over the same
+/// profile's socket. A production duplicate may replace a stale holder; any
+/// other failure is a plain leave.
+fn acquire_agent_lock(demo: bool) -> Result<InstanceGuard, ExitCode> {
+    match openlogi_core::single_instance::acquire(openlogi_core::single_instance::Role::Agent) {
+        Ok(guard) => Ok(guard),
+        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) if demo => {
+            warn!(
+                path = %path.display(),
+                "another openlogi-agent is already running — the demo agent leaves it in place"
+            );
+            Err(ExitCode::FAILURE)
+        }
+        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
+            // The holder may be a leftover from before this binary's update —
+            // a pre-self-restart agent never exits on its own, and it would
+            // wedge the (newer) GUI on its connecting screen forever. If it
+            // provably speaks an older protocol, replace it; otherwise exit
+            // as the duplicate we are.
+            let Some(guard) = takeover::try_replace_stale() else {
+                info!(path = %path.display(), "another openlogi-agent is already running — exiting");
+                return Err(ExitCode::SUCCESS);
+            };
+            info!("replaced a stale agent — continuing as the new one");
+            Ok(guard)
+        }
+        Err(e) => {
+            warn!(error = %e, "single-instance check failed — exiting");
+            Err(ExitCode::SUCCESS)
+        }
     }
 }
 

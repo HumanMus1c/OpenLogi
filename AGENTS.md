@@ -128,6 +128,26 @@ That file owns tier selection, commands, and the CI job map. Run the applicable
 gate on the final tree; do not push a known-red tree or bypass the hooks.
 A skipped job is **not** a pass. These procedures do not authorize a push.
 
+### Device source: debug tree vs release tree
+
+The build tree owns the device source, and the agent binary enforces the split:
+
+- **Debug builds** of `openlogi-agent` serve the scripted demo devices — the
+  canonical synthetic inventory (three Bolt-paired devices, a directly attached
+  mouse, and a standalone light) — instead of touching HID hardware or the
+  input hook. The GUI, overlay, and tray run unchanged against it, so a debug
+  run never needs, or disturbs, real hardware. The agent's version carries the
+  `-mock` marker, `--fixture <profile.json>` loads a semantic profile, and the
+  mock's stdin console still drives it. `OPENLOGI_MOCK_DEVICES=0` opts a debug
+  build back onto real hardware.
+- **Release builds** always drive real connected devices; the knob never turns
+  a release build into a demo.
+
+**Every feature must behave and operate identically on Linux and Windows.**
+Develop and test in the debug tree on both OSes — same demo devices, same IPC
+contract — then verify the release build against real hardware. A feature
+verified on one OS is not done.
+
 ### Running the app
 
 - Dev-run with `cargo run -p openlogi-desktop` — a cargo runner wraps the build into
@@ -143,9 +163,10 @@ A skipped job is **not** a pass. These procedures do not authorize a push.
   built agent and waits for its socket, so the GUI's first IPC connect succeeds
   instead of exercising the production spawn-on-unreachable fallback.
   `OPENLOGI_DEV_AGENT=0` opts out of all of it.
-- No hardware attached? `cargo run -p openlogi-agent --bin openlogi-agent-mock` serves
-  a scripted inventory over the dev IPC socket, so the GUI runs unmodified and the
-  production app stays untouched.
+- No hardware attached? A debug build of the agent already serves the scripted
+  demo inventory ("Device source" above), so `cargo run -p openlogi-desktop`
+  works as is. `cargo run -p openlogi-agent --bin openlogi-agent-mock` remains
+  as the standalone dev tool for `--fixture` runs and explicit profile choice.
 - Mechanics, dev profiles, and the mock's scope: `docs/DEVELOPMENT.md`.
 
 ## Rust standards

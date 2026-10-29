@@ -33,8 +33,9 @@ For isolated controls in a debug build:
 OPENLOGI_PROFILE=dev OPENLOGI_DEV_AGENT=0 OPENLOGI_COMPONENT_GALLERY=1 cargo run -p openlogi-desktop
 ```
 
-For app workflows, start the mock first. After it binds its endpoint, start the
-desktop in a second terminal or managed service:
+For app workflows, either run the desktop debug build directly — a debug agent
+serves the scripted demo devices by default, so the GUI spawns it itself — or
+start the mock first, then the desktop in a second terminal or managed service:
 
 ```sh
 OPENLOGI_PROFILE=dev cargo run -p openlogi-agent --bin openlogi-agent-mock
