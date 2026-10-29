@@ -38,7 +38,8 @@
 //!   plus one directly-attached mouse — covering every panel and both route
 //!   kinds without hardware.
 //! - A standalone Litra light whose power / brightness / temperature writes
-//!   persist, and a `camera_active` flag that flips every 30s so the
+//!   persist and publish as light readbacks, and a `camera_active` flag that
+//!   flips every 30s so the
 //!   camera-linked light rendering has something to follow.
 //! - DPI / SmartShift writes persist in memory and read back, so sliders and
 //!   toggles behave like a live device.
@@ -64,10 +65,10 @@ use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{AppSettings, Config, Lighting};
+use openlogi_core::config::{AppSettings, Config, LightSettings, Lighting};
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
-    PairedDevice, StandaloneDevice, prettify_codename,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
+    DeviceKind, LightState, LockKey, PairedDevice, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation};
 use openlogi_core::single_instance::{self, InstanceError, Role};
@@ -82,8 +83,9 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation,
     Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind,
-    NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    NoticeObservation, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -429,6 +431,10 @@ pub struct State {
     battery_overrides: Vec<(DeviceRoute, BatteryInfo)>,
     /// Devices the console made fail every read and write while online.
     faults: Vec<(DeviceRoute, Fault)>,
+    /// What each standalone light last read back — the readback the real
+    /// agent's light watcher keeps: seeded from the profile, moved by light
+    /// writes, and published on every poll.
+    lights: Vec<(DeviceRoute, LightState)>,
     /// Which batteries the console's readings have announced, as the agent
     /// keeps it.
     low_battery: LowBatteryWatch,
@@ -458,6 +464,7 @@ impl State {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
+        let lights = seed_lights(&profile);
         Ok(Self {
             profile,
             paired_extra: Vec::new(),
@@ -469,6 +476,7 @@ impl State {
             clock,
             battery_overrides: Vec::new(),
             faults: Vec::new(),
+            lights,
             low_battery: LowBatteryWatch::default(),
             disable_keys_scenario,
             disable_keys_reads: 0,
@@ -660,6 +668,46 @@ impl State {
 
     fn standalone(&self) -> Vec<StandaloneDevice> {
         self.profile.standalone.clone()
+    }
+
+    /// The readbacks the standalone lights publish, as the real agent's
+    /// watcher publishes them. No light is marked as changed on itself: the
+    /// demo has no buttons, only OpenLogi writes.
+    fn observed_lights(&self) -> Vec<ObservedLight> {
+        self.lights
+            .iter()
+            .map(|(route, state)| ObservedLight {
+                route: route.clone(),
+                state: *state,
+                changed_on_light: ChangedOnLight::default(),
+            })
+            .collect()
+    }
+
+    /// Move the light on `route` to `command`'s value. Validation has already
+    /// run; a route without a seeded readback has nothing to move.
+    fn apply_light_command(&mut self, route: &DeviceRoute, command: LightCommand) {
+        let Some((_, state)) = self
+            .lights
+            .iter_mut()
+            .find(|(light_route, _)| light_route == route)
+        else {
+            return;
+        };
+        match command {
+            LightCommand::Power(enabled) => state.on = enabled,
+            LightCommand::BrightnessPercent(percent) => {
+                if let Some(native) = state
+                    .capabilities
+                    .brightness
+                    .and_then(|range| range.native_for_percent(percent))
+                {
+                    state.brightness = Some(native);
+                }
+            }
+            LightCommand::BrightnessNative(native) => state.brightness = Some(native),
+            LightCommand::TemperatureKelvin(kelvin) => state.temperature_kelvin = Some(kelvin),
+        }
     }
 
     fn settings_for(&self, route: &DeviceRoute) -> Result<&ProfileDeviceSettings, WriteError> {
@@ -993,6 +1041,34 @@ impl MockAgent {
     }
 }
 
+/// Seed each standalone light's readback from its recorded capabilities and
+/// the saved defaults: a light before its first write reports its defaults,
+/// as a factory-fresh Litra would.
+fn seed_lights(profile: &DeviceProfile) -> Vec<(DeviceRoute, LightState)> {
+    let saved = LightSettings::default();
+    profile
+        .standalone
+        .iter()
+        .filter_map(|device| {
+            let capabilities = device.light_capabilities?;
+            Some((
+                device.route(),
+                LightState {
+                    capabilities,
+                    on: saved.enabled,
+                    brightness: capabilities
+                        .brightness
+                        .and_then(|range| range.native_for_percent(saved.brightness_percent)),
+                    // The saved defaults carry no temperature; a recorded one
+                    // would map here.
+                    temperature_kelvin: None,
+                    brightness_limit: None,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Render what the GUI observes out of the scripted state.
 fn snapshot_of(state: &State) -> AgentSnapshot {
     AgentSnapshot {
@@ -1002,7 +1078,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         camera_active: state.camera_active(),
         pairing: state.phase.clone(),
         foreground: state.foreground(),
-        lights: Vec::new(),
+        lights: state.observed_lights(),
     }
 }
 
@@ -1525,8 +1601,9 @@ impl Agent for MockAgent {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         validate_light_command(&state, &route, command)?;
+        state.apply_light_command(&route, command);
         info!(%route, ?command, "set_light");
         Ok(())
     }
@@ -1537,8 +1614,9 @@ impl Agent for MockAgent {
         route: DeviceRoute,
         enabled: bool,
     ) -> Result<(), WriteError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         validate_light_command(&state, &route, LightCommand::Power(enabled))?;
+        state.apply_light_command(&route, LightCommand::Power(enabled));
         info!(%route, enabled, "set_light_manual_power");
         Ok(())
     }

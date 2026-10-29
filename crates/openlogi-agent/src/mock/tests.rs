@@ -1036,3 +1036,80 @@ async fn disable_keys_write_mismatch_is_retained_and_reported() {
         0xa0
     );
 }
+
+fn light_route() -> DeviceRoute {
+    built_in_profile()
+        .expect("built-in profile should construct")
+        .standalone[0]
+        .route()
+}
+
+#[tokio::test]
+async fn light_writes_persist_and_publish_readbacks() {
+    let agent = MockAgent::new(test_state());
+    let route = light_route();
+
+    let seeded = agent
+        .current()
+        .await
+        .snapshot
+        .lights
+        .first()
+        .expect("the demo light publishes its readback")
+        .clone();
+    assert_eq!(seeded.route, route);
+    assert!(seeded.state.on, "the light seeds at the saved defaults");
+    assert_eq!(seeded.state.brightness, Some(100));
+
+    agent
+        .clone()
+        .set_light(
+            tarpc::context::current(),
+            route.clone(),
+            LightCommand::Power(false),
+        )
+        .await
+        .expect("power write should be accepted");
+    agent
+        .clone()
+        .set_light(
+            tarpc::context::current(),
+            route.clone(),
+            LightCommand::BrightnessPercent(50),
+        )
+        .await
+        .expect("brightness write should be accepted");
+
+    let state = agent
+        .current()
+        .await
+        .snapshot
+        .lights
+        .first()
+        .expect("the readback stays published")
+        .state;
+    assert!(!state.on);
+    assert_eq!(
+        state.brightness,
+        Some(50),
+        "the percent range maps one-to-one onto the native grid"
+    );
+
+    agent
+        .clone()
+        .set_light_manual_power(tarpc::context::current(), route, true)
+        .await
+        .expect("manual power write should be accepted");
+    assert!(
+        agent
+            .current()
+            .await
+            .snapshot
+            .lights
+            .first()
+            .expect("the readback stays published")
+            .state
+            .on,
+        "the manual power write moved the readback"
+    );
+}
