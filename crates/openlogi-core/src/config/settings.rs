@@ -75,6 +75,11 @@ pub enum TrayBadgeStyle {
     Circle,
     /// A full-bleed rounded square, matching the square-ish icons around it.
     RoundedSquare,
+    /// A wide face with the device name, a progress bar, and the value in one
+    /// row. Linux-only: a StatusNotifierItem panel can keep the pixmap's
+    /// aspect ratio, while the Windows notification area squares every icon.
+    /// Selectable from `config.toml` only; Settings does not offer it yet.
+    Wide,
 }
 
 impl UiScale {

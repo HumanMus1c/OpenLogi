@@ -64,10 +64,13 @@ fn badge_style_item() -> SettingItem {
                         .label(tr!("flow_indicator.tray_badge_style_square"))
                         .debug_selector(|| "tray-badge-style-square".into()),
                 )
-                .selected_index(Some(match style {
-                    TrayBadgeStyle::Circle => 0,
-                    TrayBadgeStyle::RoundedSquare => 1,
-                }))
+                // The config-file-only `Wide` style has no radio here, so
+                // nothing is selected while it is active.
+                .selected_index(match style {
+                    TrayBadgeStyle::Circle => Some(0),
+                    TrayBadgeStyle::RoundedSquare => Some(1),
+                    TrayBadgeStyle::Wide => None,
+                })
                 .on_change(|index, _, cx| {
                     let style = match index {
                         0 => TrayBadgeStyle::Circle,

@@ -14,6 +14,8 @@
 )]
 
 use openlogi_core::config::TrayBadgeStyle;
+#[cfg(any(target_os = "linux", test))]
+use openlogi_core::device::BatteryInfo;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 use openlogi_core::device::{BatteryColor, BatteryDevice, BatteryReading, BatteryTone};
 
@@ -107,6 +109,54 @@ const DIGITS: [[u8; 5]; 10] = [
     [0b111, 0b101, 0b111, 0b001, 0b111],
 ];
 
+/// The letters and marks the wide face sets its name with, in the same 3x5
+/// cell as [`DIGITS`]. Hand-written for this renderer like the digits.
+const LETTERS: [(char, [u8; 5]); 26] = [
+    ('A', [0b010, 0b101, 0b111, 0b101, 0b101]),
+    ('B', [0b110, 0b101, 0b110, 0b101, 0b110]),
+    ('C', [0b011, 0b100, 0b100, 0b100, 0b011]),
+    ('D', [0b110, 0b101, 0b101, 0b101, 0b110]),
+    ('E', [0b111, 0b100, 0b110, 0b100, 0b111]),
+    ('F', [0b111, 0b100, 0b110, 0b100, 0b100]),
+    ('G', [0b011, 0b100, 0b101, 0b101, 0b011]),
+    ('H', [0b101, 0b101, 0b111, 0b101, 0b101]),
+    ('I', [0b111, 0b010, 0b010, 0b010, 0b111]),
+    ('J', [0b001, 0b001, 0b001, 0b101, 0b010]),
+    ('K', [0b101, 0b101, 0b110, 0b101, 0b101]),
+    ('L', [0b100, 0b100, 0b100, 0b100, 0b111]),
+    ('M', [0b101, 0b111, 0b111, 0b101, 0b101]),
+    ('N', [0b101, 0b111, 0b101, 0b101, 0b101]),
+    ('O', [0b010, 0b101, 0b101, 0b101, 0b010]),
+    ('P', [0b110, 0b101, 0b110, 0b100, 0b100]),
+    ('Q', [0b010, 0b101, 0b101, 0b110, 0b011]),
+    ('R', [0b110, 0b101, 0b110, 0b101, 0b101]),
+    ('S', [0b011, 0b100, 0b010, 0b001, 0b110]),
+    ('T', [0b111, 0b010, 0b010, 0b010, 0b010]),
+    ('U', [0b101, 0b101, 0b101, 0b101, 0b111]),
+    ('V', [0b101, 0b101, 0b101, 0b101, 0b010]),
+    ('W', [0b101, 0b101, 0b111, 0b111, 0b101]),
+    ('X', [0b101, 0b101, 0b010, 0b101, 0b101]),
+    ('Y', [0b101, 0b101, 0b010, 0b010, 0b010]),
+    ('Z', [0b111, 0b001, 0b010, 0b100, 0b111]),
+];
+
+/// The glyph for `character`, or `None` when the font cannot draw it.
+fn glyph_rows(character: char) -> Option<[u8; 5]> {
+    if let Some(digit) = character.to_digit(10) {
+        return Some(DIGITS[digit as usize]);
+    }
+    match character {
+        ' ' => Some([0; 5]),
+        '-' => Some([0b000, 0b000, 0b111, 0b000, 0b000]),
+        '.' => Some([0b000, 0b000, 0b000, 0b000, 0b010]),
+        '%' => Some([0b101, 0b001, 0b010, 0b100, 0b101]),
+        _ => LETTERS
+            .iter()
+            .find(|(glyph, _)| *glyph == character.to_ascii_uppercase())
+            .map(|(_, rows)| *rows),
+    }
+}
+
 /// A lightning silhouette in normalized coordinates, y pointing down.
 const BOLT: [(f32, f32); 6] = [
     (0.18, -0.5),
@@ -159,7 +209,9 @@ pub(crate) fn render(
             // Signed distance to the shape's edge: negative inside, so the
             // ring band and glyph test stay shape-agnostic.
             let edge = match style {
-                TrayBadgeStyle::Circle => (dx * dx + dy * dy).sqrt() - half,
+                // The wide face is rendered by `render_wide`; a caller that
+                // still reaches this square renderer with it gets the disc.
+                TrayBadgeStyle::Circle | TrayBadgeStyle::Wide => (dx * dx + dy * dy).sqrt() - half,
                 TrayBadgeStyle::RoundedSquare => rounded_square_edge(dx, dy, half, corner),
             };
             let (rgb, alpha) = if edge >= 0.0 {
@@ -200,6 +252,243 @@ fn rounded_rect_edge(dx: f32, dy: f32, half_width: f32, half_height: f32, corner
     let qy = dy.abs() - (half_height - corner);
     let (outside_x, outside_y) = (qx.max(0.0), qy.max(0.0));
     (outside_x * outside_x + outside_y * outside_y).sqrt() + qx.max(qy).min(0.0) - corner
+}
+
+/// The most name characters the wide face draws, so a long product name
+/// cannot grow the panel item without bound.
+#[cfg(any(target_os = "linux", test))]
+const WIDE_NAME_MAX: usize = 14;
+
+/// A wide badge face: the device name, a progress bar, and the value in one
+/// row. A panel that keeps a pixmap's aspect ratio can show all three; the
+/// square faces cannot.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WideBadge {
+    pub(crate) name: Option<String>,
+    pub(crate) text: BadgeText,
+    /// How full the progress bar draws, from the same reading the settings
+    /// app bars use. `None` for an error or a missing reading.
+    pub(crate) fill: Option<u8>,
+    pub(crate) tone: BadgeTone,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl WideBadge {
+    /// The wide face for `device`, matching the badge the square faces show.
+    pub(crate) fn for_device(device: &BatteryDevice) -> Self {
+        let badge = Badge::for_device(device);
+        let battery = device.battery.as_ref();
+        let fill = battery
+            .filter(|battery| battery.tone() != BatteryTone::Error)
+            .and_then(BatteryInfo::bar_percentage)
+            .map(|percentage| percentage.min(100));
+        Self {
+            name: device.name.clone(),
+            text: badge.text,
+            fill,
+            tone: badge.tone,
+        }
+    }
+
+    /// The wide face when no device reports anything.
+    pub(crate) const fn none() -> Self {
+        Self {
+            name: None,
+            text: BadgeText::Dash,
+            fill: None,
+            tone: BadgeTone::Neutral,
+        }
+    }
+
+    /// The name as the hand-written font can draw: ASCII only, upper-cased,
+    /// unsupported characters collapsed to a space, and cut to
+    /// [`WIDE_NAME_MAX`]. `None` when nothing drawable remains, so a
+    /// localized or CJK name falls back to the bar and value alone.
+    fn drawable_name(&self) -> Option<String> {
+        let name = self.name.as_deref()?.trim();
+        if name.is_empty() || !name.is_ascii() {
+            return None;
+        }
+        let mut drawable = String::with_capacity(name.len());
+        for character in name.chars() {
+            let character = character.to_ascii_uppercase();
+            let character = if glyph_rows(character).is_some() {
+                character
+            } else {
+                ' '
+            };
+            if character == ' ' && drawable.ends_with(' ') {
+                continue;
+            }
+            drawable.push(character);
+        }
+        let drawable: String = drawable.trim().chars().take(WIDE_NAME_MAX).collect();
+        let drawable = drawable.trim_end();
+        (!drawable.is_empty()).then(|| drawable.to_owned())
+    }
+
+    /// The value the wide face prints: the digits and a percent sign, or the
+    /// dash for a missing reading. A charging cold start prints nothing —
+    /// the bolt takes the value slot.
+    fn value_text(&self) -> Option<String> {
+        match self.text {
+            BadgeText::Percent(percentage) => Some(format!("{percentage}%")),
+            BadgeText::Charging => None,
+            BadgeText::Dash => Some("-".to_owned()),
+        }
+    }
+}
+
+/// Render `badge` as a wide face `height` pixels tall, returning the width it
+/// needed and straight-alpha RGBA pixels.
+#[cfg(any(target_os = "linux", test))]
+#[must_use]
+pub(crate) fn render_wide(badge: &WideBadge, height: u32, light_panel: bool) -> (u32, Vec<u8>) {
+    let height = height.clamp(8, 64);
+    let n = height * SS;
+    // The face is a rounded rectangle rather than a pill: a pill's end caps
+    // are half the height wide, and text inside them gets clipped.
+    let pad = n as f32 * 0.16;
+    let corner = n as f32 * 0.22;
+    let gap = (n as f32 * 0.10).max(SS as f32);
+    let name_scale = n as f32 * 0.085;
+    let value_scale = n as f32 * 0.078;
+    let bar_height = (n as f32 * 0.14).max(SS as f32);
+    let bar_width = n as f32 * 1.1;
+    let bolt_scale = n as f32 * 0.10;
+
+    let name = badge.drawable_name();
+    let value = badge.value_text();
+    let bolt = badge.text == BadgeText::Charging;
+    let name_width = name
+        .as_deref()
+        .map_or(0.0, |name| text_width(name, name_scale));
+    let value_width = value
+        .as_deref()
+        .map_or(0.0, |value| text_width(value, value_scale));
+    let value_slot = if bolt { bolt_scale * 0.85 } else { value_width };
+    let name_gap = if name_width > 0.0 { gap } else { 0.0 };
+    let total = (pad * 2.0 + name_width + name_gap + bar_width + gap * 0.6 + value_slot)
+        .max(n as f32 * 2.5);
+    let width = ((total / SS as f32).ceil() as u32).max(8);
+    let canvas_width = width * SS;
+
+    let disc = tone_rgb(badge.tone);
+    let track = mix(disc, WHITE, 0.35);
+    let ring = if light_panel {
+        [0x1D, 0x1D, 0x1F]
+    } else {
+        [0xF5, 0xF5, 0xF7]
+    };
+    let ring_alpha = if light_panel { 140 } else { 190 };
+    let ring_width = SS as f32;
+    let half_width = canvas_width as f32 / 2.0;
+    let half_height = n as f32 / 2.0;
+
+    let name_left = pad;
+    let bar_left = name_left + name_width + name_gap;
+    let bar_center_x = bar_left + bar_width / 2.0;
+    let value_left = bar_left + bar_width + gap * 0.6;
+    let name_top = half_height - 5.0 * name_scale / 2.0;
+    let value_top = half_height - 5.0 * value_scale / 2.0;
+    let bolt_center_x = value_left + bolt_scale * 0.85 / 2.0;
+    let fill_fraction = f32::from(badge.fill.unwrap_or(0)) / 100.0;
+
+    let mut pixels = vec![0u8; (canvas_width * n) as usize * 4];
+    for y in 0..n {
+        for x in 0..canvas_width {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let dx = px - half_width;
+            let dy = py - half_height;
+            let edge = rounded_rect_edge(dx, dy, half_width, half_height, corner);
+            let (rgb, alpha) = if edge >= 0.0 {
+                ([0, 0, 0], 0)
+            } else if edge > -ring_width {
+                (ring, ring_alpha)
+            } else {
+                (disc, 255)
+            };
+            let mut rgb = rgb;
+            if alpha > 0 && edge <= -ring_width - SS as f32 * 0.5 {
+                let in_track = rounded_rect_edge(
+                    px - bar_center_x,
+                    py - half_height,
+                    bar_width / 2.0,
+                    bar_height / 2.0,
+                    bar_height / 2.0,
+                ) <= 0.0;
+                let name_ink = name
+                    .as_deref()
+                    .is_some_and(|name| text_hit(name, name_scale, name_left, name_top, px, py));
+                let value_ink = value.as_deref().is_some_and(|value| {
+                    text_hit(value, value_scale, value_left, value_top, px, py)
+                });
+                let bolt_ink =
+                    bolt && point_in_polygon(px - bolt_center_x, py - half_height, bolt_scale);
+                if in_track {
+                    rgb = if px <= bar_left + bar_width * fill_fraction {
+                        WHITE
+                    } else {
+                        track
+                    };
+                } else if name_ink || value_ink || bolt_ink {
+                    rgb = WHITE;
+                }
+            }
+            let offset = ((y * canvas_width + x) * 4) as usize;
+            pixels[offset..offset + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
+        }
+    }
+
+    (width, downsample(&pixels, canvas_width, width, height))
+}
+
+/// Blend `amount` of `over` into `base` per channel.
+#[cfg(any(target_os = "linux", test))]
+fn mix(base: [u8; 3], over: [u8; 3], amount: f32) -> [u8; 3] {
+    let blend =
+        |base: u8, over: u8| (f32::from(base) * (1.0 - amount) + f32::from(over) * amount) as u8;
+    [
+        blend(base[0], over[0]),
+        blend(base[1], over[1]),
+        blend(base[2], over[2]),
+    ]
+}
+
+/// The pixel width of a text run in the hand-written font.
+fn text_width(text: &str, scale: f32) -> f32 {
+    let count = text.chars().count() as f32;
+    (count * 3.0 + (count - 1.0).max(0.0)) * scale
+}
+
+/// Whether `(px, py)` is ink of `text`, whose run starts at `left`/`top`.
+fn text_hit(text: &str, scale: f32, left: f32, top: f32, px: f32, py: f32) -> bool {
+    if scale <= 0.0 {
+        return false;
+    }
+    let local_x = px - left;
+    let local_y = py - top;
+    if local_x < 0.0 || local_y < 0.0 {
+        return false;
+    }
+    let column = (local_x / scale) as usize;
+    let row = (local_y / scale) as usize;
+    if row >= 5 {
+        return false;
+    }
+    let mut cursor = 0usize;
+    for character in text.chars() {
+        if column >= cursor && column < cursor + 3 {
+            let Some(rows) = glyph_rows(character) else {
+                return false;
+            };
+            return rows[row] >> (2 - (column - cursor)) & 1 == 1;
+        }
+        cursor += 4;
+    }
+    false
 }
 
 fn tone_rgb(tone: BadgeTone) -> [u8; 3] {
@@ -244,37 +533,10 @@ fn glyph_hit(text: BadgeText, scale: f32, inner_radius: f32, dx: f32, dy: f32) -
 }
 
 fn digit_hit(percentage: u8, scale: f32, dx: f32, dy: f32) -> bool {
-    if scale <= 0.0 {
-        return false;
-    }
     let text = percentage.to_string();
-    let count = text.len() as f32;
-    let font_width = count * 3.0 + (count - 1.0);
-    let total_width = font_width * scale;
-    let total_height = 5.0 * scale;
-    let left = -total_width / 2.0;
-    let top = -total_height / 2.0;
-    let local_x = dx - left;
-    let local_y = dy - top;
-    if local_x < 0.0 || local_y < 0.0 {
-        return false;
-    }
-    let column = (local_x / scale) as usize;
-    let row = (local_y / scale) as usize;
-    if row >= 5 {
-        return false;
-    }
-    let mut cursor = 0usize;
-    for character in text.chars() {
-        let digit = character.to_digit(10).unwrap_or(0) as usize;
-        let digit_width = 3usize;
-        if column >= cursor && column < cursor + digit_width {
-            let bit = DIGITS[digit][row] >> (digit_width - 1 - (column - cursor)) & 1;
-            return bit == 1;
-        }
-        cursor += digit_width + 1;
-    }
-    false
+    let left = -text_width(&text, scale) / 2.0;
+    let top = -5.0 * scale / 2.0;
+    text_hit(&text, scale, left, top, dx, dy)
 }
 
 fn point_in_polygon(dx: f32, dy: f32, scale: f32) -> bool {
@@ -517,6 +779,100 @@ mod tests {
         status: openlogi_core::device::BatteryStatus,
     ) -> openlogi_core::device::BatteryDevice {
         named_device(Some("MX Master 3S"), percentage, level, status)
+    }
+
+    #[test]
+    fn the_wide_face_keeps_its_height_and_earns_its_width() {
+        use super::{WIDE_NAME_MAX, WideBadge, render_wide};
+        use openlogi_core::device::{BatteryLevel, BatteryStatus};
+
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+        let face = WideBadge::for_device(&named_device(
+            Some("MX Master 3S"),
+            Some(64),
+            good,
+            discharging,
+        ));
+        assert_eq!(face.text, BadgeText::Percent(64));
+        assert_eq!(face.fill, Some(64));
+
+        let (width, pixels) = render_wide(&face, 22, false);
+        assert!(width > 22, "a name and a bar need width: {width}");
+        assert_eq!(pixels.len(), (width * 22 * 4) as usize);
+        // Opaque inside the pill, transparent outside its corners.
+        assert!(pixel(&pixels, width, 1, 11)[3] > 200);
+        assert_eq!(pixel(&pixels, width, 0, 0)[3], 0);
+
+        // A double-height face is the same face, scaled.
+        let (_, tall) = render_wide(&face, 44, false);
+        assert!(tall.len() > pixels.len());
+
+        // A CJK name is not drawable in the hand-written font and drops out;
+        // the bar and value stay.
+        let cjk = WideBadge::for_device(&named_device(
+            Some("办公室键盘"),
+            Some(64),
+            good,
+            discharging,
+        ));
+        let (cjk_width, _) = render_wide(&cjk, 22, false);
+        assert!(cjk_width < width, "{cjk_width} vs {width}");
+
+        // The no-device face is a neutral dash pill, not an empty bitmap.
+        let (none_width, none_pixels) = render_wide(&WideBadge::none(), 22, false);
+        assert!(none_width >= 22);
+        assert!(pixel(&none_pixels, none_width, 1, 11)[3] > 200);
+
+        // A long name is cut to the cap, so the width cannot run away.
+        let long = "A".repeat(64);
+        let capped = "A".repeat(WIDE_NAME_MAX);
+        let width_of = |name: &str| {
+            let face =
+                WideBadge::for_device(&named_device(Some(name), Some(64), good, discharging));
+            render_wide(&face, 22, false).0
+        };
+        assert_eq!(width_of(&long), width_of(&capped));
+    }
+
+    #[test]
+    fn a_wider_bar_fills_more_of_the_track() {
+        use super::{WideBadge, render_wide};
+        use openlogi_core::device::{BatteryLevel, BatteryStatus};
+
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+        let white_in_middle_row = |percentage| {
+            let face =
+                WideBadge::for_device(&named_device(None, Some(percentage), good, discharging));
+            let (width, pixels) = render_wide(&face, 22, false);
+            let (chunks, _) = pixels.as_chunks::<4>();
+            (0..width)
+                .filter(|&x| {
+                    let pixel = &chunks[(11 * width + x) as usize];
+                    pixel[3] > 200 && pixel[0] > 230 && pixel[1] > 230 && pixel[2] > 230
+                })
+                .count()
+        };
+        assert!(white_in_middle_row(95) > white_in_middle_row(5));
+    }
+
+    #[test]
+    fn a_charging_wide_face_keeps_the_bolt_and_the_bar() {
+        use super::{WideBadge, render_wide};
+        use openlogi_core::device::{BatteryLevel, BatteryStatus};
+
+        let face = WideBadge::for_device(&named_device(
+            Some("MX Master 3S"),
+            Some(45),
+            BatteryLevel::Good,
+            BatteryStatus::Charging,
+        ));
+        assert_eq!(face.text, BadgeText::Charging);
+        assert_eq!(face.fill, Some(45));
+        let (width, pixels) = render_wide(&face, 22, false);
+        assert_eq!(pixels.len(), (width * 22 * 4) as usize);
+        assert!(pixels.contains(&255));
     }
 
     #[test]

@@ -10,7 +10,8 @@ show_in_menu_bar = true
 # Tray battery readout: tooltip and device rows in the tray menu (and the
 # Windows tray icon). Default true.
 tray_battery = true
-# The Windows tray badge's shape: "circle" (default) or "rounded_square".
+# The tray badge's shape: "circle" (default), "rounded_square", or the
+# Linux-only "wide" (device name + bar + value; config-file only).
 tray_badge_style = "circle"
 # Floating Flow Indicator listing detected devices. Defaults: on, offline
 # devices kept with their last known reading, 3 rows (1-5), normal stacking.

@@ -96,8 +96,11 @@ optional physical device key.
 - `tray_badge_style` (default `"circle"`): the shape of the tray badge.
   `"circle"` draws the disc inscribed in the system's icon slot;
   `"rounded_square"` draws a full-bleed rounded square that carries the same
-  visual weight as the square-ish icons around it. Windows and Linux only —
-  macOS shows a text title.
+  visual weight as the square-ish icons around it. `"wide"` is a Linux-only
+  face showing the device name, a progress bar, and the value in one row; it
+  is set from this file only (Settings offers the two square styles), and a
+  panel that forces square icons squashes it. Windows keeps the circle badge
+  for it. macOS shows a text title.
 - `flow_indicator` (default `true`): a floating card listing the devices the
   agent has detected, their battery percentages, and charging state. It lives
   in the overlay process, so it stays available with the settings window

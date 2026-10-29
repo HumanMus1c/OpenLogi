@@ -25,7 +25,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
 
 use crate::shutdown::{self, ShutdownRequestSender};
-use crate::tray_readout::{BRAND, Badge, TrayReadout, render_badge};
+use crate::tray_readout::{BRAND, Badge, TrayReadout, WideBadge, render_badge, render_wide};
 
 /// The GUI binary installed beside the agent (package and cargo target dirs
 /// use the same layout).
@@ -33,6 +33,9 @@ const GUI_BINARY: &str = "openlogi-desktop";
 /// The panel's icon slots. SNI hosts pick the closest bitmap; the renderer
 /// clamps to its own 64 px ceiling.
 const ICON_SIZES: [u16; 5] = [16, 22, 24, 32, 48];
+/// The wide face's heights: the usual panel slot and a 2x variant for
+/// HiDPI panels. The width follows the content.
+const WIDE_HEIGHTS: [u32; 2] = [22, 44];
 /// StatusNotifierItem carries no panel-theme signal, so the badge ring and the
 /// brand glyph assume the common dark panel. A light panel would need a
 /// theme-aware icon, which is a separate follow-up.
@@ -125,13 +128,22 @@ impl TrayView {
                 rows: Vec::new(),
             };
         }
-        let badge = summary.badge();
-        Self {
-            tooltip: summary.battery_readout().unwrap_or_default(),
-            icons: ICON_SIZES
+        let icons = if style == TrayBadgeStyle::Wide {
+            let badge = summary.wide_badge();
+            WIDE_HEIGHTS
+                .iter()
+                .map(|&height| wide_icon(&badge, height))
+                .collect()
+        } else {
+            let badge = summary.badge();
+            ICON_SIZES
                 .iter()
                 .map(|&size| badge_icon(badge, size, style))
-                .collect(),
+                .collect()
+        };
+        Self {
+            tooltip: summary.battery_readout().unwrap_or_default(),
+            icons,
             rows: summary.menu_lines().collect(),
         }
     }
@@ -339,6 +351,17 @@ fn badge_icon(badge: Badge, size: u16, style: TrayBadgeStyle) -> ksni::Icon {
     argb_icon(rgba, extent, extent)
 }
 
+/// Render the wide face at `height` as the ARGB32 pixmap SNI expects; the
+/// width follows the content.
+fn wide_icon(badge: &WideBadge, height: u32) -> ksni::Icon {
+    let (width, rgba) = render_wide(badge, height, LIGHT_PANEL);
+    argb_icon(
+        rgba,
+        i32::try_from(width).unwrap_or(0),
+        i32::try_from(height).unwrap_or(0),
+    )
+}
+
 /// Turn straight-alpha RGBA into SNI's network-byte-order ARGB32.
 fn argb_icon(mut rgba: Vec<u8>, width: i32, height: i32) -> ksni::Icon {
     for pixel in rgba.as_chunks_mut::<4>().0 {
@@ -486,7 +509,7 @@ mod tests {
     use openlogi_ipc::InventoryHealth;
 
     use super::{
-        ICON_SIZES, OpenLogiTray, TrayCommand, argb_icon, badge_icon, decode_png_icon,
+        ICON_SIZES, OpenLogiTray, TrayCommand, WIDE_HEIGHTS, argb_icon, badge_icon, decode_png_icon,
     };
     use crate::tray_readout::Badge;
     use openlogi_core::config::TrayBadgeStyle;
@@ -570,6 +593,26 @@ mod tests {
         let circle = tray.icon_pixmap()[0].data.clone();
         tray.apply(TrayCommand::BadgeStyle(TrayBadgeStyle::RoundedSquare));
         assert_ne!(tray.icon_pixmap()[0].data, circle);
+    }
+
+    #[test]
+    fn the_wide_style_renders_the_name_the_bar_and_the_value_in_one_row() {
+        let mut tray = tray(true);
+        tray.apply(TrayCommand::BadgeStyle(TrayBadgeStyle::Wide));
+        let icons = tray.icon_pixmap();
+        assert_eq!(icons.len(), WIDE_HEIGHTS.len());
+        for icon in &icons {
+            assert!(
+                icon.width > icon.height,
+                "the wide face earns its name: {}x{}",
+                icon.width,
+                icon.height
+            );
+            assert_eq!(
+                icon.data.len(),
+                usize::try_from(icon.width * icon.height * 4).expect("bounded icon")
+            );
+        }
     }
 
     #[test]

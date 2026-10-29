@@ -658,6 +658,34 @@ Hosts without an environment here (KDE, GNOME + its AppIndicator extension,
 waybar) remain unverified; CONFIGURATION.md now states the host requirement
 instead of claiming Linux has no tray.
 
+### Percentage colours, product names, and the wide Linux face (2026-10-29)
+
+- **Three-stage percentage colours** land on every surface: the GUI's battery
+  glyph and percentage, the keyboard and light brightness percentages, the
+  Flow Indicator digits and bars, and the tray badge. The band is 70%+ green,
+  40–69% amber, below 40% red; charging and charge-complete stay green, a fault
+  stays red, and a level-only reading keeps its firmware tone. Thresholds live
+  in `openlogi_core::device` (`BatteryStage`, `BatteryInfo::color`). Verified
+  live in the xrdp/XFCE session by sampling the SNI pixmaps the agent serves
+  (55% amber, 25% red, 45% charging green bolt) and by GUI/overlay screenshots
+  (79% green digits, card 55% amber / 71% green).
+- **Product names.** The tray rows and the Flow Indicator read the names the
+  settings app persists (`MX Master 3S`, `MX Keys`, `MX Vertical`) instead of
+  the firmware codenames; a user-assigned custom name outranks them, and a
+  device with no entry (or a standalone light) keeps its codename. The
+  resolution is `Config::paired_display_name`, shared by both surfaces; the GUI
+  now reloads the agent after an identity or custom-name save so the rows
+  follow without a restart. Verified on the D-Bus menu
+  (`MX Master 3S  77%`, `MX Keys  100%`, `MX Vertical  55%`).
+- **Wide Linux face** (`tray_badge_style = "wide"`, config file only): one
+  SNI pixmap carries the name, a progress bar, and the percentage
+  (142x22 px at the panel slot, 284x44 for 2x). The face itself renders as
+  designed (`MX MASTER 3S` + bar + `64%`), but XFCE 4.20's systray scales any
+  tray pixmap into the panel's icon slot, so the wide face becomes a ~33x6
+  stripe and is unreadable there. The style therefore stays off by default;
+  hosts that keep a wide item's aspect ratio at a usable size (KDE, waybar)
+  remain untested.
+
 ## Appendix: vigil-watt reference
 
 - Tray: lowest online non-system device; 32×32 GDI+ disc; white percentage or

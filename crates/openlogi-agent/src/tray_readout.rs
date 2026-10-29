@@ -20,6 +20,8 @@ mod badge;
 pub(crate) use badge::Badge;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) use badge::render as render_badge;
+#[cfg(target_os = "linux")]
+pub(crate) use badge::{WideBadge, render_wide};
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
@@ -235,6 +237,14 @@ impl TrayReadout {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn badge(&self) -> Badge {
         first_battery_readout(&self.devices).map_or_else(Badge::none, Badge::for_device)
+    }
+
+    /// The wide Linux face for the device the tooltip reads out: the product
+    /// name, a progress bar, and the value. A neutral dash when no device has
+    /// a readout, matching the square faces' fallback.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wide_badge(&self) -> WideBadge {
+        first_battery_readout(&self.devices).map_or_else(WideBadge::none, WideBadge::for_device)
     }
 
     /// The macOS menu-bar title: the percentage, or the charging bolt for a

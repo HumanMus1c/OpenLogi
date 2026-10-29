@@ -152,7 +152,9 @@ pub fn spawn(
     set_config(config);
     TRAY_BADGE_STYLE.store(
         match badge_style {
-            TrayBadgeStyle::Circle => 0,
+            // The wide face is Linux-only; the notification area squares
+            // every icon, so Windows keeps the circle badge for it.
+            TrayBadgeStyle::Circle | TrayBadgeStyle::Wide => 0,
             TrayBadgeStyle::RoundedSquare => 1,
         },
         Ordering::Relaxed,
@@ -193,7 +195,7 @@ pub fn set_config(config: Arc<Config>) {
 pub fn set_badge_style(style: TrayBadgeStyle) {
     TRAY_BADGE_STYLE.store(
         match style {
-            TrayBadgeStyle::Circle => 0,
+            TrayBadgeStyle::Circle | TrayBadgeStyle::Wide => 0,
             TrayBadgeStyle::RoundedSquare => 1,
         },
         Ordering::Relaxed,

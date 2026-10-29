@@ -228,6 +228,12 @@ fn tray_badge_style_defaults_to_a_circle_and_roundtrips_the_square() {
         serialized.contains("tray_badge_style = \"rounded_square\""),
         "the value serializes as snake_case for the example config"
     );
+
+    cfg.app_settings.tray_badge_style = TrayBadgeStyle::Wide;
+    let read = write_and_read(&cfg);
+    assert_eq!(read.app_settings.tray_badge_style, TrayBadgeStyle::Wide);
+    let serialized = toml::to_string(&read.app_settings).expect("serialize");
+    assert!(serialized.contains("tray_badge_style = \"wide\""));
 }
 
 #[test]
