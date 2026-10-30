@@ -15,7 +15,20 @@ animation ends, especially near screen edges ([#1210](https://github.com/AprilNE
 Other windows retain their normal animation policy; disabling the extension
 restores GNOME's original policy. The global animation setting is never changed.
 
-No titles, window contents, or input are read, and the extension adds no UI.
+It also remembers where the user left the main settings window and the Flow
+Indicator card: GNOME does not let an ordinary Wayland client position its own
+toplevel, so the shell moves the two windows to the saved geometry after they
+open, saves the geometry the user leaves them at, and lifts the card when
+`flow_indicator_display_mode = "topmost"`. That state lives in
+`~/.config/openlogi/gnome-window-state.json`; the card's first enable seeds its
+position from the app's `flow-indicator.toml`, and the main window is only
+placed after the user moves it once.
+
+No window contents or input are read. The extension reads the window class and
+the two OpenLogi windows' frame geometry, and the OpenLogi windows' titles only
+for a diagnostic log line; `config.toml` supplies the card's display mode. The
+first `org.openlogi.openlogi` window is the settings app's main window; later
+windows with that id (the Settings sub-windows) are left alone. It adds no UI.
 
 ## D-Bus surface
 
@@ -30,7 +43,7 @@ No titles, window contents, or input are read, and the extension adds no UI.
 UUID=openlogi-frontmost@openlogi.dev
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 mkdir -p "$DEST"
-cp metadata.json extension.js ringAnimation.js "$DEST"/
+cp metadata.json extension.js ringAnimation.js windowState.js windowStatePolicy.js "$DEST"/
 ```
 
 On Wayland the shell cannot be reloaded in place, so **log out and back in** to
@@ -74,6 +87,7 @@ The animation-policy regression tests need Node.js 22 or newer and no running sh
 
 ```sh
 node --test crates/openlogi-hook/gnome-shell-extension/tests/ringAnimation.test.mjs
+node --test crates/openlogi-hook/gnome-shell-extension/tests/windowState.test.mjs
 ```
 
 Run that command from the repository root. It does not replace the live GNOME
