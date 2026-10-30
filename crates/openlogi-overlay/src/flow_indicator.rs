@@ -315,6 +315,9 @@ struct FlowIndicatorView {
     /// Repaints on the platform's own appearance change; the watched mode
     /// repaints through the tick instead.
     appearance_subscription: Option<Subscription>,
+    /// False while settings hide the card: render nothing (the window is
+    /// shrunk to a transparent 1x1 so the compositor keeps its place).
+    visible: bool,
     /// The card's X11 window, when this session is X11.
     #[cfg(target_os = "linux")]
     x11: Option<crate::platform::x11::CardWindow>,
@@ -349,6 +352,7 @@ impl FlowIndicatorView {
             rows,
             appearance,
             appearance_subscription: None,
+            visible: true,
             #[cfg(target_os = "linux")]
             x11: None,
             #[cfg(target_os = "linux")]
@@ -475,6 +479,9 @@ impl Render for FlowIndicatorView {
         expect(unused_variables, reason = "the card's drag listeners are Linux-only")
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.visible {
+            return div().size_full();
+        }
         let pal = Palette::for_dark(self.dark_mode(window));
         let root = div().size_full().child(self.card(&pal));
         #[cfg(target_os = "linux")]
@@ -630,6 +637,10 @@ pub(crate) struct FlowIndicator {
     appearance: Arc<Appearance>,
     /// The appearance revision the open card last painted.
     appearance_revision: u64,
+    /// The window exists but settings hide the card: it is a transparent 1x1
+    /// rather than closed, which is the only way a Wayland compositor keeps
+    /// the placement it chose for it.
+    hidden: bool,
     window: Option<WindowHandle<FlowIndicatorView>>,
     window_mode: Option<FlowIndicatorDisplayMode>,
     /// Whether the open window is a Wayland layer surface, which has no
@@ -655,6 +666,7 @@ impl FlowIndicator {
             config,
             inventory: Vec::new(),
             appearance_revision: appearance.revision(),
+            hidden: false,
             appearance,
             window: None,
             window_mode: None,
@@ -821,30 +833,59 @@ impl FlowIndicator {
             return;
         }
         let rows = self.rows();
-        if !self.settings.enabled || rows.is_empty() {
-            self.close(cx);
-            return;
-        }
+        let show = self.settings.enabled && !rows.is_empty();
         if let Some(handle) = self.window.as_ref() {
-            let same = self.window_mode == Some(self.settings.display_mode)
-                && handle
-                    .update(cx, |view, _, _| view.rows.len() == rows.len())
-                    .unwrap_or(false);
-            if same {
-                let _ = handle.update(cx, |view, _, cx| {
-                    view.rows = rows;
-                    cx.notify();
-                });
+            if !show {
+                self.hide(cx);
                 return;
             }
+            if self.window_mode != Some(self.settings.display_mode) {
+                let origin = handle
+                    .update(cx, |_, window, _| window.bounds().origin)
+                    .ok();
+                self.close(cx);
+                self.open(&rows, origin, cx);
+                return;
+            }
+            // Update in place — a new window would lose the placement the
+            // compositor chose for this one.
+            let card = card_size(rows.len());
+            let _ = handle.update(cx, |view, window, cx| {
+                view.rows = rows;
+                view.visible = true;
+                if window.bounds().size != card {
+                    window.resize(card);
+                }
+                cx.notify();
+            });
+            if self.hidden {
+                self.hidden = false;
+                info!("Flow Indicator card shown");
+            }
+            return;
         }
-        let origin = self.window.as_ref().and_then(|handle| {
-            handle
-                .update(cx, |_, window, _| window.bounds().origin)
-                .ok()
+        if show {
+            self.open(&rows, None, cx);
+        }
+    }
+
+    /// Hide the card without closing its window: settings (or an empty row
+    /// set) turn it into a transparent 1x1. Wayland has no client-side
+    /// positioning, so a closed window would lose the compositor's placement.
+    fn hide(&mut self, cx: &mut App) {
+        if self.hidden {
+            return;
+        }
+        let Some(handle) = self.window.as_ref() else {
+            return;
+        };
+        let _ = handle.update(cx, |view, window, cx| {
+            view.visible = false;
+            window.resize(size(px(1.0), px(1.0)));
+            cx.notify();
         });
-        self.close(cx);
-        self.open(&rows, origin, cx);
+        self.hidden = true;
+        info!("Flow Indicator card hidden");
     }
 
     fn close(&mut self, cx: &mut App) {
@@ -861,6 +902,7 @@ impl FlowIndicator {
         }
         self.window_mode = None;
         self.layer_shell = false;
+        self.hidden = false;
     }
 
     fn open(&mut self, rows: &[Row], remembered: Option<Point<gpui::Pixels>>, cx: &mut App) {
