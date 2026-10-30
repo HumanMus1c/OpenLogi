@@ -43,6 +43,7 @@ rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 use anyhow::Result;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{Config, ConfigFile};
+use openlogi_core::device_source::DeviceSource;
 use tracing::{info, warn};
 
 use crate::platform::app_icon::AppIconExt as _;
@@ -53,6 +54,14 @@ use crate::ui::theme;
 
 fn main() -> Result<()> {
     init_tracing();
+    // The launch switch, not the build tree, picks the device source: a demo
+    // suite (the scripted inventory) or real hardware. WSL defaults to the
+    // demo because it exposes no HID devices; `OPENLOGI_MOCK_DEVICES` is the
+    // scriptable form of the same switch. Unknown arguments are left alone
+    // (the platform may hand us URLs), so only `--mock` is read.
+    let mock = std::env::args_os().skip(1).any(|arg| arg == "--mock");
+    let source = DeviceSource::requested(mock);
+    info!(?source, "device source requested");
 
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_COMPONENT_GALLERY").is_some_and(|value| value == "1") {
@@ -94,7 +103,7 @@ fn main() -> Result<()> {
     let ipc::Handle {
         updates,
         commands: ipc_commands,
-    } = ipc::spawn();
+    } = ipc::spawn(source);
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
     // sender is published as a global so the Settings window can drive the

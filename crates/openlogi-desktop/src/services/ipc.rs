@@ -13,6 +13,11 @@
 //! every answer is the complete state, a reconnect needs no resynchronisation:
 //! ask again with generation 0 and the next answer is the whole truth.
 //!
+//! At startup the loop aligns the running agent to this process's device
+//! source: an agent serving the other source (real hardware vs the scripted
+//! demo) is asked to leave through its own lifecycle, then the spawn reflex
+//! starts the requested one. The config, locks, and endpoint are shared.
+//!
 //! The connection is one [`link::Link`]: while up it owns the client, the
 //! generation ledger and the observe call in flight; while down it owns the
 //! outage clock and what the window has been told about it. What is left to
@@ -40,17 +45,19 @@
 
 use std::time::{Duration, Instant};
 
+use openlogi_core::device_source::DeviceSource;
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
     ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
 };
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
-    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure, SavedConfigVerdict,
+    AgentClient, AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, PairingFailure,
+    SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::state::DeviceKey;
 
@@ -98,6 +105,51 @@ pub(crate) enum ConfigReloadContext {
 /// cadence, not a poll: once connected, nothing here runs on a timer. Short
 /// enough that a just-started agent is picked up immediately.
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
+
+/// How long a running agent may take to leave after the GUI asks it to switch
+/// its device source. Graceful teardown releases firmware diversion and the
+/// input hook first, which is bounded but not instant.
+const SOURCE_SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often to check whether that agent has actually left.
+const SOURCE_SWITCH_POLL: Duration = Duration::from_millis(100);
+
+/// Retire a running agent that serves the other device source, then let the
+/// loop's cold-start reflex start the one this GUI was launched for.
+///
+/// The probe does not declare a client, so a dormant real agent stays dormant
+/// (and unarmed) while it is asked to leave. A request the agent does not
+/// accept — a skewed build, or a wedged process — leaves the loop to report
+/// the outage instead of guessing at a kill.
+async fn align_agent_source(effects: &mut impl Effects, source: DeviceSource) {
+    let Some(status) = effects.probe_agent().await else {
+        return;
+    };
+    if status.is_mock() == source.is_mock() {
+        return;
+    }
+    info!(
+        ?source,
+        agent_version = %status.agent_version,
+        "agent serves the other device source — asking it to leave"
+    );
+    if !effects.request_shutdown().await {
+        warn!("the agent did not accept the device-source switch");
+        return;
+    }
+    let deadline = Instant::now() + SOURCE_SWITCH_TIMEOUT;
+    while Instant::now() < deadline {
+        if effects.probe_agent().await.is_none() {
+            info!(?source, "agent left — starting the requested source");
+            return;
+        }
+        tokio::time::sleep(SOURCE_SWITCH_POLL).await;
+    }
+    warn!(
+        ?source,
+        "the agent did not leave in time — starting the requested source anyway"
+    );
+}
 
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
@@ -278,12 +330,12 @@ pub struct Handle {
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
 /// reconnects) on its own.
 #[must_use]
-pub fn spawn() -> Handle {
+pub fn spawn(source: DeviceSource) -> Handle {
     let (update_tx, updates) = mpsc::unbounded_channel();
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
 
     let started = openlogi_core::worker::spawn("openlogi-ipc-client", move |runtime| {
-        runtime.block_on(observe_loop(&mut System, &update_tx, &mut cmd_rx));
+        runtime.block_on(observe_loop(&mut System, source, &update_tx, &mut cmd_rx));
     });
     if let Err(error) = started {
         warn!(%error, "could not start the IPC client thread — agent state unavailable");
@@ -297,8 +349,15 @@ pub fn spawn() -> Handle {
 trait Effects {
     /// Connect to the agent and complete the handshake as the GUI.
     async fn connect(&mut self) -> Result<AgentClient, ConnectError>;
-    /// Start the agent when the socket stays down; see `launch::spawn_agent`.
-    fn spawn_agent(&mut self);
+    /// Read the running agent's status without declaring a client. `None`
+    /// when no agent is reachable (or it speaks another protocol).
+    async fn probe_agent(&mut self) -> Option<AgentStatus>;
+    /// Ask the running agent to leave through its lifecycle; whether the
+    /// request was accepted.
+    async fn request_shutdown(&mut self) -> bool;
+    /// Start an agent for `source` when the socket stays down; see
+    /// `launch::spawn_agent`.
+    fn spawn_agent(&mut self, source: DeviceSource);
 }
 
 /// The real thing: the agent's local socket and its supervised launch paths.
@@ -309,8 +368,16 @@ impl Effects for System {
         client::connect_as(ClientKind::Gui).await
     }
 
-    fn spawn_agent(&mut self) {
-        spawn_agent();
+    async fn probe_agent(&mut self) -> Option<AgentStatus> {
+        client::probe_status().await.ok()
+    }
+
+    async fn request_shutdown(&mut self) -> bool {
+        client::request_shutdown().await.is_ok()
+    }
+
+    fn spawn_agent(&mut self, source: DeviceSource) {
+        spawn_agent(source);
     }
 }
 
@@ -324,9 +391,11 @@ impl Effects for System {
 /// never cancels it.
 async fn observe_loop(
     effects: &mut impl Effects,
+    source: DeviceSource,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
+    align_agent_source(effects, source).await;
     let mut link = Link::cold(Instant::now());
     let mut reflex = SpawnReflex::new();
     let mut owed = OwedReloads::default();
@@ -380,7 +449,7 @@ async fn observe_loop(
             let _ = update_tx.send(notice);
         }
         if reflex.should_fire(&link, now) {
-            effects.spawn_agent();
+            effects.spawn_agent(source);
             reflex.fired(now);
         }
     }
@@ -588,6 +657,9 @@ mod tests {
     struct ScriptedEffects {
         attempts: VecDeque<Result<AgentClient, ConnectError>>,
         launches: usize,
+        /// What each source probe finds; empty means no agent is running.
+        statuses: VecDeque<Option<AgentStatus>>,
+        shutdowns: usize,
     }
 
     impl ScriptedEffects {
@@ -597,6 +669,8 @@ mod tests {
             Self {
                 attempts: attempts.into_iter().collect(),
                 launches: 0,
+                statuses: VecDeque::new(),
+                shutdowns: 0,
             }
         }
     }
@@ -610,7 +684,24 @@ mod tests {
             self.attempts.pop_front().unwrap_or_else(down)
         }
 
-        fn spawn_agent(&mut self) {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "the trait is async for the real socket; the script answers from memory"
+        )]
+        async fn probe_agent(&mut self) -> Option<AgentStatus> {
+            self.statuses.pop_front().flatten()
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "the trait is async for the real socket; the script answers from memory"
+        )]
+        async fn request_shutdown(&mut self) -> bool {
+            self.shutdowns += 1;
+            true
+        }
+
+        fn spawn_agent(&mut self, _source: DeviceSource) {
             self.launches += 1;
         }
     }
@@ -685,7 +776,7 @@ mod tests {
         commands.send(LoadConfig.into()).unwrap();
 
         let verdict = tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             verdict = config_load_result(&mut updates) => verdict,
@@ -723,7 +814,7 @@ mod tests {
             .unwrap();
 
         let verdict = tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             verdict = saved_reload_verdict_for(&mut updates, ConfigReloadContext::DisableKeys(context)) => verdict,
@@ -757,7 +848,7 @@ mod tests {
             .unwrap();
 
         let verdict = tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             verdict = saved_reload_verdict(&mut updates) => verdict,
@@ -833,7 +924,7 @@ mod tests {
         }
 
         let verdicts = tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             verdicts = async {
@@ -1155,7 +1246,7 @@ mod tests {
                 .unwrap();
         }
         let verdicts = tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => panic!("client stopped"),
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => panic!("client stopped"),
             verdicts = async {
                 let first = saved_reload_verdict_for(&mut updates, ConfigReloadContext::DisableKeys(first)).await;
                 let second = saved_reload_verdict_for(&mut updates, ConfigReloadContext::DisableKeys(second)).await;
@@ -1196,7 +1287,7 @@ mod tests {
             .unwrap();
 
         let answer = tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             answer = answer => answer.expect("every read is answered"),
@@ -1226,7 +1317,7 @@ mod tests {
             .unwrap();
 
         let answer = tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             answer = answer => answer.expect("every read is answered"),
@@ -1236,21 +1327,26 @@ mod tests {
         assert_eq!(effects.launches, 0, "a reachable agent is never spawned at");
     }
 
+    /// An agent status the tests can tell apart by its version marker.
+    fn agent_status(version: &str) -> AgentStatus {
+        AgentStatus {
+            accessibility_granted: true,
+            hook_installed: true,
+            launch_at_login: false,
+            inventory: InventoryHealth::Ready,
+            protocol_version: PROTOCOL_VERSION,
+            agent_version: version.to_owned(),
+            input_monitoring_granted: true,
+            hid_open_failures: false,
+            secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
+        }
+    }
+
     /// A snapshot the tests can tell apart by its camera flag.
     fn snapshot(camera_active: bool) -> AgentSnapshot {
         AgentSnapshot {
-            status: AgentStatus {
-                accessibility_granted: true,
-                hook_installed: true,
-                launch_at_login: false,
-                inventory: InventoryHealth::Ready,
-                protocol_version: PROTOCOL_VERSION,
-                agent_version: "observe-loop-test".to_owned(),
-                input_monitoring_granted: true,
-                hid_open_failures: false,
-                secure_input: openlogi_ipc::SecureInput::Off,
-                virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
-            },
+            status: agent_status("observe-loop-test"),
             inventory: Vec::new(),
             standalone: Vec::new(),
             camera_active,
@@ -1258,6 +1354,54 @@ mod tests {
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_mock_launch_retires_a_running_hardware_agent() {
+        let mut effects = ScriptedEffects::answering([]);
+        effects.statuses.push_back(Some(agent_status("0.8.18")));
+        effects.statuses.push_back(None);
+
+        align_agent_source(&mut effects, DeviceSource::Mock).await;
+
+        assert_eq!(
+            effects.shutdowns, 1,
+            "the hardware agent was asked to leave"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hardware_launch_retires_a_running_mock_agent() {
+        let mut effects = ScriptedEffects::answering([]);
+        effects
+            .statuses
+            .push_back(Some(agent_status("0.8.18-mock")));
+        effects.statuses.push_back(None);
+
+        align_agent_source(&mut effects, DeviceSource::Hardware).await;
+
+        assert_eq!(effects.shutdowns, 1, "the demo agent was asked to leave");
+    }
+
+    #[tokio::test]
+    async fn a_matching_source_is_left_running() {
+        let mut effects = ScriptedEffects::answering([]);
+        effects
+            .statuses
+            .push_back(Some(agent_status("0.8.18-mock")));
+
+        align_agent_source(&mut effects, DeviceSource::Mock).await;
+
+        assert_eq!(effects.shutdowns, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_source_starts_the_launched_one() {
+        let mut effects = ScriptedEffects::answering([]);
+
+        align_agent_source(&mut effects, DeviceSource::Mock).await;
+
+        assert_eq!(effects.shutdowns, 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1309,7 +1453,7 @@ mod tests {
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => panic!("client stopped"),
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => panic!("client stopped"),
             () = async {
                 assert!(matches!(updates.recv().await, Some(GuiUpdate::Snapshot(_))));
                 old_started.notified().await;
@@ -1355,7 +1499,7 @@ mod tests {
         let (_commands, mut cmd_rx) = mpsc::unbounded_channel();
 
         let seen = tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             seen = async {

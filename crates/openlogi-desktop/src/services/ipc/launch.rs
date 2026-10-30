@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use openlogi_core::device_source::DeviceSource;
 use tracing::{info, warn};
 
 /// Set when the agent announced a deliberate suite shutdown (the tray's Quit
@@ -28,7 +29,7 @@ pub fn mark_suite_quitting() {
 /// outlives the GUI (the agent is the always-on process); logs and moves on if
 /// the binary can't be found / started — the user may start it via launchd or by
 /// hand, and the observe loop keeps retrying the connection regardless.
-pub(super) fn spawn_agent() {
+pub(super) fn spawn_agent(source: DeviceSource) {
     if SUITE_QUITTING.load(std::sync::atomic::Ordering::Relaxed) {
         info!("suite is quitting — leaving the agent down");
         return;
@@ -36,8 +37,10 @@ pub(super) fn spawn_agent() {
     // Kickstart is idempotent, the process comes up supervised, and launchd
     // makes it its own TCC responsible process. Production tries only the two
     // supervised rungs below; direct launch is reserved for dev profiles.
+    // A demo agent needs no TCC identity and no supervised start, so it always
+    // takes the direct path with `--mock`.
     #[cfg(target_os = "macos")]
-    {
+    if source == DeviceSource::Hardware {
         let kickstart = kickstart_registered_agent();
         if kickstart == Kickstart::Started {
             return;
@@ -89,19 +92,27 @@ pub(super) fn spawn_agent() {
     // "started", not "launched": on the packaged path success only means
     // `open` was handed the bundle — the reaper inside `launch_agent` reports
     // the definitive outcome.
-    match launch_agent(&path) {
-        Ok(()) => info!(path = %path.display(), "agent not running — launch started"),
+    match launch_agent(&path, source) {
+        Ok(()) => info!(
+            path = %path.display(),
+            mock = source.is_mock(),
+            "agent not running — launch started"
+        ),
         Err(e) => warn!(error = %e, path = %path.display(), "could not launch the agent"),
     }
 }
 
 /// Launch the agent binary at `path` under its own TCC identity.
-fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
+fn launch_agent(path: &std::path::Path, source: DeviceSource) -> std::io::Result<()> {
     // The packaged helper goes through LaunchServices so the agent is its own
     // TCC responsible process; a direct exec attributes its Accessibility
     // check to the parent GUI and the grant flips with the launch path (#192).
+    // A demo agent touches no TCC-protected device, so it skips both the
+    // bundle handoff and the grant it exists to preserve.
     #[cfg(target_os = "macos")]
-    if let Some(bundle) = openlogi_core::brand::helper_bundle_root(path) {
+    if source == DeviceSource::Hardware
+        && let Some(bundle) = openlogi_core::brand::helper_bundle_root(path)
+    {
         let mut child = std::process::Command::new("/usr/bin/open")
             .arg("-g")
             .arg("-n")
@@ -120,7 +131,11 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     }
     // Any other layout (bare dev binary, Windows, Linux): exec the binary
     // directly while disclaiming the GUI's TCC responsibility (#214).
-    disclaim::Command::new(path).spawn().map(|_| ())
+    let mut command = disclaim::Command::new(path);
+    if source.is_mock() {
+        command.arg("--mock");
+    }
+    command.spawn().map(|_| ())
 }
 
 /// What `launchctl kickstart` made of the agent's registered launchd service.
