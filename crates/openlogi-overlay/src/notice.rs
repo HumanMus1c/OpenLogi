@@ -228,6 +228,7 @@ pub(crate) fn present(cx: &mut gpui::App, shelf: &Rc<RefCell<NoticeShelf>>, card
     };
     let placed = handle
         .update(cx, |_, window, cx| {
+            window.set_window_title("OpenLogi Notice");
             // As for the ring: native placement resizes the window inside
             // this update, so resync GPUI's viewport and scale.
             placement.show(window).map(|()| window.bounds_changed(cx))

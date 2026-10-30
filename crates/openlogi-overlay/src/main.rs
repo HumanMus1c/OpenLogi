@@ -210,6 +210,7 @@ fn main() -> Result<()> {
                     };
                     if let Err(error) = primary
                         .update(cx, |_, window, cx| {
+                            window.set_window_title("OpenLogi Actions Ring");
                             // Native placement resizes the window inside this
                             // update, where GPUI's own resize/move callbacks
                             // cannot borrow the app. Resync its viewport and
@@ -267,7 +268,13 @@ fn main() -> Result<()> {
                         let opened = cx.open_window(options, |_, cx| {
                             cx.new(|_| BacklightView::new(observation.clone()))
                         });
-                        debug!(success = opened.is_ok(), "backlight window opened");
+                        let success = opened.is_ok();
+                        if let Ok(handle) = opened {
+                            let _ = handle.update(cx, |_, window, _| {
+                                window.set_window_title("OpenLogi Backlight");
+                            });
+                        }
+                        debug!(success, "backlight window opened");
                     }
                 });
             }

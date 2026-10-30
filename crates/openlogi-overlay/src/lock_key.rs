@@ -106,8 +106,13 @@ pub(crate) fn present(cx: &mut App, shown: Option<LockKeyChange>) {
     };
     if open.is_empty() {
         let options = window_options(cx);
-        if let Err(error) = cx.open_window(options, |_, cx| cx.new(|_| LockKeyView { change })) {
-            warn!(%error, "could not open the lock-key indicator window");
+        match cx.open_window(options, |_, cx| cx.new(|_| LockKeyView { change })) {
+            Ok(handle) => {
+                let _ = handle.update(cx, |_, window, _| {
+                    window.set_window_title("OpenLogi Lock Keys");
+                });
+            }
+            Err(error) => warn!(%error, "could not open the lock-key indicator window"),
         }
         return;
     }
