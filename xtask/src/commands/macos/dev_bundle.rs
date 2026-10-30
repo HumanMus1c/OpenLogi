@@ -141,7 +141,13 @@ fn start_agent(app: &Path) -> Result<()> {
     let agent_bundle = Component::Agent.root(app, CHANNEL);
     let sh = Shell::new()?;
     println!("==> agent (start)");
-    cmd!(sh, "open -g -n {agent_bundle}").run()?;
+    // The dev bundle is a demo harness by default; the runner passes the same
+    // switch to the GUI. `OPENLOGI_DEV_REAL=1` opts both onto real hardware.
+    if std::env::var("OPENLOGI_DEV_REAL").as_deref() == Ok("1") {
+        cmd!(sh, "open -g -n {agent_bundle}").run()?;
+    } else {
+        cmd!(sh, "open -g -n {agent_bundle} --args --mock").run()?;
+    }
 
     // The dev agent serves the sibling dev profile's socket; xtask itself is
     // not a dev-profile process, so it asks for that profile's path by name.

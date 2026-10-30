@@ -12,6 +12,7 @@
 #   OPENLOGI_DEV_CODESIGN=0         skip dev codesigning
 #   OPENLOGI_DEV_CODESIGN_IDENTITY  pin a signing identity
 #   OPENLOGI_DEV_AGENT=0            don't build or embed the agent + overlay
+#   OPENLOGI_DEV_REAL=1             run the dev agent + GUI against real hardware
 #   OPENLOGI_ALLOW_EXTERNAL_AGENT=1 tolerate an agent outside this checkout
 set -euo pipefail
 
@@ -34,4 +35,9 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cargo run -q -p xtask --manifest-path "$ROOT/Cargo.toml" -- macos dev-bundle --binary "$bin"
+# The dev bundle starts its agent with --mock; the GUI must ask for the same
+# source or it would retire that agent on startup.
+if [ "${OPENLOGI_DEV_REAL:-0}" != "1" ]; then
+  set -- "$@" --mock
+fi
 exec "$ROOT/target/dev/OpenLogi.app/Contents/MacOS/openlogi-desktop" "$@"
