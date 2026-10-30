@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::AppContext as _;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
@@ -68,6 +68,8 @@ fn main() -> Result<()> {
         commands,
     } = ipc::spawn();
 
+    #[cfg(target_os = "linux")]
+    platform::await_compositor();
     let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
     // Application construction establishes GPUI's NSApplication subclass.
     // Asking AppKit for its singleton sooner creates a plain NSApplication,
@@ -123,6 +125,7 @@ fn main() -> Result<()> {
         .detach();
         cx.spawn(async move |cx| {
             let (settings, config) = flow_indicator::load_settings().unwrap_or_default();
+            info!(enabled = settings.enabled, "flow indicator settings loaded");
             let mut indicator =
                 flow_indicator::FlowIndicator::new(settings, Some(config), appearance);
             while let Some(command) = flow_command_rx.recv().await {

@@ -32,7 +32,7 @@ use openlogi_core::device::{
 };
 use openlogi_ipc::Observation;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::appearance::Appearance;
 
@@ -639,6 +639,9 @@ pub(crate) struct FlowIndicator {
     /// Set when the user closed the card window: observations must not bring
     /// it back until the settings change.
     dismissed: Rc<Cell<bool>>,
+    /// Logged once, so a boot without a card shows whether observations ever
+    /// reached this process.
+    observed: bool,
 }
 
 impl FlowIndicator {
@@ -658,6 +661,7 @@ impl FlowIndicator {
             layer_shell: false,
             last_saved_origin: None,
             dismissed: Rc::new(Cell::new(false)),
+            observed: false,
         }
     }
 
@@ -665,6 +669,10 @@ impl FlowIndicator {
         match command {
             Command::Observation(observation) => {
                 self.inventory.clone_from(&observation.snapshot.inventory);
+                if !self.observed {
+                    self.observed = true;
+                    info!("Flow Indicator received its first observation");
+                }
                 self.sync(cx);
             }
             Command::Settings(snapshot) => {
@@ -841,6 +849,7 @@ impl FlowIndicator {
 
     fn close(&mut self, cx: &mut App) {
         if let Some(handle) = self.window.take() {
+            info!("Flow Indicator card closed");
             if !self.layer_shell
                 && let Ok(origin) = handle.update(cx, |_, window, _| window.bounds().origin)
                 && self.last_saved_origin != Some(origin)
@@ -886,6 +895,12 @@ impl FlowIndicator {
         if let Err(error) = configured {
             debug!(%error, "Flow Indicator: could not configure its window");
         }
+        info!(
+            rows = rows.len(),
+            ?mode,
+            layer_shell,
+            "Flow Indicator card opened"
+        );
         self.window = Some(handle);
         self.window_mode = Some(mode);
         self.layer_shell = layer_shell;

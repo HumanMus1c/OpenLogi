@@ -98,6 +98,44 @@ pub(crate) fn layer_shell_refused() -> bool {
     LAYER_SHELL_REFUSED.load(Ordering::Relaxed)
 }
 
+/// Wait for the session's Wayland socket before GPUI connects.
+///
+/// The agent starts this helper at session start, and at login the helper can
+/// win the race against the compositor: GPUI's Wayland client then panics with
+/// `NoCompositor` (exit 101) and the supervisor only retries after a delay.
+/// Waiting for the socket keeps the first start alive; X11 has no equivalent
+/// wait because its client retries on its own.
+#[cfg(target_os = "linux")]
+pub(crate) fn await_compositor() {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    let (Some(display), Some(runtime)) = (
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+    ) else {
+        return;
+    };
+    let display = PathBuf::from(display);
+    let socket = if display.is_absolute() {
+        display
+    } else {
+        PathBuf::from(runtime).join(display)
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if socket.exists() {
+        tracing::info!(socket = %socket.display(), "compositor socket is up");
+    } else {
+        tracing::warn!(
+            socket = %socket.display(),
+            "compositor socket did not appear; GPUI will try anyway"
+        );
+    }
+}
+
 /// Keep the overlay out of the Dock and app switcher.
 #[cfg(target_os = "macos")]
 pub fn configure_application() {
