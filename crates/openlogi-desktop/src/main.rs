@@ -161,6 +161,9 @@ fn main() -> Result<()> {
         // the GUI is reopened), so nothing needs the GUI process to linger.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
+                // Capture the last move even when it landed after the last
+                // one-second poll.
+                windows::main_window::persist_bounds(cx);
                 cx.quit();
             }
         })

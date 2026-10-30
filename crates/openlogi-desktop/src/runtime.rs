@@ -32,6 +32,11 @@ use crate::{app, windows};
 /// one thing here that still has to be asked on a timer.
 const CAMERA_SCAN_PERIOD: Duration = Duration::from_secs(2);
 
+/// How often the main window's frame is written back. The Flow Indicator does
+/// the same for its own card; a second is short enough that a move-then-quit
+/// loses nothing visible and long enough to stay out of the render path.
+const WINDOW_STATE_PERIOD: Duration = Duration::from_secs(1);
+
 /// Deliver a saved-reload verdict only to the transaction that requested it.
 fn apply_saved_config_reload(
     context: ipc::ConfigReloadContext,
@@ -149,6 +154,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<()>();
         let mut rt = Runtime::new(cams, sync_tx, swr, resolver);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
+        let mut window_state = Box::pin(cx.background_executor().timer(WINDOW_STATE_PERIOD));
         // Cleared when the IPC update channel closes (the client thread died),
         // so the select stops polling a closed receiver.
         let mut ipc_open = true;
@@ -178,6 +184,10 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 () = &mut camera_scan => {
                     camera_scan.set(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
                     rt.rescan_cameras(cx).await;
+                }
+                () = &mut window_state => {
+                    window_state.set(cx.background_executor().timer(WINDOW_STATE_PERIOD));
+                    cx.update(windows::main_window::persist_bounds);
                 }
                 Some(cmd) = asset_commands.recv() => rt.on_asset_command(cmd, cx),
                 // Unguarded: we hold a live `sync_tx`, so this arm simply pends

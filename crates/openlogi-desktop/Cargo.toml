@@ -72,6 +72,10 @@ objc2-service-management = { workspace = true, features = ["std", "SMAppService"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
+windows-sys = { workspace = true, features = [
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints]
 workspace = true
