@@ -16,13 +16,14 @@ use std::time::SystemTime;
 use gpui::WindowDecorations;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Bounds, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement, Point, Render, SharedString, Size, Styled, Subscription, Window,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle,
-    WindowKind, WindowOptions, div, hsla, point, px, rgb, size, svg,
+    App, AppContext as _, Bounds, BoxShadow, ClickEvent, Context, Div, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement, Point, Render, SharedString, Size,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowKind,
+    WindowOptions, div, hsla, point, px, rgb, size, svg,
 };
 #[cfg(target_os = "linux")]
-use gpui::{Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
 use openlogi_core::config::{
     AppSettings, Config, ConfigFile, FlowIndicatorDisplayMode, battery_devices_named,
 };
@@ -31,6 +32,7 @@ use openlogi_core::device::{
     DeviceKind, battery_devices, flow_indicator_devices,
 };
 use openlogi_ipc::Observation;
+use openlogi_ui::action_icons::PIN_ICON;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -54,7 +56,29 @@ const ROW_HEIGHT: f32 = LINE_HEIGHT + LINE_GAP + BAR_HEIGHT;
 const ROW_GAP: f32 = 16.0;
 const ICON_SIZE: f32 = 18.0;
 const ICON_LANE: f32 = 22.0;
+/// The pin toggle's lane above the rows: its hit area, and the gap to the
+/// first row.
+const HEADER_LANE: f32 = 20.0;
+const HEADER_GAP: f32 = 6.0;
+const PIN_ICON_SIZE: f32 = 12.0;
 const MARGIN: f32 = 24.0;
+
+/// The four-way soft halo behind the pinned card's content: the four unit
+/// directions at full strength, then the same directions at twice the
+/// distance, faded — GPUI has no text shadow, so the halo is layered copies,
+/// and the second ring is what keeps it from reading as a hard outline.
+const HALO_STRONG: f32 = 0.55;
+const HALO_SOFT: f32 = 0.25;
+const HALO_STEPS: [(f32, f32, f32); 8] = [
+    (1.0, 0.0, HALO_STRONG),
+    (-1.0, 0.0, HALO_STRONG),
+    (0.0, 1.0, HALO_STRONG),
+    (0.0, -1.0, HALO_STRONG),
+    (2.0, 0.0, HALO_SOFT),
+    (-2.0, 0.0, HALO_SOFT),
+    (0.0, 2.0, HALO_SOFT),
+    (0.0, -2.0, HALO_SOFT),
+];
 
 const BOLT_ICON: &str = "action-icons/bolt.svg";
 const MOUSE_ICON: &str = "action-icons/mouse.svg";
@@ -168,7 +192,7 @@ fn card_size(rows: usize) -> Size<gpui::Pixels> {
     let gaps = f32::from(count.saturating_sub(1)) * ROW_GAP;
     size(
         px(CARD_WIDTH),
-        px(BORDER * 2.0 + PADDING_Y * 2.0 + rows_height + gaps),
+        px(BORDER * 2.0 + PADDING_Y * 2.0 + HEADER_LANE + HEADER_GAP + rows_height + gaps),
     )
 }
 
@@ -273,6 +297,10 @@ struct Palette {
     muted: Hsla,
     track: Hsla,
     border: Hsla,
+    /// The halo tint behind the pinned card's content — the colour that
+    /// contrasts with the text on an unknown desktop, alpha set per copy.
+    shadow: Hsla,
+    hover: Hsla,
 }
 
 impl Palette {
@@ -284,6 +312,8 @@ impl Palette {
                 muted: rgb(0xA1_A1_A6).into(),
                 track: hsla(0.0, 0.0, 1.0, 0.12),
                 border: hsla(0.0, 0.0, 1.0, 0.10),
+                shadow: rgb(0x00_00_00).into(),
+                hover: hsla(0.0, 0.0, 1.0, 0.10),
             }
         } else {
             Self {
@@ -292,9 +322,16 @@ impl Palette {
                 muted: rgb(0x6E_6E_73).into(),
                 track: hsla(0.0, 0.0, 0.0, 0.08),
                 border: hsla(0.0, 0.0, 0.0, 0.12),
+                shadow: rgb(0xFF_FF_FF).into(),
+                hover: hsla(0.0, 0.0, 0.0, 0.06),
             }
         }
     }
+}
+
+/// A halo copy's colour: the palette's tint at the step's strength.
+fn halo(tint: Hsla, alpha: f32) -> Hsla {
+    hsla(tint.h, tint.s, tint.l, alpha)
 }
 
 fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
@@ -304,6 +341,75 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
         BatteryColor::Red => rgb(0xEF_44_44).into(),
         BatteryColor::Neutral => pal.text,
     }
+}
+
+/// A text run with the pinned card's four-way halo: offset copies behind the
+/// real one. The wrapper keeps the caller's layout slot; each copy truncates
+/// against the same bounds.
+fn shadowed_text(
+    text: SharedString,
+    size: f32,
+    weight: FontWeight,
+    color: Hsla,
+    pal: &Palette,
+    pinned: bool,
+) -> Div {
+    let mut wrapper = div().relative().truncate();
+    if pinned {
+        wrapper = wrapper.children(HALO_STEPS.map(|(_dx, _dy, alpha)| {
+            div()
+                .absolute()
+                .inset_0()
+                .truncate()
+                .text_size(px(size))
+                .font_weight(weight)
+                .text_color(halo(pal.shadow, alpha))
+                .child(text.clone())
+        }));
+    }
+    wrapper.child(
+        div()
+            .truncate()
+            .text_size(px(size))
+            .font_weight(weight)
+            .text_color(color)
+            .child(text),
+    )
+}
+
+/// An SVG glyph with the same halo, the copies nudged instead of inset so the
+/// antialiasing of the shifted glyphs stays crisp.
+fn shadowed_icon(
+    path: &'static str,
+    icon_size: f32,
+    color: Hsla,
+    pal: &Palette,
+    pinned: bool,
+) -> Div {
+    let mut wrapper = div().relative().w(px(icon_size)).h(px(icon_size));
+    if pinned {
+        wrapper = wrapper.children(HALO_STEPS.map(|(dx, dy, alpha)| {
+            svg()
+                .path(path)
+                .size(px(icon_size))
+                .text_color(halo(pal.shadow, alpha))
+                .absolute()
+                .left(px(dx))
+                .top(px(dy))
+        }));
+    }
+    wrapper.child(svg().path(path).size(px(icon_size)).text_color(color))
+}
+
+/// The progress bar's halo: the same four-way pattern as a blurred box shadow,
+/// which follows the bar's rounded corners.
+fn bar_shadows(pal: &Palette) -> Vec<BoxShadow> {
+    HALO_STEPS
+        .iter()
+        .map(|(dx, dy, alpha)| {
+            BoxShadow::new(px(*dx), px(*dy), halo(pal.shadow, *alpha)).blur_radius(px(2.0))
+        })
+        .collect()
 }
 
 /// What the widget should show: disabled, empty, or a row set.
@@ -319,6 +425,12 @@ struct FlowIndicatorView {
     /// is shrunk to a transparent 1x1 on Wayland and hidden natively on
     /// Windows, so its placement survives the toggle.
     visible: bool,
+    /// The pin toggle's state, shared with the owner: the view's button writes
+    /// it, and a window reopen (a display-mode change) keeps the choice.
+    pinned: Rc<Cell<bool>>,
+    /// The settings' display mode — unpinning returns the card to it, and a
+    /// settings mode of Topmost makes the pin toggle leave the bit alone.
+    mode: FlowIndicatorDisplayMode,
     /// The card's X11 window, when this session is X11.
     #[cfg(target_os = "linux")]
     x11: Option<crate::platform::x11::CardWindow>,
@@ -348,12 +460,14 @@ struct PendingPlace {
 }
 
 impl FlowIndicatorView {
-    fn new(rows: Vec<Row>, appearance: Arc<Appearance>) -> Self {
+    fn new(rows: Vec<Row>, appearance: Arc<Appearance>, pinned: Rc<Cell<bool>>) -> Self {
         Self {
             rows,
             appearance,
             appearance_subscription: None,
             visible: true,
+            pinned,
+            mode: FlowIndicatorDisplayMode::Normal,
             #[cfg(target_os = "linux")]
             x11: None,
             #[cfg(target_os = "linux")]
@@ -382,7 +496,7 @@ impl FlowIndicatorView {
         })
     }
 
-    fn row_view(row: &Row, pal: &Palette) -> impl IntoElement + use<> {
+    fn row_view(row: &Row, pal: &Palette, pinned: bool) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
@@ -398,50 +512,42 @@ impl FlowIndicatorView {
                     .gap(px(8.0))
                     .h(px(LINE_HEIGHT))
                     .line_height(px(LINE_HEIGHT))
+                    .child(div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
+                        shadowed_icon(kind_icon(row.kind), ICON_SIZE, pal.muted, pal, pinned),
+                    ))
                     .child(
-                        div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
-                            svg()
-                                .path(kind_icon(row.kind))
-                                .size(px(ICON_SIZE))
-                                .text_color(pal.muted),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            // The device name carries the row; it reads at the
-                            // same size as the value beside it.
-                            .text_size(px(16.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(pal.text)
-                            .child(row.name.clone()),
+                        shadowed_text(
+                            row.name.clone(),
+                            16.0,
+                            FontWeight::MEDIUM,
+                            pal.text,
+                            pal,
+                            pinned,
+                        )
+                        .flex_1()
+                        .min_w_0(),
                     )
                     .when(row.online && row.charging, |line| {
-                        line.child(
-                            svg()
-                                .path(BOLT_ICON)
-                                .size(px(12.0))
-                                .flex_none()
-                                .text_color(color),
-                        )
+                        line.child(shadowed_icon(BOLT_ICON, 12.0, color, pal, pinned).flex_none())
                     })
                     .when(!row.online, |line| {
-                        line.child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(pal.muted)
-                                .child(rust_i18n::t!("device.offline").to_string()),
-                        )
+                        line.child(shadowed_text(
+                            rust_i18n::t!("device.offline").to_string().into(),
+                            10.0,
+                            FontWeight::NORMAL,
+                            pal.muted,
+                            pal,
+                            pinned,
+                        ))
                     })
-                    .child(
-                        div()
-                            .text_size(px(16.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(color)
-                            .child(row.value.clone()),
-                    ),
+                    .child(shadowed_text(
+                        row.value.clone(),
+                        16.0,
+                        FontWeight::SEMIBOLD,
+                        color,
+                        pal,
+                        pinned,
+                    )),
             )
             .child(
                 div()
@@ -449,42 +555,113 @@ impl FlowIndicatorView {
                     .w_full()
                     .rounded_full()
                     .bg(pal.track)
+                    .when(pinned, |track| track.shadow(bar_shadows(pal)))
                     .when(row.fill.is_some(), |track| {
-                        track.child(div().h_full().w(px(fill_width)).rounded_full().bg(color))
+                        track.child(
+                            div()
+                                .h_full()
+                                .w(px(fill_width))
+                                .rounded_full()
+                                .bg(color)
+                                .when(pinned, |fill| fill.shadow(bar_shadows(pal))),
+                        )
                     }),
             )
     }
 
-    fn card(&self, pal: &Palette) -> impl IntoElement + use<> {
+    fn card(
+        &self,
+        pal: &Palette,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         div()
             .w(px(CARD_WIDTH))
             .flex()
             .flex_col()
-            .gap(px(ROW_GAP))
             .px(px(PADDING_X))
             .py(px(PADDING_Y))
             .rounded(px(RADIUS))
-            .bg(pal.card)
-            .border(px(BORDER))
-            .border_color(pal.border)
-            .shadow_lg()
-            .window_control_area(WindowControlArea::Drag)
+            .when(!pinned, |card| {
+                card.bg(pal.card)
+                    .border(px(BORDER))
+                    .border_color(pal.border)
+                    .shadow_lg()
+                    // The pinned card is fixed by definition; while it can be
+                    // dragged, the whole card is the platform's move handle —
+                    // except the pin button, which occludes its own hitbox.
+                    .window_control_area(WindowControlArea::Drag)
+            })
             .debug_selector(|| "flow-indicator-card".into())
-            .children(self.rows.iter().map(|row| Self::row_view(row, pal)))
+            .child(
+                div()
+                    .h(px(HEADER_LANE))
+                    .mb(px(HEADER_GAP))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .child(
+                        div()
+                            .id("flow-indicator-pin")
+                            .size(px(HEADER_LANE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .occlude()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(pal.hover))
+                            .on_click(cx.listener(Self::toggle_pin))
+                            .debug_selector(|| "flow-indicator-pin".into())
+                            .child(shadowed_icon(
+                                PIN_ICON,
+                                PIN_ICON_SIZE,
+                                if pinned { pal.text } else { pal.muted },
+                                pal,
+                                pinned,
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ROW_GAP))
+                    .children(self.rows.iter().map(|row| Self::row_view(row, pal, pinned))),
+            )
+    }
+
+    /// The pin button's handler. Windows flips the topmost bit live; the other
+    /// platforms' window kinds are fixed at creation, so the owner's tick
+    /// notices the flip and reopens the card with the Topmost kind.
+    #[cfg_attr(
+        not(target_os = "windows"),
+        expect(
+            unused_variables,
+            reason = "only Windows can move a live window above the others"
+        )
+    )]
+    fn toggle_pin(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let pinned = !self.pinned.get();
+        self.pinned.set(pinned);
+        #[cfg(target_os = "windows")]
+        set_topmost(
+            window,
+            pinned || self.mode == FlowIndicatorDisplayMode::Topmost,
+        );
+        info!(pinned, "Flow Indicator pin toggled");
+        cx.notify();
     }
 }
 
 impl Render for FlowIndicatorView {
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(unused_variables, reason = "the card's drag listeners are Linux-only")
-    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.visible {
             return div().size_full();
         }
+        let pinned = self.pinned.get();
         let pal = Palette::for_dark(self.dark_mode(window));
-        let root = div().size_full().child(self.card(&pal));
+        let root = div().size_full().child(self.card(&pal, pinned, cx));
         #[cfg(target_os = "linux")]
         let root = Self::with_drag(root, cx);
         root
@@ -506,6 +683,9 @@ impl FlowIndicatorView {
     /// `start_window_move` sends `_NET_WM_MOVERESIZE` with button 0, and
     /// xfwm4 drives its move loop from that button number.
     fn begin_drag(&mut self, event: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        if self.pinned.get() {
+            return;
+        }
         self.pending_place = None;
         self.manual_drag = None;
         if self.x11.is_some() {
@@ -639,6 +819,10 @@ pub(crate) enum Command {
 /// This type is owned by one GPUI task, not an entity: opening a window inside
 /// an entity update re-enters GPUI's app borrow. The task hands each command
 /// through `App::update`, the same context the notice windows open from.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is one lifecycle fact; the last mirrors the shared pin toggle"
+)]
 pub(crate) struct FlowIndicator {
     settings: Settings,
     /// The config that names the rows; `None` until the first successful read.
@@ -661,6 +845,12 @@ pub(crate) struct FlowIndicator {
     /// Set when the user closed the card window: observations must not bring
     /// it back until the settings change.
     dismissed: Rc<Cell<bool>>,
+    /// The pin toggle the open card's view writes; the owner reads it so a
+    /// reopen (display-mode change) keeps the choice, and so a flip can move
+    /// the card between the platform's window kinds.
+    pinned: Rc<Cell<bool>>,
+    /// The pin state the last tick saw.
+    pinned_seen: bool,
     /// Logged once, so a boot without a card shows whether observations ever
     /// reached this process.
     observed: bool,
@@ -684,6 +874,8 @@ impl FlowIndicator {
             layer_shell: false,
             last_saved_origin: None,
             dismissed: Rc::new(Cell::new(false)),
+            pinned: Rc::new(Cell::new(false)),
+            pinned_seen: false,
             observed: false,
         }
     }
@@ -715,10 +907,32 @@ impl FlowIndicator {
                 self.refresh_dismissed(cx);
                 #[cfg(target_os = "linux")]
                 self.settle_place(cx);
+                self.follow_pin(cx);
                 self.persist_position(cx);
                 self.follow_appearance(cx);
             }
         }
+    }
+
+    /// The mode the card should run in: pinning forces Topmost over the
+    /// settings' choice, unpinning returns to it.
+    fn effective_mode(&self) -> FlowIndicatorDisplayMode {
+        if self.pinned.get() {
+            FlowIndicatorDisplayMode::Topmost
+        } else {
+            self.settings.display_mode
+        }
+    }
+
+    /// Notice a pin flip. Windows has already moved the live window (the
+    /// view's handler flipped the bit); elsewhere the flip changes which
+    /// window kind the card needs, and `sync` reopens it for that.
+    fn follow_pin(&mut self, cx: &mut App) {
+        if self.pinned_seen == self.pinned.get() {
+            return;
+        }
+        self.pinned_seen = self.pinned.get();
+        self.sync(cx);
     }
 
     /// Repaint the open card when the watched mode flips. The platform's own
@@ -850,7 +1064,11 @@ impl FlowIndicator {
                 self.hide(cx);
                 return;
             }
-            if self.window_mode != Some(self.settings.display_mode) {
+            // Windows carries the display mode in the live topmost bit, set
+            // in place below — no reopen, no flicker. The other platforms pick
+            // the mode through the window kind, which only a new window has.
+            #[cfg(not(target_os = "windows"))]
+            if self.window_mode != Some(self.effective_mode()) {
                 let origin = handle
                     .update(cx, |_, window, _| window.bounds().origin)
                     .ok();
@@ -861,9 +1079,18 @@ impl FlowIndicator {
             // Update in place — a new window would lose the placement the
             // compositor chose for this one.
             let card = card_size(rows.len());
+            let settings_mode = self.settings.display_mode;
+            #[cfg_attr(
+                not(target_os = "windows"),
+                expect(unused_variables, reason = "the live bit is Windows-only")
+            )]
+            let want_topmost = self.effective_mode() == FlowIndicatorDisplayMode::Topmost;
             let _ = handle.update(cx, |view, window, cx| {
                 view.rows = rows;
                 view.visible = true;
+                view.mode = settings_mode;
+                #[cfg(target_os = "windows")]
+                set_topmost(window, want_topmost);
                 if window.bounds().size != card {
                     window.resize(card);
                 }
@@ -930,23 +1157,32 @@ impl FlowIndicator {
         // layer-shell surface first (borderless, anchored bottom-right). An
         // X11 session, or a compositor without wlr-layer-shell, gets the
         // ordinary window.
-        let attempts = window_attempts(self.settings.display_mode, bounds);
+        let mode = self.effective_mode();
+        let settings_mode = self.settings.display_mode;
+        let attempts = window_attempts(mode, bounds);
         let mut layer_shell = false;
         let appearance = Arc::clone(&self.appearance);
+        let pinned = Rc::clone(&self.pinned);
         let opened = crate::platform::open_first(
             attempts.into_iter().map(|options| vec![options]).collect(),
             |options| {
                 layer_shell = is_layer_shell(&options.kind);
                 cx.open_window(options, |_, cx| {
-                    cx.new(|_| FlowIndicatorView::new(rows.to_vec(), Arc::clone(&appearance)))
+                    cx.new(|_| {
+                        FlowIndicatorView::new(
+                            rows.to_vec(),
+                            Arc::clone(&appearance),
+                            Rc::clone(&pinned),
+                        )
+                    })
                 })
             },
         );
-        let mode = self.settings.display_mode;
         let Some(handle) = opened else {
             return;
         };
         let configured = handle.update(cx, |view, window, cx| {
+            view.mode = settings_mode;
             apply_display_mode(window, mode);
             view.observe_appearance(window, cx);
             view.on_opened(window, origin);
@@ -1117,8 +1353,48 @@ fn apply_display_mode(window: &mut Window, mode: FlowIndicatorDisplayMode) {
 #[cfg(not(target_os = "windows"))]
 fn apply_display_mode(_window: &mut Window, _mode: FlowIndicatorDisplayMode) {}
 
+/// Move the live card above (or back below) the other windows. `HWND_TOPMOST`
+/// sets the `WS_EX_TOPMOST` bit itself, so no style edit rides along.
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "a documented z-order change on the live GPUI window, on its UI thread"
+)]
+fn set_topmost(window: &Window, topmost: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: a documented z-order change on the live HWND owned by `window`,
+    // on the thread GPUI requires.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            if topmost {
+                HWND_TOPMOST
+            } else {
+                HWND_NOTOPMOST
+            },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use super::{SavedPosition, card_size, clamp_origin};
@@ -1126,16 +1402,17 @@ mod tests {
 
     #[test]
     fn the_card_height_follows_the_row_count() {
-        // Two 1 px borders, the 14 px padding top and bottom, 26+9+6 per row,
-        // and the 16 px gap between rows.
-        assert_eq!(f32::from(card_size(1).height), 2.0 + 28.0 + 41.0);
+        // Two 1 px borders, the 14 px padding top and bottom, the 20 px pin
+        // lane plus its 6 px gap, 26+9+6 per row, and the 16 px gap between
+        // rows.
+        assert_eq!(f32::from(card_size(1).height), 2.0 + 28.0 + 26.0 + 41.0);
         assert_eq!(
             f32::from(card_size(3).height),
-            2.0 + 28.0 + 3.0 * 41.0 + 2.0 * 16.0
+            2.0 + 28.0 + 26.0 + 3.0 * 41.0 + 2.0 * 16.0
         );
         assert_eq!(
             f32::from(card_size(5).height),
-            2.0 + 28.0 + 5.0 * 41.0 + 4.0 * 16.0
+            2.0 + 28.0 + 26.0 + 5.0 * 41.0 + 4.0 * 16.0
         );
     }
 
@@ -1176,7 +1453,11 @@ mod tests {
             kind: DeviceKind::Mouse,
         }];
         let window = cx.add_window(|_, _| {
-            FlowIndicatorView::new(rows, Arc::new(crate::appearance::Appearance::new()))
+            FlowIndicatorView::new(
+                rows,
+                Arc::new(crate::appearance::Appearance::new()),
+                Rc::new(Cell::new(false)),
+            )
         });
         cx.run_until_parked();
         let shown = window
@@ -1206,8 +1487,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let window = card_size(rows.len());
+        let pinned = Rc::new(Cell::new(false));
         let (_view, cx) = cx.add_window_view(|_, _| {
-            FlowIndicatorView::new(rows, Arc::new(crate::appearance::Appearance::new()))
+            FlowIndicatorView::new(
+                rows,
+                Arc::new(crate::appearance::Appearance::new()),
+                Rc::clone(&pinned),
+            )
         });
         cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(400.0)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1215,5 +1501,80 @@ mod tests {
             .debug_bounds("flow-indicator-card")
             .expect("the card renders");
         assert_eq!(card.size, window, "the card must fit its window");
+    }
+
+    /// The pinned card keeps the same footprint and still draws its pin
+    /// button — the toggle has to survive its own transparency.
+    #[gpui::test]
+    fn the_pinned_card_keeps_the_pin_button(cx: &mut gpui::TestAppContext) {
+        use super::{FlowIndicatorView, Row};
+        use openlogi_core::device::{BatteryColor, DeviceKind};
+
+        let rows = vec![Row {
+            name: "MX Master 3S".into(),
+            value: "87%".into(),
+            fill: Some(87),
+            color: BatteryColor::Green,
+            charging: false,
+            online: true,
+            kind: DeviceKind::Mouse,
+        }];
+        let pinned = Rc::new(Cell::new(true));
+        let (_view, cx) = cx.add_window_view(|_, _| {
+            FlowIndicatorView::new(
+                rows,
+                Arc::new(crate::appearance::Appearance::new()),
+                Rc::clone(&pinned),
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(400.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let card = cx
+            .debug_bounds("flow-indicator-card")
+            .expect("the card renders");
+        let pin = cx
+            .debug_bounds("flow-indicator-pin")
+            .expect("the pin button renders");
+        assert!(
+            card.contains(&pin.origin),
+            "the pin button must sit inside the card"
+        );
+    }
+
+    /// Clicking the pin button flips the shared flag. The button sits inside
+    /// the card's platform drag area, so this also proves its occluding hitbox
+    /// keeps the click from being swallowed by the move handle.
+    #[gpui::test]
+    fn clicking_the_pin_button_toggles_the_shared_flag(cx: &mut gpui::TestAppContext) {
+        use super::{FlowIndicatorView, Row};
+        use openlogi_core::device::{BatteryColor, DeviceKind};
+
+        let rows = vec![Row {
+            name: "MX Master 3S".into(),
+            value: "87%".into(),
+            fill: Some(87),
+            color: BatteryColor::Green,
+            charging: false,
+            online: true,
+            kind: DeviceKind::Mouse,
+        }];
+        let pinned = Rc::new(Cell::new(false));
+        let (view, cx) = cx.add_window_view(|_, _| {
+            FlowIndicatorView::new(
+                rows,
+                Arc::new(crate::appearance::Appearance::new()),
+                Rc::clone(&pinned),
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(400.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let pin = cx
+            .debug_bounds("flow-indicator-pin")
+            .expect("the pin button renders");
+        cx.simulate_click(pin.center(), gpui::Modifiers::none());
+        assert!(pinned.get(), "the click must reach the pin button");
+        view.update(cx, |view, _| {
+            assert!(view.pinned.get());
+        });
     }
 }
