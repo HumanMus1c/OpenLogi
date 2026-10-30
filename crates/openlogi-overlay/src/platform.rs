@@ -16,6 +16,33 @@ pub(crate) use placement::{NoticePlacement, RingPlacement};
 #[cfg(target_os = "windows")]
 pub(crate) use windows::{NoticePlacement, RingPlacement};
 
+/// Take the card's window off the screen without destroying it.
+///
+/// Windows hides the window natively: a shrunk one still shows, because GPUI
+/// creates pop-ups as `WS_OVERLAPPED`, Windows clamps them to the frame
+/// minimum and DWM keeps drawing the frame and its shadow.
+#[cfg(target_os = "windows")]
+pub(crate) fn hide_card(window: &mut gpui::Window) {
+    windows::set_card_visible(window, false);
+}
+
+/// Bring a natively hidden card back without activating its window.
+#[cfg(target_os = "windows")]
+pub(crate) fn show_card(window: &mut gpui::Window) {
+    windows::set_card_visible(window, true);
+}
+
+/// Shrink the card to a transparent 1x1: on Wayland that is the only way to
+/// keep the placement a compositor chose while the card is hidden.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn hide_card(window: &mut gpui::Window) {
+    window.resize(gpui::size(gpui::px(1.0), gpui::px(1.0)));
+}
+
+/// The 1x1 window only needs resizing back when the card returns.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn show_card(_window: &mut gpui::Window) {}
+
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 

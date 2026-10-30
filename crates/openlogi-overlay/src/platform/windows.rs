@@ -12,6 +12,11 @@ use crate::ring::{Placement, WINDOW_SIZE, ring_window_options};
 #[cfg(target_os = "windows")]
 mod native;
 
+/// Show or hide the card's window without destroying it; see
+/// [`crate::platform::hide_card`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::set_card_visible;
+
 /// One native cursor/monitor snapshot, kept through bootstrap-window creation.
 pub(crate) struct RingPlacement {
     display_id: DisplayId,

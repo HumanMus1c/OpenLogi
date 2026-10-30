@@ -18,9 +18,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_EX_NOACTIVATE,
-    WS_POPUP, WS_THICKFRAME,
+    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos,
+    ShowWindow, WS_CAPTION, WS_EX_NOACTIVATE, WS_POPUP, WS_THICKFRAME,
 };
 
 use super::{NoticePlacement, RingPlacement};
@@ -273,6 +273,34 @@ fn make_nonactivating(hwnd: HWND) -> Result<()> {
             .context("keep the overlay window from taking the foreground");
     }
     Ok(())
+}
+
+/// Take a window off the screen without destroying it, or bring it back
+/// without activating it.
+///
+/// The Flow Indicator must keep its window to keep its placement, and here a
+/// shrunk window is not invisible: GPUI creates pop-ups as `WS_OVERLAPPED`, so
+/// Windows clamps them to the frame minimum and DWM keeps drawing the frame
+/// and its shadow around the 1x1 client area.
+#[expect(
+    unsafe_code,
+    reason = "ShowWindow on the live GPUI window's HWND, on its owning UI thread"
+)]
+pub(crate) fn set_card_visible(window: &Window, visible: bool) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        warn!("could not get the overlay window handle to hide it");
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        warn!("the overlay window has no Win32 handle to hide");
+        return;
+    };
+    let hwnd = handle.hwnd.get() as HWND;
+    // SAFETY: hwnd is the live window behind `window`; the call only flips
+    // its visibility state.
+    unsafe {
+        ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    }
 }
 
 #[expect(

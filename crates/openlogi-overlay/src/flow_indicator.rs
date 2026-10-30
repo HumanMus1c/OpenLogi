@@ -315,8 +315,9 @@ struct FlowIndicatorView {
     /// Repaints on the platform's own appearance change; the watched mode
     /// repaints through the tick instead.
     appearance_subscription: Option<Subscription>,
-    /// False while settings hide the card: render nothing (the window is
-    /// shrunk to a transparent 1x1 so the compositor keeps its place).
+    /// False while settings hide the card: render nothing. The window itself
+    /// is shrunk to a transparent 1x1 on Wayland and hidden natively on
+    /// Windows, so its placement survives the toggle.
     visible: bool,
     /// The card's X11 window, when this session is X11.
     #[cfg(target_os = "linux")]
@@ -637,9 +638,9 @@ pub(crate) struct FlowIndicator {
     appearance: Arc<Appearance>,
     /// The appearance revision the open card last painted.
     appearance_revision: u64,
-    /// The window exists but settings hide the card: it is a transparent 1x1
-    /// rather than closed, which is the only way a Wayland compositor keeps
-    /// the placement it chose for it.
+    /// The window exists but settings hide the card: it is not closed, which
+    /// is the only way a Wayland compositor keeps the placement it chose for
+    /// it. Wayland hides it as a transparent 1x1, Windows natively.
     hidden: bool,
     window: Option<WindowHandle<FlowIndicatorView>>,
     window_mode: Option<FlowIndicatorDisplayMode>,
@@ -860,6 +861,7 @@ impl FlowIndicator {
             });
             if self.hidden {
                 self.hidden = false;
+                let _ = handle.update(cx, |_, window, _| crate::platform::show_card(window));
                 info!("Flow Indicator card shown");
             }
             return;
@@ -869,9 +871,14 @@ impl FlowIndicator {
         }
     }
 
-    /// Hide the card without closing its window: settings (or an empty row
-    /// set) turn it into a transparent 1x1. Wayland has no client-side
-    /// positioning, so a closed window would lose the compositor's placement.
+    /// Take the card off the screen: settings (or an empty row set) hide it.
+    ///
+    /// A kept window is what remembers the card's place, so it is hidden
+    /// rather than closed. Wayland shrinks it to a transparent 1x1; Windows
+    /// hides it natively, because shrinking cannot work there: GPUI creates
+    /// pop-ups as `WS_OVERLAPPED`, so the window is clamped to its frame
+    /// minimum and DWM keeps drawing the frame and its shadow around the 1x1
+    /// client area.
     fn hide(&mut self, cx: &mut App) {
         if self.hidden {
             return;
@@ -881,7 +888,7 @@ impl FlowIndicator {
         };
         let _ = handle.update(cx, |view, window, cx| {
             view.visible = false;
-            window.resize(size(px(1.0), px(1.0)));
+            crate::platform::hide_card(window);
             cx.notify();
         });
         self.hidden = true;
