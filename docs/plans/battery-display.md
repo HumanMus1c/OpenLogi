@@ -779,6 +779,20 @@ instead of claiming Linux has no tray.
   executor the rest of the workspace uses), and the panics are gone: the card
   follows light/dark live again and the wide label, badge, and menu still work.
 
+- **The card's window survives hide and row changes.** Wayland gives clients
+  no way to place a toplevel: Mutter ignores the requested origin and centres
+  each new window, so closing the card on a settings toggle or a row-count
+  change recreated it and lost a dragged position. The FlowIndicator now keeps
+  the window: the disabled/empty state shrinks it to a transparent 1×1 instead
+  of closing it, a row-count change resizes it in place, and only a display
+  mode change recreates it. Verified in the GNOME session: the toggle logs
+  `card hidden`/`card shown` with no new `card opened`, and a 3→2→3 row change
+  resizes in place with the same top-left. **Across restarts the card's
+  position still cannot be restored on GNOME Wayland** — Mutter centres new
+  toplevels and ignores the saved origin, so `flow-indicator.toml` only drives
+  X11, Windows, and macOS; absolute placement there would need a GNOME Shell
+  extension.
+
 ## Appendix: vigil-watt reference
 
 - Tray: lowest online non-system device; 32×32 GDI+ disc; white percentage or
