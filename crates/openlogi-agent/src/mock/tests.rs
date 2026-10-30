@@ -1,5 +1,21 @@
 use super::*;
 
+#[tokio::test]
+async fn a_shutdown_request_signals_the_serving_loop() {
+    let agent = MockAgent::new(test_state());
+    let mut shutdown = agent.shutdown_signal();
+
+    agent
+        .clone()
+        .request_shutdown(tarpc::context::current())
+        .await;
+
+    tokio::time::timeout(Duration::from_millis(100), shutdown.changed())
+        .await
+        .expect("the request wakes the serving loop")
+        .expect("the sender is alive");
+}
+
 #[test]
 fn no_argument_mode_uses_the_canonical_profile_with_demo_time() {
     let state = state_from_args(std::iter::empty()).expect("no-argument mock state");

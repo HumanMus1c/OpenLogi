@@ -1,20 +1,20 @@
-//! The demo mode: a debug-build agent serves the scripted demo devices
-//! instead of real HID hardware.
+//! The demo mode: an agent launched with `--mock` serves the scripted demo
+//! devices instead of real HID hardware.
 //!
-//! The build tree owns the device source. A debug build demos so feature
-//! testing (GUI, overlay, tray) runs the same on both desktop OSes without
-//! hardware and without touching the user's devices; a release build always
-//! drives real devices, and nothing in this module runs there. Everything
-//! around the device layer is the agent's own production machinery: the same
-//! IPC contract, the same tray, the same shutdown handling, and the scripted
-//! inventory of [`openlogi_agent::mock`]. [`ObservableState`] — the cell the
-//! tray reads — is fed by a bridge that publishes the demo state the way the
-//! orchestrator publishes the real one, so the tray badge and hover card show
-//! demo batteries exactly as they would show real ones.
+//! The launch decides the device source, not the build tree: feature testing
+//! (GUI, overlay, tray) runs the same on every host without hardware and
+//! without touching the user's devices, while a plain launch still drives
+//! real devices. Everything around the device layer is the agent's own
+//! production machinery: the same IPC contract, the same tray, the same
+//! shutdown handling, and the scripted inventory of
+//! [`openlogi_agent::mock`]. [`ObservableState`] — the cell the tray reads —
+//! is fed by a bridge that publishes the demo state the way the orchestrator
+//! publishes the real one, so the tray badge and hover card show demo
+//! batteries exactly as they would show real ones.
 //!
-//! `OPENLOGI_MOCK_DEVICES` overrides within a debug build: `0` drives real
-//! hardware (for debugging a device issue with debug symbols), `1` keeps the
-//! demo. A release build ignores the knob.
+//! `OPENLOGI_MOCK_DEVICES` is the scriptable form of the switch. A WSL guest
+//! defaults to this mode because it exposes no HID devices; set the variable
+//! to `0` to drive a passthrough receiver there.
 
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -25,43 +25,6 @@ use tracing::{info, warn};
 
 use crate::overlay;
 use crate::shutdown::{ShutdownRequest, ShutdownRequests, ShutdownSignals};
-
-/// Whether this agent serves the scripted demo devices: debug builds by
-/// default, release builds never.
-pub(crate) fn requested() -> bool {
-    if !cfg!(debug_assertions) {
-        // The knob cannot turn a release build into a demo: the release tree
-        // tests real devices by definition.
-        if std::env::var_os(openlogi_core::env::MOCK_DEVICES).is_some() {
-            info!(
-                knob = openlogi_core::env::MOCK_DEVICES,
-                "release build — driving real devices regardless"
-            );
-        }
-        return false;
-    }
-    match std::env::var(openlogi_core::env::MOCK_DEVICES) {
-        Ok(value) => parse_knob(&value).unwrap_or_else(|| {
-            warn!(
-                %value,
-                "unknown OPENLOGI_MOCK_DEVICES value — serving the demo devices"
-            );
-            true
-        }),
-        Err(_) => true,
-    }
-}
-
-/// The knob's accepted spellings: `1/true/yes/on` and `0/false/no/off`,
-/// case-insensitively. `None` means "not a boolean" — [`requested`] falls
-/// back to the tree default and says so.
-fn parse_knob(value: &str) -> Option<bool> {
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
 
 /// Run the demo core: serve the scripted devices over the real IPC socket,
 /// mirror them into the observable state the tray reads, and leave on any
@@ -84,18 +47,19 @@ pub(crate) async fn run(
     // The console is inert when stdin is not interactive (a GUI-spawned
     // agent): it stops at EOF and the demo keeps serving.
     mock::spawn_console(agent.clone());
+    let mut shutdown = agent.shutdown_signal();
     tokio::spawn(publish_loop(agent.clone(), observable));
     // The demo serves the moment it is up, so the tray may show at once —
     // there is no arming ladder to climb.
     #[cfg(target_os = "macos")]
     let _ = armed_tx.send(());
     // The production lifecycle starts the overlay at its arming point; the
-    // demo must too, or the Flow Indicator can never appear in the debug tree
+    // demo must too, or the Flow Indicator can never appear in a demo session
     // no matter what the setting says.
     overlay::spawn();
     let mut signals = ShutdownSignals::install();
     info!(
-        "serving the scripted demo devices — {}=0 drives real hardware",
+        "serving the scripted demo devices — set {}=0 to drive real hardware",
         openlogi_core::env::MOCK_DEVICES
     );
     tokio::select! {
@@ -106,8 +70,21 @@ pub(crate) async fn run(
                 exit_demo(1);
             }
         }
-        () = signals.recv() => info!("shutdown signal — demo agent leaving"),
+        () = signals.recv() => {
+            // A dev-run Ctrl-C/SIGTERM takes the overlay with it; the next
+            // agent would evict an orphan, but nobody should wait for that.
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            overlay::evict_on_quit();
+            info!("shutdown signal — demo agent leaving");
+        }
         Some(request) = shutdown_requests.recv() => handle_shutdown_request(request),
+        _ = shutdown.changed() => {
+            // The next agent evicts an orphaned overlay; ask it to leave now
+            // so a mode switch does not leave a stray GPUI process behind.
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            overlay::evict_on_quit();
+            info!("shutdown requested over IPC — demo agent leaving");
+        }
     }
     exit_demo(0);
 }
@@ -127,6 +104,9 @@ fn handle_shutdown_request(request: ShutdownRequest) {
         }
         ShutdownRequest::Uninstalled => {
             info!("the app was uninstalled — demo agent leaving");
+        }
+        ShutdownRequest::Quit => {
+            info!("quit requested — demo agent leaving");
         }
         ShutdownRequest::Restart { path, retry } => {
             info!(path = %path.display(), "executable replaced — demo agent leaving");
@@ -182,17 +162,6 @@ mod tests {
     use crate::tray_readout::TrayReadout;
 
     use super::*;
-
-    #[test]
-    fn the_knob_accepts_only_known_spellings() {
-        assert_eq!(parse_knob("1"), Some(true));
-        assert_eq!(parse_knob("on"), Some(true));
-        assert_eq!(parse_knob("TRUE"), Some(true));
-        assert_eq!(parse_knob("0"), Some(false));
-        assert_eq!(parse_knob("Off"), Some(false));
-        assert_eq!(parse_knob(""), None);
-        assert_eq!(parse_knob("demo"), None);
-    }
 
     #[tokio::test]
     async fn the_bridge_publishes_the_demo_inventory_into_the_tray_cell() {

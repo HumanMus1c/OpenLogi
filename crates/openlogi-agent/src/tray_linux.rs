@@ -13,6 +13,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,11 @@ enum TrayCommand {
 /// The channel a config reload and the inventory watcher share.
 static SENDER: OnceLock<UnboundedSender<TrayCommand>> = OnceLock::new();
 
+/// Whether this agent serves the demo inventory. A GUI launched from the tray
+/// must start in the same source, or it would retire the demo agent the user
+/// just clicked.
+static MOCK_AGENT: AtomicBool = AtomicBool::new(false);
+
 /// Start the tray on its own D-Bus thread. No-op when the user hid the tray
 /// preference; that takes effect on the agent's next launch, as on the other
 /// platforms.
@@ -63,7 +69,9 @@ pub fn spawn(
     config: Arc<Config>,
     observable: Arc<ObservableState>,
     shutdown_tx: ShutdownRequestSender,
+    mock: bool,
 ) {
+    MOCK_AGENT.store(mock, Ordering::Relaxed);
     if !show_in_tray {
         info!("tray icon disabled by preference — agent stays invisible");
         return;
@@ -536,8 +544,16 @@ fn open_gui() {
         warn!(path = %gui.display(), "no GUI binary next to the agent");
         return;
     }
-    match Command::new(&gui).spawn() {
-        Ok(_) => info!(path = %gui.display(), "tray — launched the GUI"),
+    let mut command = Command::new(&gui);
+    if MOCK_AGENT.load(Ordering::Relaxed) {
+        command.arg("--mock");
+    }
+    match command.spawn() {
+        Ok(_) => info!(
+            path = %gui.display(),
+            mock = MOCK_AGENT.load(Ordering::Relaxed),
+            "tray — launched the GUI"
+        ),
         Err(error) => warn!(%error, path = %gui.display(), "tray — could not launch the GUI"),
     }
 }

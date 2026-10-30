@@ -5,12 +5,12 @@
 //!
 //! Two processes serve it, from this one implementation:
 //!
-//! - **`openlogi-agent` in a debug build** — the demo mode (see the binary's
-//!   `demo` module): the agent's own platform services (IPC server, tray,
-//!   shutdown handling) run as in production, with this inventory in place of
-//!   real devices, so feature testing never needs hardware and never touches
-//!   the user's devices. Its profile resolves exactly like a production
-//!   agent's, from its launch identity and environment.
+//! - **`openlogi-agent` launched with `--mock`** — the demo mode (see the
+//!   binary's `demo` module): the agent's own platform services (IPC server,
+//!   tray, shutdown handling) run as in production, with this inventory in
+//!   place of real devices, so feature testing never needs hardware and never
+//!   touches the user's devices. Its profile resolves exactly like a
+//!   production agent's, from its launch identity and environment.
 //! - **the `openlogi-agent-mock` dev tool** — a standalone binary (thin
 //!   wrapper in `src/bin/mock_agent.rs`) for driving the GUI without building
 //!   the agent into it. Unlike the demo mode it defaults itself to the
@@ -24,7 +24,7 @@
 //! ```sh
 //! cargo run -p openlogi-agent --bin openlogi-agent-mock
 //! cargo run -p openlogi-agent --bin openlogi-agent-mock -- --fixture profile.json
-//! cargo run -p openlogi-desktop   # debug build: the GUI spawns the demo agent itself
+//! cargo run -p openlogi-desktop -- --mock   # the GUI spawns the demo agent itself
 //! ```
 //!
 //! With no arguments it retains the animated scripted demo. A semantic device
@@ -101,11 +101,6 @@ pub use control::spawn_console;
 
 use control::Fault;
 use profile::{built_in_profile, parse_profile, unsupported_settings, validate_light_command};
-
-/// Suffix marking a demo/mock agent's version wherever the GUI displays it.
-/// The agent's demo mode seeds its observable state with the same marked
-/// version, so every surface agrees that this is not a live session.
-pub const VERSION_SUFFIX: &str = "-mock";
 
 /// Unique ID of the scripted Bolt receiver; Bolt routes are matched against it.
 const RECEIVER_UID: &str = "OL-BOLT-UID-0001";
@@ -198,8 +193,15 @@ pub fn main_from_args(args: impl Iterator<Item = OsString>) -> ExitCode {
     };
     let served = runtime.block_on(async {
         let agent = MockAgent::new(state);
+        let mut shutdown = agent.shutdown_signal();
         control::spawn_console(agent.clone());
-        serve(agent).await
+        tokio::select! {
+            served = serve(agent) => served,
+            _ = shutdown.changed() => {
+                info!("shutdown requested over IPC — mock agent leaving");
+                Ok(())
+            }
+        }
     });
     match served {
         Ok(()) => ExitCode::SUCCESS,
@@ -996,7 +998,11 @@ fn agent_status() -> AgentStatus {
         protocol_version: PROTOCOL_VERSION,
         // The "-mock" marker shows up anywhere the GUI displays the agent
         // version, so a mock session can't be mistaken for a live one.
-        agent_version: format!("{}{VERSION_SUFFIX}", env!("CARGO_PKG_VERSION")),
+        agent_version: format!(
+            "{}{}",
+            env!("CARGO_PKG_VERSION"),
+            openlogi_core::device_source::MOCK_VERSION_SUFFIX
+        ),
         input_monitoring_granted: true,
         hid_open_failures: false,
         secure_input: openlogi_ipc::SecureInput::Off,
@@ -1024,6 +1030,9 @@ pub struct MockAgent {
     /// Signalled by the console to close every open client connection. Each
     /// connection holds one receiver.
     disconnects: Arc<watch::Sender<()>>,
+    /// Signalled by [`Agent::request_shutdown`] so the process serving this
+    /// agent leaves through its own loop instead of a kill.
+    shutdown: watch::Sender<()>,
     /// Where the console and the demo read the user's settings: the config
     /// file, as the agent reads it. Tests set their own.
     settings: fn() -> AppSettings,
@@ -1042,6 +1051,7 @@ impl MockAgent {
             snapshot: snapshot_of(&state),
         };
         let (disconnects, _) = watch::channel(());
+        let (shutdown, _) = watch::channel(());
         Self {
             state: Arc::new(Mutex::new(state)),
             served: Arc::new(Mutex::new(served)),
@@ -1049,9 +1059,18 @@ impl MockAgent {
             lock_keys: LockKeyIndicator::default(),
             backlight: BacklightOverlayManager::default(),
             disconnects: Arc::new(disconnects),
+            shutdown,
             settings: app_settings,
             config_reload: None,
         }
+    }
+
+    /// A receiver that resolves when a client asks this agent to leave. The
+    /// serving process selects on it; the sender lives in every clone the
+    /// connections hold.
+    #[must_use]
+    pub fn shutdown_signal(&self) -> watch::Receiver<()> {
+        self.shutdown.subscribe()
     }
 
     /// Install what a GUI save applies outside this library, so the demo tree
@@ -1155,6 +1174,12 @@ impl Agent for MockAgent {
 
     async fn declare_client(self, _: Context, _kind: ClientKind) {
         // The mock has no dormancy gate; declarations are accepted and ignored.
+    }
+
+    async fn request_shutdown(self, _: Context) {
+        // No firmware, hook, or input-worker state to tear down: the serving
+        // loop just leaves.
+        let _ = self.shutdown.send(());
     }
 
     async fn identity(self, _: Context) -> Identity {

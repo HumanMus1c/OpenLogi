@@ -107,6 +107,10 @@ static UPDATE_PENDING: AtomicBool = AtomicBool::new(false);
 /// tray thread reads it while the IPC server writes it, so it is behind a
 /// lock rather than an atomic.
 static CONFIG: std::sync::RwLock<Option<Arc<Config>>> = std::sync::RwLock::new(None);
+/// Whether this agent serves the demo inventory. A GUI launched from the
+/// tray must start in the same source, or it would retire the demo agent the
+/// user just clicked.
+static MOCK_AGENT: AtomicBool = AtomicBool::new(false);
 
 /// The current badge shape, for the icon key and the renderer.
 fn badge_style() -> TrayBadgeStyle {
@@ -147,8 +151,10 @@ pub fn spawn(
     config: Arc<Config>,
     observable: Arc<ObservableState>,
     shutdown_tx: ShutdownRequestSender,
+    mock: bool,
 ) {
     TRAY_BATTERY.store(tray_battery, Ordering::Relaxed);
+    MOCK_AGENT.store(mock, Ordering::Relaxed);
     set_config(config);
     TRAY_BADGE_STYLE.store(
         match badge_style {
@@ -807,8 +813,16 @@ fn spawn_gui() {
         warn!(dir = %dir.display(), "no GUI binary found next to the agent");
         return;
     };
-    match std::process::Command::new(&gui).spawn() {
-        Ok(_) => info!(path = %gui.display(), "tray — launched the GUI"),
+    let mut command = std::process::Command::new(&gui);
+    if MOCK_AGENT.load(Ordering::Relaxed) {
+        command.arg("--mock");
+    }
+    match command.spawn() {
+        Ok(_) => info!(
+            path = %gui.display(),
+            mock = MOCK_AGENT.load(Ordering::Relaxed),
+            "tray — launched the GUI"
+        ),
         Err(e) => warn!(error = %e, path = %gui.display(), "tray — could not launch the GUI"),
     }
 }

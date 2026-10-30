@@ -64,6 +64,9 @@ pub struct AgentServer {
     /// Forwards each connection's [`ClientKind`] declaration to the
     /// dormancy gate.
     pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
+    /// Asks the lifecycle to leave through [`Agent::request_shutdown`], with
+    /// the same teardown the tray's Quit uses.
+    shutdown: crate::shutdown::ShutdownRequestSender,
 }
 
 impl AgentServer {
@@ -82,6 +85,7 @@ impl AgentServer {
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
         backlight_overlay: BacklightOverlayManager,
+        shutdown: crate::shutdown::ShutdownRequestSender,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
@@ -97,6 +101,7 @@ impl AgentServer {
                 ring_haptics,
                 backlight_overlay,
                 demand,
+                shutdown,
             },
             declarations,
         )
@@ -163,6 +168,16 @@ fn saved_config_verdict(saved: &SavedConfig, revision: ConfigRevision) -> SavedC
 impl Agent for AgentServer {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
+    }
+
+    async fn request_shutdown(self, _: Context) {
+        if self
+            .shutdown
+            .send(crate::shutdown::ShutdownRequest::Quit)
+            .is_err()
+        {
+            warn!("shutdown requested over IPC, but the lifecycle channel is closed");
+        }
     }
 
     async fn observe_backlight(self, _: Context, since: Generation) -> BacklightObservation {

@@ -24,6 +24,10 @@ pub(crate) enum ShutdownRequest {
     },
     /// The installed application disappeared from disk.
     Uninstalled,
+    /// An IPC client asked the agent to leave — a GUI switching the suite's
+    /// device source between real hardware and the scripted demo inventory.
+    /// Unlike a tray quit there is no caller waiting on a guard.
+    Quit,
     /// The executable was replaced and the process should become `path`.
     Restart {
         path: PathBuf,

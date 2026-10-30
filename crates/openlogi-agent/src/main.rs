@@ -6,8 +6,9 @@
 //! core walks the state machine in `lifecycle` on a tokio runtime; on macOS
 //! the process main thread hosts the AppKit run loop the menu bar requires.
 //!
-//! In a debug build the agent serves the scripted demo devices instead of real
-//! hardware — see [`demo`]; release builds always drive real devices.
+//! A `--mock` launch serves the scripted demo devices instead of real
+//! hardware — see [`demo`]; without it the agent drives real devices. The
+//! build tree does not decide: a release build can serve the demo too.
 
 // Without this Windows runs the exe as a console app and pops a terminal
 // window whenever the GUI's sibling spawn or the Run-key autostart starts the
@@ -56,12 +57,13 @@ mod tray_windows;
 mod virtual_keyboard;
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use openlogi_agent::mock;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::config::Config;
+use openlogi_core::device_source::DeviceSource;
 use openlogi_core::single_instance::InstanceGuard;
 #[cfg(not(target_os = "macos"))]
 use openlogi_hid::DeviceIoSignal;
@@ -76,13 +78,10 @@ fn main() -> ExitCode {
     }
     logging::init();
 
-    // The build tree owns the device source: a debug build serves the scripted
-    // demo devices so feature testing never needs (or touches) hardware, a
-    // release build always drives real devices. `OPENLOGI_MOCK_DEVICES`
-    // overrides within a debug build only. The args travel with the demo —
-    // it accepts the mock's `--fixture` — and are ignored otherwise.
-    let demo = demo::requested();
-    let demo_args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // The device source is a launch decision; see `launch_device_source`.
+    let Some((demo, demo_args)) = launch_device_source() else {
+        return ExitCode::FAILURE;
+    };
 
     // Single-instance guard: the agent owns all device I/O, the CGEventTap, and
     // the IPC socket, so a second agent must never start — launchd's KeepAlive
@@ -113,13 +112,8 @@ fn main() -> ExitCode {
     openlogi_core::locale::activate(config.app_settings.language.as_deref());
 
     // The tray and the IPC server read the same cell; construct it before the
-    // tray thread starts so the first tooltip already has a live handle. The
-    // demo marks its version so no surface can mistake it for a live one.
-    let observable = Arc::new(ObservableState::new(if demo {
-        format!("{}{}", env!("CARGO_PKG_VERSION"), mock::VERSION_SUFFIX)
-    } else {
-        env!("CARGO_PKG_VERSION").to_string()
-    }));
+    // tray thread starts so the first tooltip already has a live handle.
+    let observable = Arc::new(ObservableState::new(agent_version(demo)));
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -160,6 +154,9 @@ fn main() -> ExitCode {
         // dropped sender means the core exited without arming — fall through
         // and let the process end.
         let (armed_tx, armed_rx) = std::sync::mpsc::channel::<()>();
+        // The IPC server asks the lifecycle to leave through this sender; the
+        // tray keeps its own clone.
+        let lifecycle_shutdown = shutdown_tx.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
@@ -175,6 +172,7 @@ fn main() -> ExitCode {
                         config,
                         shutdown_requests,
                         observable,
+                        lifecycle_shutdown,
                         armed_tx,
                     ));
                 }
@@ -192,27 +190,119 @@ fn main() -> ExitCode {
                 tray_observable,
                 device_io_signal,
                 shutdown_tx,
+                demo,
             );
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        start_platform_services(&config, &observable, &shutdown_tx, &device_io_signal);
+        start_platform_services(&config, &observable, &shutdown_tx, &device_io_signal, demo);
         if demo {
             runtime.block_on(demo::run(demo_args, shutdown_requests, observable));
         } else {
-            runtime.block_on(lifecycle::run(config, shutdown_requests, observable));
+            runtime.block_on(lifecycle::run(
+                config,
+                shutdown_requests,
+                observable,
+                shutdown_tx,
+            ));
         }
     }
     ExitCode::SUCCESS
 }
 
+/// The version every surface displays. A demo agent's carries the marker so no
+/// surface can mistake it for a live session.
+fn agent_version(demo: bool) -> String {
+    if demo {
+        format!(
+            "{}{}",
+            env!("CARGO_PKG_VERSION"),
+            openlogi_core::device_source::MOCK_VERSION_SUFFIX
+        )
+    } else {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+}
+
+/// Parse the launch arguments and resolve the device source this agent serves:
+/// `--mock` (or `--fixture`, which implies it) selects the scripted demo
+/// inventory, a WSL guest defaults to it, and every other launch drives real
+/// hardware. `None` means the arguments were invalid (already logged).
+fn launch_device_source() -> Option<(bool, Vec<OsString>)> {
+    match LaunchArgs::parse(std::env::args_os().skip(1)) {
+        Ok(launch) => Some((
+            DeviceSource::requested(launch.mock).is_mock(),
+            launch.demo_args(),
+        )),
+        Err(error) => {
+            warn!(%error, "invalid launch arguments");
+            None
+        }
+    }
+}
+
+/// The agent's launch switch.
+///
+/// `--mock` serves the scripted demo inventory; `--fixture <profile.json>`
+/// serves a recorded profile in frozen test time and implies `--mock`. The
+/// GUI's spawn passes `--mock` for a demo suite and nothing for hardware; the
+/// login item passes nothing. Any other argument is a caller mistake, not a
+/// flag to ignore: a typo that silently started the real device path could
+/// open, write, or capture hardware the caller meant to leave alone.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LaunchArgs {
+    /// Serve the demo inventory.
+    mock: bool,
+    /// Serve this semantic profile instead of the built-in script.
+    fixture: Option<PathBuf>,
+}
+
+impl LaunchArgs {
+    fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Self, String> {
+        let mut launch = Self::default();
+        while let Some(arg) = args.next() {
+            match arg.to_str() {
+                Some("--mock") => launch.mock = true,
+                Some("--fixture") => {
+                    let path = args
+                        .next()
+                        .ok_or_else(|| "--fixture requires a profile JSON path".to_owned())?;
+                    launch.fixture = Some(PathBuf::from(path));
+                    launch.mock = true;
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "unknown argument {other}; expected --mock or --fixture <profile.json>"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "unknown non-UTF-8 argument {}",
+                        arg.to_string_lossy()
+                    ));
+                }
+            }
+        }
+        Ok(launch)
+    }
+
+    /// The arguments the demo's profile builder understands (just the fixture,
+    /// if one was given). The launch switches themselves are consumed here.
+    fn demo_args(&self) -> Vec<OsString> {
+        match &self.fixture {
+            Some(path) => vec![OsString::from("--fixture"), path.as_os_str().to_owned()],
+            None => Vec::new(),
+        }
+    }
+}
+
 /// Take the agent's singleton lock, or hand back the code to exit with.
 ///
-/// A demo agent leaves a running holder in place — the takeover escape hatch
-/// already refuses in debug builds, and two agents would fight over the same
-/// profile's socket. A production duplicate may replace a stale holder; any
-/// other failure is a plain leave.
+/// A demo agent leaves a running holder in place — the GUI retires that holder
+/// over IPC before it asks for the demo, and two agents would fight over the
+/// same profile's socket. A production duplicate may replace a stale holder;
+/// any other failure is a plain leave.
 fn acquire_agent_lock(demo: bool) -> Result<InstanceGuard, ExitCode> {
     match openlogi_core::single_instance::acquire(openlogi_core::single_instance::Role::Agent) {
         Ok(guard) => Ok(guard),
@@ -251,6 +341,7 @@ fn start_platform_services(
     observable: &Arc<ObservableState>,
     shutdown_tx: &crate::shutdown::ShutdownRequestSender,
     device_io_signal: &DeviceIoSignal,
+    demo: bool,
 ) {
     // Windows hosts the notification-area icon on its own win32 thread
     // (message pump included), and Linux hosts a StatusNotifierItem on its
@@ -267,6 +358,7 @@ fn start_platform_services(
             Arc::clone(&tray_config),
             Arc::clone(observable),
             shutdown_tx.clone(),
+            demo,
         );
         // Native resume notifications feed the same event seam as macOS
         // and Linux: inventory wakes immediately and replays volatile
@@ -282,11 +374,15 @@ fn start_platform_services(
             Arc::clone(&tray_config),
             Arc::clone(observable),
             shutdown_tx.clone(),
+            demo,
         );
         resume_linux::register(device_io_signal.clone());
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    let _ = device_io_signal;
+    {
+        let _ = device_io_signal;
+        let _ = demo;
+    }
 }
 
 #[cfg(test)]

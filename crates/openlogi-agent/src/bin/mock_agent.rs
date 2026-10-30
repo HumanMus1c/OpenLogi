@@ -1,7 +1,7 @@
 //! Standalone hardware-free mock agent for GUI development: serves the
 //! scripted demo inventory over the real agent IPC contract. See
 //! `openlogi_agent::mock` for the served behavior and for the demo mode that
-//! debug builds of `openlogi-agent` run instead of real hardware.
+//! `openlogi-agent --mock` runs instead of real hardware.
 //!
 //! Unlike the demo mode, this binary defaults itself to the `openlogi-dev`
 //! profile — as if `OPENLOGI_PROFILE=dev` were set — so it meets the macOS dev

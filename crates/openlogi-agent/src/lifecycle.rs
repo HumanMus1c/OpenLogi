@@ -62,6 +62,7 @@ pub(crate) async fn run(
     config: Config,
     shutdown_requests: ShutdownRequests,
     observable: Arc<ObservableState>,
+    shutdown_tx: crate::shutdown::ShutdownRequestSender,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
@@ -72,6 +73,7 @@ pub(crate) async fn run(
         config,
         shutdown_requests,
         observable,
+        shutdown_tx,
         #[cfg(target_os = "macos")]
         armed_tx,
     )
@@ -112,13 +114,14 @@ impl Booted {
         config: Config,
         shutdown_requests: ShutdownRequests,
         observable: Arc<ObservableState>,
+        shutdown_tx: crate::shutdown::ShutdownRequestSender,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
         let capture_mouse_events = config.app_settings.capture_mouse_events;
         #[cfg(target_os = "macos")]
         let launch_at_login = config.app_settings.launch_at_login;
-        let core = startup::bootstrap(config, observable).await?;
+        let core = startup::bootstrap(config, observable, shutdown_tx).await?;
         Some(Self {
             core,
             signals: ShutdownSignals::install(),
@@ -673,6 +676,11 @@ impl Running {
             // event tap and firmware diversions go with us (#807, #1097).
             ShutdownRequest::Uninstalled => {
                 self.shut_down("the app was uninstalled", None).await;
+            }
+            // A GUI switching the suite's device source asked us to leave.
+            // Same teardown as the tray's Quit, without a caller to wake.
+            ShutdownRequest::Quit => {
+                self.shut_down("quit requested over IPC", None).await;
             }
             ShutdownRequest::Restart { path, retry } => {
                 // A replacement ends the ring session as an exit does, and

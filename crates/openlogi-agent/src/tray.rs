@@ -23,8 +23,10 @@
 )]
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -53,6 +55,10 @@ use crate::tray_readout::TrayReadout;
 /// glyph plus the device rows). Live-toggled from the IPC server's config
 /// reload, the same seam the Windows tray uses.
 static TRAY_BATTERY: AtomicBool = AtomicBool::new(true);
+/// Whether this agent serves the demo inventory. A GUI cold-launched from the
+/// tray must start in the same source: a plain launch would retire the demo
+/// agent the user just clicked.
+static MOCK_AGENT: AtomicBool = AtomicBool::new(false);
 /// Set while a battery refresh is queued on the main queue, so a burst of
 /// inventory changes collapses into one refresh, mirroring the Windows tray's
 /// update-pending flag.
@@ -291,8 +297,55 @@ fn open_url(url: &str) {
 
 /// Route a GUI-directed [`DeeplinkCommand`] through the `openlogi://` scheme.
 /// macOS launches the GUI (cold start) or hands the URL to the running app.
+///
+/// A demo agent adds one step: a cold-launched GUI must receive `--mock` too,
+/// or the default launch would retire the demo suite the tray belongs to. The
+/// running-GUI case needs nothing — a demo suite's GUI was launched with the
+/// same switch.
 fn open_command(command: DeeplinkCommand) {
+    if MOCK_AGENT.load(Ordering::Relaxed) && !gui_is_running() {
+        // AppKit calls this on the main thread; the launch-and-deliver wait
+        // must not freeze the menu bar.
+        std::thread::spawn(move || {
+            let Some(app) = gui_app_bundle() else {
+                warn!("no GUI bundle to launch — falling back to the URL");
+                open_url(&command.to_url());
+                return;
+            };
+            let mut launch = std::process::Command::new("/usr/bin/open");
+            launch
+                .arg("-g")
+                .arg("-n")
+                .arg(&app)
+                .arg("--args")
+                .arg("--mock");
+            if let Err(e) = launch.status() {
+                warn!(error = %e, app = %app.display(), "could not launch the GUI in demo mode");
+                open_url(&command.to_url());
+                return;
+            }
+            // Deliver the specific command once the new instance is up;
+            // opening the URL first would cold-launch a plain (hardware) GUI.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline && !gui_is_running() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            open_url(&command.to_url());
+        });
+        return;
+    }
     open_url(&command.to_url());
+}
+
+/// The outer `OpenLogi.app` this agent's helper bundle lives in, for a
+/// cold launch that can carry arguments (the `openlogi://` URL cannot).
+fn gui_app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let helper = brand::helper_bundle_root(&exe)?;
+    let app = helper.parent()?.parent()?.parent()?.parent()?;
+    app.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+        .then(|| app.to_path_buf())
 }
 
 /// Menu-bar Quit: take a running GUI with us, then hand process termination to
@@ -347,6 +400,8 @@ fn gui_is_running() -> bool {
 /// refresh.
 /// `device_io_signal` is the hardware gate; it opens only while the Mac is in
 /// a full wake and this login session owns the console (`activity_macos`).
+/// `mock` marks a demo agent, so a cold GUI launch from its menu carries the
+/// same `--mock` switch instead of retiring it.
 pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
@@ -355,10 +410,12 @@ pub fn run_app_loop(
     observable: Arc<ObservableState>,
     device_io_signal: DeviceIoSignal,
     shutdown_tx: ShutdownRequestSender,
+    mock: bool,
 ) -> ! {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
     CONFIG.with_borrow_mut(|slot| *slot = Some(config));
     TRAY_BATTERY.store(tray_battery, Ordering::Relaxed);
+    MOCK_AGENT.store(mock, Ordering::Relaxed);
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
         let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
