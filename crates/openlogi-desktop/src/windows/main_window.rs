@@ -89,18 +89,18 @@ fn clamp_to_area(state: WindowState, area: Bounds<Pixels>) -> Bounds<Pixels> {
         px(state.height.max(MIN_HEIGHT)),
     );
     let max = Point::new(
-        px((f32::from(area.origin.x) + f32::from(area.size.width) - f32::from(size.width))
-            .max(f32::from(area.origin.x))),
-        px((f32::from(area.origin.y) + f32::from(area.size.height) - f32::from(size.height))
-            .max(f32::from(area.origin.y))),
+        px(
+            (f32::from(area.origin.x) + f32::from(area.size.width) - f32::from(size.width))
+                .max(f32::from(area.origin.x)),
+        ),
+        px(
+            (f32::from(area.origin.y) + f32::from(area.size.height) - f32::from(size.height))
+                .max(f32::from(area.origin.y)),
+        ),
     );
     let origin = Point::new(
-        px(state
-            .x
-            .clamp(f32::from(area.origin.x), f32::from(max.x))),
-        px(state
-            .y
-            .clamp(f32::from(area.origin.y), f32::from(max.y))),
+        px(state.x.clamp(f32::from(area.origin.x), f32::from(max.x))),
+        px(state.y.clamp(f32::from(area.origin.y), f32::from(max.y))),
     );
     Bounds::new(origin, size)
 }
@@ -167,10 +167,7 @@ pub fn persist_bounds(cx: &mut App) {
 #[cfg(target_os = "windows")]
 fn restored_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
-        Point::new(
-            bounds.origin.x,
-            bounds.origin.y - caption_placement_bias(),
-        ),
+        Point::new(bounds.origin.x, bounds.origin.y - caption_placement_bias()),
         bounds.size,
     )
 }
@@ -187,13 +184,7 @@ fn window_options(cx: &mut App) -> WindowOptions {
         None
     };
     let bounds = saved.map_or_else(
-        || {
-            Bounds::centered(
-                None,
-                Size::new(px(DEFAULT_WIDTH), px(DEFAULT_HEIGHT)),
-                cx,
-            )
-        },
+        || Bounds::centered(None, Size::new(px(DEFAULT_WIDTH), px(DEFAULT_HEIGHT)), cx),
         restored_bounds,
     );
     WindowOptions {
