@@ -33,14 +33,17 @@ For isolated controls in a debug build:
 OPENLOGI_PROFILE=dev OPENLOGI_DEV_AGENT=0 OPENLOGI_COMPONENT_GALLERY=1 cargo run -p openlogi-desktop
 ```
 
-For app workflows, either run the desktop debug build directly — a debug agent
-serves the scripted demo devices by default, so the GUI spawns it itself — or
-start the mock first, then the desktop in a second terminal or managed service:
+For app workflows, either run the desktop with `--mock` — the GUI spawns
+`openlogi-agent --mock` itself — or start the mock first, then the desktop in
+a second terminal or managed service (both must pick the demo source):
 
 ```sh
 OPENLOGI_PROFILE=dev cargo run -p openlogi-agent --bin openlogi-agent-mock
-OPENLOGI_PROFILE=dev OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop
+OPENLOGI_PROFILE=dev OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop -- --mock
 ```
+
+The installed release build accepts the same `--mock`; a WSL guest defaults to
+the demo without it. Use `OPENLOGI_MOCK_DEVICES=0` to drive real hardware there.
 
 - Keep all test processes on the same profile. Do not use `prod` to bypass a lock.
   Identify a conflicting process before stopping it; preserve installed apps.

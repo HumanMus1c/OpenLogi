@@ -55,10 +55,14 @@ Panel selection and settings writes follow `.agents/rules/gui.md`.
   instance exits on the singleton lock: quit the running app and re-`run` before
   judging a UI change "not applied".
 - The window shows only the empty state unless an agent is running. With no
-  hardware, a debug `openlogi-agent` already serves the scripted demo inventory
-  (the demo mode — see the root agent guide's "Device source" section), and
+  hardware, run the demo suite with
+  `cargo run -p openlogi-desktop -- --mock` — the GUI spawns
+  `openlogi-agent --mock`, and a WSL guest defaults to the demo without the
+  flag (see the root agent guide's "Device source" section). The installed
+  release build takes the same flag.
   `cargo run -p openlogi-agent --bin openlogi-agent-mock` remains for explicit
-  fixture/profile runs.
+  fixture/profile runs; launch its GUI with `--mock` so both sides pick the
+  same source.
 - `OPENLOGI_COMPONENT_GALLERY=1` on a debug build opens `ui/gallery.rs` instead
   of the app — every shared component rendered without app state. **When you
   change a reusable component, update its gallery entry in the same commit**;

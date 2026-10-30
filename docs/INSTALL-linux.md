@@ -360,6 +360,14 @@ systemd user manager before restarting `openlogi-agent.service`. The helper
 executables are resolved from `/usr/bin` and `/usr/local/bin`; missing helpers
 use the keyboard fallbacks above.
 
+## WSL
+
+WSL does not expose USB HID devices unless a receiver is passed through, so the
+agent and GUI default to the scripted demo inventory there instead of opening
+an empty window. Set `OPENLOGI_MOCK_DEVICES=0` to drive a receiver attached with
+`usbipd` (and make sure the udev rules/permissions above apply inside the
+guest); the demo is also available explicitly with `--mock`.
+
 ## Known limitations
 
 | Limitation | Status |

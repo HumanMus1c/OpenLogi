@@ -103,6 +103,8 @@ Each run also stops the dev agent and overlay left behind by the previous one,
 then starts the freshly built agent and waits for its IPC socket before the
 GUI launches — so the window connects immediately instead of sitting on its
 connecting frame while the GUI's production fallback re-spawns the agent.
+The dev agent and the GUI both start in demo mode (`--mock`); set
+`OPENLOGI_DEV_REAL=1` to run both against real hardware instead.
 The helpers are launched through LaunchServices so they get their own TCC
 identity, which also means they are not children of the GUI: closing its
 window or pressing Ctrl-C ends only the GUI, and a surviving dev agent
@@ -137,22 +139,32 @@ The agent's input-hook watchdog gives CoreGraphics permission probes a 10-second
 
 ## Developing the GUI without hardware
 
-The build tree owns the device source ("Device source: debug tree vs release
-tree" in the [agent guide](../AGENTS.md)): a **debug** build of
-`openlogi-agent` serves the scripted demo devices — the real agent IPC
-contract from an in-memory inventory, with no HID or input-hook I/O — while a
-**release** build always drives real devices. A debug run of the full suite
-needs no Logitech device (or receiver) attached and never touches one:
+The launch decides the device source ("Device source: runtime `--mock`, one
+build" in the [agent guide](../AGENTS.md)): `--mock` serves the scripted demo
+devices — the real agent IPC contract from an in-memory inventory, with no HID
+or input-hook I/O — and no flag drives real hardware, in debug and release
+builds alike. A demo run needs no Logitech device (or receiver) attached and
+never touches one:
 
 ```sh
-cargo run -p openlogi-desktop   # debug: the GUI spawns the demo agent itself
+cargo run -p openlogi-desktop -- --mock   # the GUI spawns openlogi-agent --mock
 ```
+
+The installed release build takes the same flag (`OpenLogi.exe --mock`), so
+feature work no longer needs a debug build. A WSL guest defaults to the demo
+without a flag (it exposes no HID devices); set `OPENLOGI_MOCK_DEVICES=0` there
+to drive a passthrough receiver. On every other host the flag or the variable
+selects the demo, and the default is hardware.
 
 The demo replaces only the device layer: the IPC server, the tray, shutdown
 handling, and the `-mock` version marker are the agent's own, and the profile
 resolves exactly as a production agent's does. The tray badge and hover card
-show demo batteries exactly as they would show real ones.
-`OPENLOGI_MOCK_DEVICES=0` opts a debug build back onto real hardware.
+show demo batteries exactly as they would show real ones. The config,
+singleton locks, and IPC endpoint are the production profile's; a GUI launched
+for one source retires a running agent of the other over IPC first, so the two
+never run at once. Release builds have no console, so the demo's stdin
+commands (`battery`, `offline`, …) are only available from a debug build or
+`openlogi-agent-mock`; the agent's log file receives the demo log either way.
 
 `openlogi-agent-mock` remains as the standalone dev tool for the cases where
 the process must be the mock from the start — loading a semantic fixture
@@ -167,17 +179,19 @@ the same lock, and whichever starts second exits.) `OPENLOGI_DEV_AGENT=0` keeps
 the runner from building and embedding the real agent for the GUI to
 auto-spawn; add `OPENLOGI_ALLOW_EXTERNAL_AGENT=1` if your installed production
 agent is running, since the runner's guard against it predates the profile
-split and cannot know the dev GUI is on a separate socket. Pass
-`OPENLOGI_PROFILE=prod` to serve the production socket instead; the mock then
-contends for the production agent's single-instance lock and refuses to start
-while it is running.
+split and cannot know the dev GUI is on a separate socket. Launch the GUI for
+this standalone mock with `--mock` (or run it on WSL, where the demo is the
+default source); a GUI launched for hardware would retire the mock agent on
+startup. Pass `OPENLOGI_PROFILE=prod` to serve the production socket instead;
+the mock then contends for the production agent's single-instance lock and
+refuses to start while it is running.
 
 The script covers an online mouse (DPI and SmartShift writes persist and read
 back, battery drains so poll-driven repaints are visible), an offline mouse, a
 lighting-capable keyboard, a directly-attached device, and a full Bolt pairing
 flow (discovery → passkey → paired). Its agent version carries a `-mock` suffix,
-so a mock session is identifiable in the UI. The demo mode exists only in debug
-builds, and the mock binary is never bundled.
+so a mock session is identifiable in the UI. The demo mode exists in every
+agent build, and the mock binary is never bundled.
 
 While the demo agent or the mock runs, type a command in its terminal and
 press Enter to change what it reports. `help` lists the commands, and `devices` numbers the devices
