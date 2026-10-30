@@ -112,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 43);
 }
 
 #[test]
@@ -217,6 +217,8 @@ fn request_variant_order() {
         },
         "1902",
     );
+    // Appended after every v41 method; 47 is its declaration index.
+    assert_wire(&AgentRequest::RequestShutdown {}, "2f");
 }
 
 #[test]

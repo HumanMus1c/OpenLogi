@@ -152,7 +152,12 @@ pub use succession::Identity;
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
-pub const PROTOCOL_VERSION: u32 = 41;
+/// v43: `Agent::request_shutdown` appended — a client asks the running agent
+///      to leave through its lifecycle (firmware diversion released, the
+///      input hook dropped) when the suite switches between real hardware and
+///      the scripted demo inventory, where killing the process would skip
+///      that teardown.
+pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -250,6 +255,17 @@ pub struct AgentStatus {
     pub secure_input: SecureInput,
     /// See [`VirtualKeyboardStatus`].
     pub virtual_keyboard: VirtualKeyboardStatus,
+}
+
+impl AgentStatus {
+    /// Whether the agent serves the scripted demo inventory, judged by the
+    /// version marker a mock agent appends
+    /// ([`MOCK_VERSION_SUFFIX`](openlogi_core::device_source::MOCK_VERSION_SUFFIX)).
+    #[must_use]
+    pub fn is_mock(&self) -> bool {
+        self.agent_version
+            .ends_with(openlogi_core::device_source::MOCK_VERSION_SUFFIX)
+    }
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never
@@ -953,4 +969,12 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
+    /// Ask the agent to leave through its lifecycle: firmware diversion
+    /// released, the input hook dropped, and the process exited.
+    ///
+    /// A client uses this when the suite switches its device source — real
+    /// hardware to the scripted demo inventory, or back — where terminating
+    /// the process would skip the teardown. This method is appended to
+    /// preserve the existing service-method order.
+    async fn request_shutdown();
 }

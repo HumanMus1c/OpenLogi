@@ -33,7 +33,7 @@ use tarpc::client::{self, RpcError};
 use tarpc::context::{self, Context};
 
 use crate::{
-    AgentClient, BacklightObservation, ClientKind, Generation, LockKeyObservation,
+    AgentClient, AgentStatus, BacklightObservation, ClientKind, Generation, LockKeyObservation,
     NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, RingObservation, transport,
 };
 
@@ -150,6 +150,40 @@ pub async fn probe_version() -> Result<u32, ConnectError> {
     probe_with(open()).await
 }
 
+/// Ask the running agent for its [`AgentStatus`] without declaring a client —
+/// the lookup a GUI uses to learn whether the agent serves real hardware or
+/// the demo inventory, before deciding whether to replace it.
+///
+/// The version is checked before the status call: the status type is
+/// wire-positional and only meaningful between matching builds. Nothing is
+/// declared, so a dormant agent stays dormant, and a mismatched agent is
+/// refused rather than woken.
+///
+/// # Errors
+///
+/// [`ConnectError::Endpoint`] when the socket cannot be reached,
+/// [`ConnectError::Handshake`] when the agent drops out before answering,
+/// [`ConnectError::Skew`] when the two sides disagree on the protocol,
+/// [`ConnectError::Timeout`] when reaching it and asking outrun the timeout.
+pub async fn probe_status() -> Result<AgentStatus, ConnectError> {
+    probe_status_with(open()).await
+}
+
+/// Ask the running agent to leave through its lifecycle, without declaring a
+/// client. The call returns once the request is queued; the caller watches
+/// the endpoint for the agent to actually go away.
+///
+/// The version is checked first for the same reason as [`probe_status`]:
+/// older agents have no such method.
+///
+/// # Errors
+///
+/// As [`probe_status`], plus [`ConnectError::Handshake`] when the agent
+/// refuses or drops the request.
+pub async fn request_shutdown() -> Result<(), ConnectError> {
+    request_shutdown_with(open()).await
+}
+
 /// A tarpc client on a fresh connection to the agent's socket.
 async fn open() -> Result<AgentClient, ConnectError> {
     let stream = transport::connect().await?;
@@ -176,6 +210,31 @@ async fn probe_with(
     .await
 }
 
+/// [`probe_status`] over any way of opening a client.
+async fn probe_status_with(
+    open: impl Future<Output = Result<AgentClient, ConnectError>>,
+) -> Result<AgentStatus, ConnectError> {
+    within_timeout(async {
+        let client = open.await?;
+        check_version(&client).await?;
+        Ok(client.status(context::current()).await?)
+    })
+    .await
+}
+
+/// [`request_shutdown`] over any way of opening a client.
+async fn request_shutdown_with(
+    open: impl Future<Output = Result<AgentClient, ConnectError>>,
+) -> Result<(), ConnectError> {
+    within_timeout(async {
+        let client = open.await?;
+        check_version(&client).await?;
+        client.request_shutdown(context::current()).await?;
+        Ok(())
+    })
+    .await
+}
+
 /// Bound one connect sequence — opening included — by [`HANDSHAKE_TIMEOUT`].
 async fn within_timeout<T>(
     sequence: impl Future<Output = Result<T, ConnectError>>,
@@ -189,10 +248,17 @@ async fn within_timeout<T>(
 /// is method 0 and wire-stable across every version, so it is the only call
 /// worth making before the two sides are known to agree.
 async fn handshake(client: AgentClient, kind: ClientKind) -> Result<AgentClient, ConnectError> {
-    let version = client.protocol_version(context::current()).await?;
-    ProtocolSkew::check(version)?;
+    check_version(&client).await?;
     client.declare_client(context::current(), kind).await?;
     Ok(client)
+}
+
+/// Refuse a client whose protocol differs from the agent's; shared by every
+/// call made before a declaration.
+async fn check_version(client: &AgentClient) -> Result<(), ConnectError> {
+    let version = client.protocol_version(context::current()).await?;
+    ProtocolSkew::check(version)?;
+    Ok(())
 }
 
 /// An answer to an observe call: anything stamped with the agent's
@@ -487,6 +553,113 @@ mod tests {
             ConnectError::Skew(ProtocolSkew::AgentNewer { agent }) if agent == PROTOCOL_VERSION + 1
         ));
         assert!(declared.lock().unwrap().is_empty());
+    }
+
+    fn status_of(version: &str) -> AgentStatus {
+        AgentStatus {
+            accessibility_granted: true,
+            hook_installed: true,
+            launch_at_login: false,
+            inventory: crate::InventoryHealth::Ready,
+            protocol_version: PROTOCOL_VERSION,
+            agent_version: version.to_owned(),
+            input_monitoring_granted: true,
+            hid_open_failures: false,
+            secure_input: crate::SecureInput::Off,
+            virtual_keyboard: crate::VirtualKeyboardStatus::Unsupported,
+        }
+    }
+
+    #[tokio::test]
+    async fn probing_status_leaves_the_agent_undeclared() {
+        // Reading the source must not arm a dormant agent: only a GUI
+        // declaration does that, and the probe may be aimed at real hardware
+        // the caller is about to retire.
+        let declared = Arc::new(Mutex::new(Vec::new()));
+        let seen = declared.clone();
+        let client = in_memory_agent(
+            move |request| {
+                let seen = seen.clone();
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::ProtocolVersion {} => {
+                            Ok(AgentResponse::ProtocolVersion(PROTOCOL_VERSION))
+                        }
+                        AgentRequest::Status {} => {
+                            Ok(AgentResponse::Status(status_of("0.8.18-mock")))
+                        }
+                        AgentRequest::DeclareClient { kind } => {
+                            seen.lock().unwrap().push(kind);
+                            Ok(AgentResponse::DeclareClient(()))
+                        }
+                        other => panic!("probing sent an unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+
+        let status = probe_status_with(opened(client))
+            .await
+            .expect("status is answerable");
+
+        assert!(status.is_mock());
+        assert!(
+            declared.lock().unwrap().is_empty(),
+            "probing must not declare a client"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_status_probe_refuses_a_skewed_agent_without_asking() {
+        let client = in_memory_agent(
+            |request| {
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::ProtocolVersion {} => {
+                            Ok(AgentResponse::ProtocolVersion(PROTOCOL_VERSION - 1))
+                        }
+                        other => panic!("a skewed probe sent an unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+
+        let Err(error) = probe_status_with(opened(client)).await else {
+            panic!("a skewed agent has no readable status");
+        };
+        assert!(matches!(error, ConnectError::Skew(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_request_reaches_the_agent_without_declaring() {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = asked.clone();
+        let client = in_memory_agent(
+            move |request| {
+                let flag = flag.clone();
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::ProtocolVersion {} => {
+                            Ok(AgentResponse::ProtocolVersion(PROTOCOL_VERSION))
+                        }
+                        AgentRequest::RequestShutdown {} => {
+                            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            Ok(AgentResponse::RequestShutdown(()))
+                        }
+                        other => panic!("shutdown sent an unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+
+        request_shutdown_with(opened(client))
+            .await
+            .expect("the agent accepts the request");
+
+        assert!(asked.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test(start_paused = true)]

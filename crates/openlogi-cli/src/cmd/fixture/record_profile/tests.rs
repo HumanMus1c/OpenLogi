@@ -118,6 +118,10 @@ impl Agent for TestAgent {
         PROTOCOL_VERSION
     }
 
+    async fn request_shutdown(self, _: TarpcContext) {
+        unreachable!("profile capture must never shut the agent down")
+    }
+
     async fn status(self, _: TarpcContext) -> AgentStatus {
         unreachable!("profile capture must use one snapshot")
     }
