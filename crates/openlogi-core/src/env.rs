@@ -26,8 +26,9 @@ pub const ASSETS: &str = "OPENLOGI_ASSETS";
 /// — a development convenience read in two places.
 pub const FORCE_DEPOT: &str = "OPENLOGI_FORCE_DEPOT";
 
-/// Opts a debug-build agent out of the scripted demo devices (`0`) or back
-/// onto them (`1`). The build tree owns the default — a debug build serves the
-/// demo devices, a release build always drives real hardware — and a release
-/// build ignores this variable.
+/// Selects the device source at runtime: `1/true/yes/on` serves the scripted
+/// demo inventory, `0/false/no/off` drives real HID++ hardware. Unset, a WSL
+/// guest serves the demo (it exposes no HID devices) and every other host
+/// drives hardware. The agent's and GUI's `--mock` launch flags are the
+/// user-facing form of `1` and win over this variable.
 pub const MOCK_DEVICES: &str = "OPENLOGI_MOCK_DEVICES";
