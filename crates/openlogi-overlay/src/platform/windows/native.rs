@@ -19,8 +19,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos,
-    ShowWindow, WS_CAPTION, WS_EX_NOACTIVATE, WS_POPUP, WS_THICKFRAME,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SendMessageW, SetWindowLongW, SetWindowPos, ShowWindow, WM_SETTINGCHANGE, WS_CAPTION,
+    WS_EX_NOACTIVATE, WS_POPUP, WS_THICKFRAME,
 };
 
 use super::{NoticePlacement, RingPlacement};
@@ -301,6 +302,55 @@ pub(crate) fn set_card_visible(window: &Window, visible: bool) {
     unsafe {
         ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
     }
+}
+
+/// Remove the Win32 frame from the Flow Indicator's window — the treatment
+/// the ring and the notice get from `place`.
+///
+/// The card outlives its opening: sync resizes it for row changes, so the
+/// style change must also refresh GPUI's cached window-minus-client offset.
+/// GPUI measures it once at creation, while the window is still captioned,
+/// and only again on `WM_DPICHANGED`/`WM_SETTINGCHANGE`; left stale, every
+/// later `resize` would size the window to the caption-era frame and leave
+/// a transparent band around the card.
+#[expect(
+    unsafe_code,
+    reason = "SetWindowPos and SendMessage on the live GPUI window's HWND, on its owning thread"
+)]
+pub(crate) fn make_card_frameless(window: &Window) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        warn!("could not get the card window handle to strip its frame");
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        warn!("the card window has no Win32 handle to strip its frame");
+        return;
+    };
+    let hwnd = handle.hwnd.get() as HWND;
+    if let Err(error) = make_frameless(hwnd) {
+        warn!(%error, "could not remove the Flow Indicator window frame");
+        return;
+    }
+    // `place` applies the new style through its own move; the card has no
+    // such move, so ask for the frame change directly.
+    // SAFETY: flag-only SetWindowPos on the live GPUI window's HWND, on the
+    // thread GPUI requires.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    // SAFETY: a settings notification to the window's own thread, which is
+    // the current one. GPUI answers it by re-measuring the frame offset; its
+    // handler reads system parameters only for specific actions and `1` names
+    // none of them.
+    unsafe { SendMessageW(hwnd, WM_SETTINGCHANGE, 1, 0) };
 }
 
 #[expect(

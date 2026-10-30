@@ -43,6 +43,15 @@ pub(crate) fn hide_card(window: &mut gpui::Window) {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn show_card(_window: &mut gpui::Window) {}
 
+/// Drop the Win32 frame from the card's window: GPUI leaves a captioned frame
+/// on its pop-ups, and Windows 11 paints a border, rounded corners and a
+/// backdrop around the transparent client area — a second, larger frame
+/// around the card.
+#[cfg(target_os = "windows")]
+pub(crate) fn make_card_frameless(window: &gpui::Window) {
+    windows::make_card_frameless(window);
+}
+
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 

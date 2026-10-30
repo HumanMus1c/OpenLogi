@@ -606,7 +606,17 @@ impl FlowIndicatorView {
         self.place_on_x11(window, origin);
     }
 
-    #[cfg(not(target_os = "linux"))]
+    /// A freshly opened card on Windows: drop the Win32 frame GPUI leaves on
+    /// pop-ups (the ring and the notice take the same treatment through their
+    /// placement), then bring the window back to the card's size — losing the
+    /// frame grows the client area by the old frame.
+    #[cfg(target_os = "windows")]
+    fn on_opened(&mut self, window: &mut Window, _origin: Point<gpui::Pixels>) {
+        crate::platform::make_card_frameless(window);
+        window.resize(card_size(self.rows.len()));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     #[expect(
         clippy::unused_self,
         reason = "the Linux version hands the window to the X11 seam"

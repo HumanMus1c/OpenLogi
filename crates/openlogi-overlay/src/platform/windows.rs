@@ -17,6 +17,11 @@ mod native;
 #[cfg(target_os = "windows")]
 pub(crate) use native::set_card_visible;
 
+/// Remove the Win32 frame from the card's window; see
+/// [`native::make_card_frameless`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::make_card_frameless;
+
 /// One native cursor/monitor snapshot, kept through bootstrap-window creation.
 pub(crate) struct RingPlacement {
     display_id: DisplayId,
