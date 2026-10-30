@@ -765,6 +765,20 @@ instead of claiming Linux has no tray.
   protocol has no per-item size, so this is a host setting, not something the
   tray can override.
 
+- **A login-started overlay raced the compositor and the zbus executor.** At
+  session start the agent spawned the helper before the Wayland socket existed,
+  so GPUI panicked with `NoCompositor` (exit 101) and only the supervisor's 4 s
+  retry kept it alive; the retried process could end up without a card while
+  its window handle looked open. `platform::await_compositor` now waits for the
+  socket, and the overlay logs its settings, first observation, and card
+  open/close. Separately, `ksni`'s default `tokio` feature enabled `zbus/tokio`
+  for the whole joint build of the agent and overlay; the overlay's zbus
+  (GPUI's `ashpd`) then chose Tokio's executor on threads with no runtime and
+  panicked, which left the card light while the session was dark and broke the
+  appearance watcher. The agent now uses ksni's `async-io` feature (the
+  executor the rest of the workspace uses), and the panics are gone: the card
+  follows light/dark live again and the wide label, badge, and menu still work.
+
 ## Appendix: vigil-watt reference
 
 - Tray: lowest online non-system device; 32×32 GDI+ disc; white percentage or
