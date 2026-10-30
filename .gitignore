@@ -40,6 +40,9 @@ devenv.local.yaml
 /UI.md
 /PLAN.md
 
+# Local diagnostic scratch scripts — kept on disk, never committed.
+/tmp-diag/
+
 # Local git worktrees (`git worktree add .worktrees/<slug>`).
 .worktrees/
 
