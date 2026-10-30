@@ -61,8 +61,12 @@ openlogi-inject = { path = "../openlogi-inject" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Patched in `vendor/ksni`: the wide tray face needs the Ayatana label property,
-# which upstream ksni does not expose (see vendor/ksni/AGENTS.md).
-ksni = "0.3.7"
+# which upstream ksni does not expose (see vendor/ksni/AGENTS.md). Keep zbus on
+# async-io: ksni's default `tokio` feature would unify with GPUI's ashpd inside
+# the overlay binary (the workspace builds them together), and zbus then needs
+# a Tokio runtime on threads that have none — GPUI's portal and the overlay's
+# own appearance watcher panic there.
+ksni = { version = "0.3.7", default-features = false, features = ["async-io"] }
 png = "0.18"
 zbus = "5"
 

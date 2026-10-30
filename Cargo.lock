@@ -4236,11 +4236,16 @@ name = "ksni"
 version = "0.3.7"
 dependencies = [
  "arc-swap",
+ "async-executor",
+ "async-io",
+ "async-lock",
  "crossbeam-queue",
+ "futures-channel",
+ "futures-lite",
  "futures-util",
  "pastey 0.2.3",
  "serde",
- "tokio",
+ "task-local",
  "zbus",
 ]
 
@@ -8211,6 +8216,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "task-local"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2972044a9e5e448a506a7ff6f0d03b566d8ef4cd6918a58fc59835a0f8666626"
+dependencies = [
+ "pin-project-lite",
+]
+
+[[package]]
 name = "tauri-winrt-notification"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8430,7 +8444,6 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -10700,7 +10713,6 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
- "tokio",
  "tracing",
  "uds_windows",
  "uuid",
