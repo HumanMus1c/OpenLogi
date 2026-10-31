@@ -65,11 +65,10 @@ const HEADER_GAP: f32 = 6.0;
 const PIN_ICON_SIZE: f32 = 12.0;
 const MARGIN: f32 = 24.0;
 
-/// The four-way soft halo behind the pinned card's content, in physical
-/// pixels: four directions at three distances with a fading alpha. The rings
-/// start a pixel away from the glyph — a copy hugging the outline reads as a
-/// bold weight, while a detached, decaying falloff is what reads as a soft
-/// shadow. GPUI has no text shadow, so the halo is layered copies.
+/// The soft halo behind the pinned card's content, drawn as low-alpha glyph
+/// copies because GPUI has no text shadow. The rings start a device pixel
+/// away from the glyph — a copy hugging the outline reads as a bold weight,
+/// while a detached, decaying falloff is what reads as a soft shadow.
 /// The value's soft shadow, drawn by GPUI itself: a generated SVG cannot
 /// carry the changing digits — its raster would cache under a new path on
 /// every percentage change and the atlas never evicts paths — so the
@@ -93,12 +92,27 @@ const VALUE_SHADOW_STEPS: [(f32, f32, f32); 16] = [
     (-1.4, -1.4, 0.06),
 ];
 
-/// The shadow tint the generated SVG wears, shared with the value's copies.
-fn shadow_tint(dark: bool) -> Hsla {
+/// The pinned card's decoration ink, one scheme per theme: `ring` is the edge
+/// the glyph copies paint, `glow` tints the soft shadow. The ink has to sit on
+/// the opposite side of the theme's text; a dark edge around the light theme's
+/// near-black glyphs only thickens them into a smudge.
+#[derive(Clone, Copy)]
+struct Ink {
+    ring: Hsla,
+    glow: Hsla,
+}
+
+fn shadow_ink(dark: bool) -> Ink {
     if dark {
-        hsla(0.0, 0.0, 0.18, 0.8)
+        Ink {
+            ring: hsla(0.0, 0.0, 0.0, 0.4),
+            glow: hsla(0.0, 0.0, 0.18, 0.8),
+        }
     } else {
-        hsla(0.0, 0.0, 0.10, 0.8)
+        Ink {
+            ring: hsla(0.0, 0.0, 1.0, 0.6),
+            glow: hsla(0.0, 0.0, 1.0, 0.8),
+        }
     }
 }
 
@@ -377,7 +391,9 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
 /// GPUI tints, which is a true Gaussian glow at any radius — the stamped
 /// copies stop at five pixels because beyond that their glyph detail shows.
 /// The values are left out on purpose: they change every observation, and
-/// each distinct string set would grow GPUI's raster cache for good.
+/// each distinct string set would grow GPUI's raster cache for good. The
+/// asset is theme-free — the tint is the card's `text_color` — so both
+/// themes share one raster.
 pub(crate) const SHADOW_ASSET_PREFIX: &str = "flow-shadow-";
 static SHADOW_ASSET: Mutex<Option<String>> = Mutex::new(None);
 
@@ -394,7 +410,7 @@ pub(crate) fn take_shadow_asset(path: &str) -> Option<String> {
     clippy::cast_precision_loss,
     reason = "row counts are single digits; the conversion is exact"
 )]
-fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
+fn update_shadow_asset(rows: &[Row]) -> SharedString {
     use std::fmt::Write as _;
 
     fn escape(name: &str) -> String {
@@ -444,15 +460,15 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
     }
     let hash = hasher.finish();
     // Two scales: the small one keeps the near field dense, the large one
-    // carries the glow far out; a real drop shadow has both.
-    let ink = if dark { "white" } else { "black" };
+    // carries the glow far out; a real drop shadow has both. The rasteriser
+    // keeps only alpha, so the fill just has to be opaque — the colour comes
+    // from the card's tint (`Ink::glow`).
     // Text strokes carry far less ink than the solid bar capsules, so they
     // get the stronger opacities; bars only support the text's presence.
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.9">{names}</g><g filter="url(#near)" fill="{ink}" fill-opacity="0.3">{bars}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.7">{names}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.2">{bars}</g></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="black" fill-opacity="0.9">{names}</g><g filter="url(#near)" fill="black" fill-opacity="0.3">{bars}</g><g filter="url(#far)" fill="black" fill-opacity="0.7">{names}</g><g filter="url(#far)" fill="black" fill-opacity="0.2">{bars}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
-        ink = ink,
         names = names,
         bars = bars,
     );
@@ -568,6 +584,7 @@ impl FlowIndicatorView {
         dark: bool,
     ) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
+        let ink = shadow_ink(dark);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
         div()
@@ -593,7 +610,7 @@ impl FlowIndicatorView {
                                 svg()
                                     .path(icon)
                                     .size(px(ICON_SIZE))
-                                    .text_color(hsla(0.0, 0.0, 0.0, 0.4))
+                                    .text_color(ink.ring)
                                     .absolute()
                                     .left(px(dx / scale))
                                     .top(px(dy / scale))
@@ -612,9 +629,9 @@ impl FlowIndicatorView {
                     })
                     .child({
                         // The hairline border comes from GPUI's own glyphs —
-                        // eight copies a device pixel out, in black at low
-                        // strength — so it cannot drift from the text the way
-                        // a second renderer's outlines do.
+                        // eight copies a device pixel out, in the theme's ring
+                        // ink — so it cannot drift from the text the way a
+                        // second renderer's outlines do.
                         let name = row.name.clone();
                         let mut cell = div().relative().flex_1().min_w_0().truncate();
                         if pinned {
@@ -627,7 +644,7 @@ impl FlowIndicatorView {
                                     .truncate()
                                     .text_size(px(16.0))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .text_color(hsla(0.0, 0.0, 0.0, 0.4))
+                                    .text_color(ink.ring)
                                     .child(name.clone())
                             }));
                         }
@@ -661,7 +678,7 @@ impl FlowIndicatorView {
                         let value = row.value.clone();
                         let mut cell = div().relative().truncate();
                         if pinned {
-                            let tint = shadow_tint(dark);
+                            let tint = ink.glow;
                             cell = cell.children(VALUE_SHADOW_STEPS.map(|(dx, dy, alpha)| {
                                 div()
                                     .absolute()
@@ -686,7 +703,7 @@ impl FlowIndicatorView {
                                     .truncate()
                                     .text_size(px(16.0))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(hsla(0.0, 0.0, 0.0, 0.4))
+                                    .text_color(ink.ring)
                                     .child(value.clone())
                             }));
                         }
@@ -741,16 +758,10 @@ impl FlowIndicatorView {
             .when(pinned, |card| {
                 card.child(
                     svg()
-                    .path(update_shadow_asset(&self.rows, dark))
-                    .absolute()
-                    .inset_0()
-                    // A near-black in the light theme; a deep grey in the
-                    // dark theme, darker than its light text.
-                    .text_color(if dark {
-                        hsla(0.0, 0.0, 0.18, 0.8)
-                    } else {
-                        hsla(0.0, 0.0, 0.10, 0.8)
-                    }),
+                        .path(update_shadow_asset(&self.rows))
+                        .absolute()
+                        .inset_0()
+                        .text_color(shadow_ink(dark).glow),
                 )
             })
             .child(
@@ -1642,6 +1653,25 @@ mod tests {
         let body = toml::to_string(&SavedPosition { x: 42.5, y: -7.25 }).expect("serialize");
         let saved: SavedPosition = toml::from_str(&body).expect("parse");
         assert_eq!((saved.x, saved.y), (42.5, -7.25));
+    }
+
+    /// The pinned card's edge only separates glyphs if it sits on the
+    /// opposite side of the theme's text; one near the text's own lightness
+    /// reads as a bolder weight and smears the letters together.
+    #[test]
+    fn the_ring_ink_contrasts_the_theme_text() {
+        use super::{Palette, shadow_ink};
+
+        for dark in [true, false] {
+            let text = Palette::for_dark(dark).text;
+            let ring = shadow_ink(dark).ring;
+            assert!(
+                (ring.l - text.l).abs() > 0.5,
+                "dark={dark}: ring lightness {} vs text {}",
+                ring.l,
+                text.l
+            );
+        }
     }
 
     #[gpui::test]
