@@ -406,28 +406,14 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> (SharedString, SharedString)
         names = names,
         bars = bars,
     );
-    // The border: the same names drawn sharp, a tenth of a pixel in eight
-    // directions, so the glyphs gain a hairline black edge under the tint.
-    let mut outline = String::new();
-    for (dx, dy) in [
-        (0.1, 0.0),
-        (-0.1, 0.0),
-        (0.0, 0.1),
-        (0.0, -0.1),
-        (0.07, 0.07),
-        (0.07, -0.07),
-        (-0.07, 0.07),
-        (-0.07, -0.07),
-    ] {
-        let _ = write!(
-            outline,
-            r#"<g transform="translate({dx} {dy})">{names}</g>"#
-        );
-    }
+    // The border: a true SVG text stroke — the glyph outlines widened by a
+    // tenth of a pixel each side. Offset copies would rasterise unevenly at
+    // sub-pixel shifts; a vector stroke is even by construction.
     let border_svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">{outline}</svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><g fill="none" stroke="white" stroke-width="0.2">{names}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
+        names = names,
     );
     if let Ok(mut slot) = SHADOW_ASSET.lock() {
         *slot = Some((svg, border_svg));
@@ -640,9 +626,9 @@ impl FlowIndicatorView {
                         // its dark text; a deeper grey in the dark theme, a
                         // shade darker than its light text.
                         .text_color(if dark {
-                            hsla(0.0, 0.0, 0.30, 0.55)
+                            hsla(0.0, 0.0, 0.25, 0.6)
                         } else {
-                            hsla(0.0, 0.0, 0.55, 0.55)
+                            hsla(0.0, 0.0, 0.35, 0.6)
                         }))
                 .child(
                     svg()
