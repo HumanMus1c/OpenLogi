@@ -366,7 +366,9 @@ fn watch_click_through() -> ! {
             }
         }
         std::thread::sleep(if pinned {
-            std::time::Duration::from_millis(30)
+            // Short enough that a click right after the cursor leaves the
+            // button still finds the pass-through switch already flipped.
+            std::time::Duration::from_millis(15)
         } else {
             std::time::Duration::from_millis(250)
         });
@@ -374,7 +376,7 @@ fn watch_click_through() -> ! {
 }
 
 /// Whether the cursor sits on the pin button: the header lane's right end,
-/// plus a 2 px grace so a click at the button's edge cannot slip through.
+/// plus a 1 px grace so a click at the button's edge cannot slip through.
 ///
 /// All geometry is physical pixels — the process is PerMonitorV2-aware, so
 /// the cursor and the window bounds are already physical — and the logical
@@ -405,7 +407,7 @@ unsafe fn cursor_over_pin_button(hwnd: HWND) -> bool {
         }
         let scaled = |logical: f32| logical as i64 * dpi / 96;
         let right = i64::from(bounds.right);
-        let grace = dpi / 48;
+        let grace = dpi / 96;
         let button_left = right - scaled(PADDING_X) - scaled(HEADER_LANE);
         let button_right = right - scaled(PADDING_X);
         let button_top = i64::from(bounds.top) + scaled(PADDING_Y);

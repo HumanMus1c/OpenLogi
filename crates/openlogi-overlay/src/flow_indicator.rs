@@ -65,21 +65,24 @@ const PIN_ICON_SIZE: f32 = 12.0;
 const MARGIN: f32 = 24.0;
 
 /// The four-way soft halo behind the pinned card's content, in physical
-/// pixels: the four unit directions at full strength, then the same
-/// directions at twice the distance, faded — GPUI has no text shadow, so the
-/// halo is layered copies, and the second ring is what keeps it from reading
-/// as a hard outline.
-const HALO_STRONG: f32 = 0.55;
-const HALO_SOFT: f32 = 0.25;
-const HALO_STEPS: [(f32, f32, f32); 8] = [
-    (1.0, 0.0, HALO_STRONG),
-    (-1.0, 0.0, HALO_STRONG),
-    (0.0, 1.0, HALO_STRONG),
-    (0.0, -1.0, HALO_STRONG),
-    (2.0, 0.0, HALO_SOFT),
-    (-2.0, 0.0, HALO_SOFT),
-    (0.0, 2.0, HALO_SOFT),
-    (0.0, -2.0, HALO_SOFT),
+/// pixels: four directions at three distances with a fading alpha. The rings
+/// start a pixel away from the glyph — a copy hugging the outline reads as a
+/// bold weight, while a detached, decaying falloff is what reads as a soft
+/// shadow. GPUI has no text shadow, so the halo is layered copies.
+const HALO_ALPHAS: [f32; 3] = [0.32, 0.16, 0.07];
+const HALO_STEPS: [(f32, f32, f32); 12] = [
+    (2.0, 0.0, HALO_ALPHAS[0]),
+    (-2.0, 0.0, HALO_ALPHAS[0]),
+    (0.0, 2.0, HALO_ALPHAS[0]),
+    (0.0, -2.0, HALO_ALPHAS[0]),
+    (3.0, 0.0, HALO_ALPHAS[1]),
+    (-3.0, 0.0, HALO_ALPHAS[1]),
+    (0.0, 3.0, HALO_ALPHAS[1]),
+    (0.0, -3.0, HALO_ALPHAS[1]),
+    (4.0, 0.0, HALO_ALPHAS[2]),
+    (-4.0, 0.0, HALO_ALPHAS[2]),
+    (0.0, 4.0, HALO_ALPHAS[2]),
+    (0.0, -4.0, HALO_ALPHAS[2]),
 ];
 
 const BOLT_ICON: &str = "action-icons/bolt.svg";
