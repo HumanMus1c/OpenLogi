@@ -407,7 +407,7 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
     let mut hasher = std::hash::DefaultHasher::new();
     let mut body = String::new();
     for (index, row) in rows.iter().enumerate() {
-        let line_top = PADDING_Y + HEADER_LANE + HEADER_GAP + index as f32 * ROW_HEIGHT;
+        let line_top = PADDING_Y + HEADER_LANE + HEADER_GAP + index as f32 * (ROW_HEIGHT + ROW_GAP);
         hasher.write(row.name.as_bytes());
         let _ = write!(
             body,
