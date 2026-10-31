@@ -335,20 +335,26 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
 /// The values are left out on purpose: they change every observation, and
 /// each distinct string set would grow GPUI's raster cache for good.
 pub(crate) const SHADOW_ASSET_PREFIX: &str = "flow-shadow-";
-/// The border asset's infix: a second SVG with the same names, drawn sharp
-/// and offset a tenth of a pixel in eight directions — the glyphs' hairline
-/// black edge — served under its own path so its raster caches separately.
+/// The border and fill assets share the shadow's names: the border strokes
+/// the glyph outlines (the real text's edge), the fill paints the text
+/// itself — both served under their own paths, from one source, so they
+/// land on the same pixels as the blur.
 pub(crate) const SHADOW_BORDER_INFIX: &str = "border-";
-static SHADOW_ASSET: Mutex<Option<(String, String)>> = Mutex::new(None);
+pub(crate) const SHADOW_FILL_INFIX: &str = "fill-";
+static SHADOW_ASSET: Mutex<Option<(String, String, String)>> = Mutex::new(None);
 
-/// Serve the generated shadow, or the border that pairs with it, to the
-/// asset source for paths the view announced through
-/// [`update_shadow_asset`].
+/// Serve the generated shadow, border, or fill to the asset source for the
+/// paths the view announced through [`update_shadow_asset`].
 pub(crate) fn take_shadow_asset(path: &str) -> Option<String> {
     let rest = path.strip_prefix(SHADOW_ASSET_PREFIX)?;
-    let border = rest.starts_with(SHADOW_BORDER_INFIX);
-    let (shadow, outline) = SHADOW_ASSET.lock().ok()?.clone()?;
-    Some(if border { outline } else { shadow })
+    let (shadow, border, fill) = SHADOW_ASSET.lock().ok()?.clone()?;
+    Some(if rest.starts_with(SHADOW_BORDER_INFIX) {
+        border
+    } else if rest.starts_with(SHADOW_FILL_INFIX) {
+        fill
+    } else {
+        shadow
+    })
 }
 
 /// Rebuild the shadow SVG for `rows` and return the asset path its raster
@@ -357,7 +363,7 @@ pub(crate) fn take_shadow_asset(path: &str) -> Option<String> {
     clippy::cast_precision_loss,
     reason = "row counts are single digits; the conversion is exact"
 )]
-fn update_shadow_asset(rows: &[Row], dark: bool) -> (SharedString, SharedString) {
+fn update_shadow_asset(rows: &[Row], dark: bool) -> (SharedString, SharedString, SharedString) {
     use std::fmt::Write as _;
 
     fn escape(name: &str) -> String {
@@ -373,12 +379,15 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> (SharedString, SharedString)
     for (index, row) in rows.iter().enumerate() {
         let line_top = PADDING_Y + HEADER_LANE + HEADER_GAP + index as f32 * (ROW_HEIGHT + ROW_GAP);
         hasher.write(row.name.as_bytes());
+        // The names are drawn by these assets, so their truncation is a
+        // character budget rather than GPUI's layout ellipsis.
+        let name = truncate_name(&row.name);
         let _ = write!(
             names,
             r#"<text x="{}" y="{}" dominant-baseline="central" font-family="'Segoe UI', sans-serif" font-size="16" font-weight="500" xml:space="preserve">{}</text>"#,
             PADDING_X + ICON_LANE + 8.0,
             line_top + LINE_HEIGHT / 2.0,
-            escape(&row.name)
+            escape(&name)
         );
         // The bar's track is a stable shape and carries most of the row's
         // visual mass; its fill moves with the percentage and stays out.
@@ -399,31 +408,52 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> (SharedString, SharedString)
     // Text strokes carry far less ink than the solid bar capsules, so they
     // get the stronger opacities; bars only support the text's presence.
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.7">{names}</g><g filter="url(#near)" fill="{ink}" fill-opacity="0.2">{bars}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.5">{names}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.12">{bars}</g></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.9">{names}</g><g filter="url(#near)" fill="{ink}" fill-opacity="0.3">{bars}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.7">{names}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.2">{bars}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
         ink = ink,
         names = names,
         bars = bars,
     );
-    // The border: a true SVG text stroke — the glyph outlines widened by a
-    // tenth of a pixel each side. Offset copies would rasterise unevenly at
-    // sub-pixel shifts; a vector stroke is even by construction.
+    // The border is a true SVG text stroke over the same names the fill
+    // draws, so the edge belongs to the real glyphs; offset copies would
+    // rasterise unevenly at sub-pixel shifts.
     let border_svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><g fill="none" stroke="white" stroke-width="0.2">{names}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
         names = names,
     );
+    let fill_svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><g fill="white">{names}</g></svg>"#,
+        width = CARD_WIDTH,
+        height = f32::from(card_size(rows.len()).height),
+        names = names,
+    );
     if let Ok(mut slot) = SHADOW_ASSET.lock() {
-        *slot = Some((svg, border_svg));
+        *slot = Some((svg, border_svg, fill_svg));
     }
     (
         SharedString::from(format!("{SHADOW_ASSET_PREFIX}{hash:016x}.svg")),
         SharedString::from(format!(
             "{SHADOW_ASSET_PREFIX}{SHADOW_BORDER_INFIX}{hash:016x}.svg"
         )),
+        SharedString::from(format!(
+            "{SHADOW_ASSET_PREFIX}{SHADOW_FILL_INFIX}{hash:016x}.svg"
+        )),
     )
+}
+
+/// The names are drawn by the generated assets, so long ones truncate by
+/// characters rather than GPUI's layout ellipsis.
+fn truncate_name(name: &str) -> String {
+    const BUDGET: usize = 22;
+    if name.chars().count() <= BUDGET {
+        return name.to_owned();
+    }
+    let mut truncated: String = name.chars().take(BUDGET - 1).collect();
+    truncated.push('…');
+    truncated
 }
 
 /// What the widget should show: disabled, empty, or a row set.
@@ -520,7 +550,7 @@ impl FlowIndicatorView {
         }
     }
 
-    fn row_view(row: &Row, pal: &Palette) -> impl IntoElement + use<> {
+    fn row_view(row: &Row, pal: &Palette, pinned: bool) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
@@ -544,6 +574,11 @@ impl FlowIndicatorView {
                                 .text_color(pal.muted),
                         ),
                     )
+                    // The name is drawn by the pinned shadow asset layers
+                    // (fill + stroke + blur share one source, so the border
+                    // belongs to the real glyphs); this slot only reserves
+                    // the layout width. Unpinned, the SVG layer is absent, so
+                    // the name draws here instead.
                     .child(
                         div()
                             .flex_1()
@@ -552,7 +587,7 @@ impl FlowIndicatorView {
                             .text_size(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(pal.text)
-                            .child(row.name.clone()),
+                            .when(!pinned, |cell| cell.child(row.name.clone())),
                     )
                     .when(row.online && row.charging, |line| {
                         line.child(
@@ -617,18 +652,17 @@ impl FlowIndicatorView {
             })
             .debug_selector(|| "flow-indicator-card".into())
             .when(pinned, |card| {
-                let (shadow, border) = update_shadow_asset(&self.rows, dark);
+                let (shadow, border, fill) = update_shadow_asset(&self.rows, dark);
                 card.child(svg()
                         .path(shadow)
                         .absolute()
                         .inset_0()
-                        // A mid-grey in the light theme — a shade lighter than
-                        // its dark text; a deeper grey in the dark theme, a
-                        // shade darker than its light text.
+                        // A near-black in the light theme; a deep grey in the
+                        // dark theme, darker than its light text.
                         .text_color(if dark {
-                            hsla(0.0, 0.0, 0.25, 0.6)
+                            hsla(0.0, 0.0, 0.18, 0.8)
                         } else {
-                            hsla(0.0, 0.0, 0.35, 0.6)
+                            hsla(0.0, 0.0, 0.10, 0.8)
                         }))
                 .child(
                     svg()
@@ -637,6 +671,7 @@ impl FlowIndicatorView {
                         .inset_0()
                         .text_color(hsla(0.0, 0.0, 0.0, 1.0)),
                 )
+                .child(svg().path(fill).absolute().inset_0().text_color(pal.text))
             })
             .child(
                 div()
@@ -671,7 +706,7 @@ impl FlowIndicatorView {
                     .flex()
                     .flex_col()
                     .gap(px(ROW_GAP))
-                    .children(self.rows.iter().map(|row| Self::row_view(row, pal))),
+                    .children(self.rows.iter().map(|row| Self::row_view(row, pal, pinned))),
             )
     }
 
