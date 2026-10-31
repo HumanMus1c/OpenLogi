@@ -345,58 +345,37 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
     }
 }
 
-/// A text run with the pinned card's four-way halo: offset copies behind the
-/// real one. The steps are physical pixels — divided by the scale factor so
-/// each copy lands on a whole device pixel and stays as crisp as the glyph
-/// it outlines — while `inset_0` keeps truncation against the wrapper.
-fn shadowed_text(
-    text: SharedString,
-    size: f32,
-    weight: FontWeight,
-    color: Hsla,
-    pinned: bool,
-    scale: f32,
-) -> Div {
-    let mut wrapper = div().relative().truncate();
-    if pinned {
-        wrapper = wrapper.children(HALO_STEPS.map(|(dx, dy, alpha)| {
+/// The pinned card's backing glow: concentric rounded layers, densest at the
+/// container's centre and fading outward — the nearest a stack of quads gets
+/// to the radial gradient GPUI does not have. The expansion is in logical
+/// pixels; the outermost layer reaches 8 px past the container.
+const GLOW_LAYERS: [(f32, f32); 5] = [
+    (-8.0, 0.05),
+    (-5.0, 0.08),
+    (-3.0, 0.10),
+    (-1.0, 0.12),
+    (0.0, 0.14),
+];
+
+/// The glow layers to add behind a container's content when the card is
+/// pinned; the container turns itself `relative`.
+fn glow_layers(pinned: bool) -> Vec<Div> {
+    if !pinned {
+        return Vec::new();
+    }
+    GLOW_LAYERS
+        .map(|(expand, alpha)| {
             div()
                 .absolute()
-                .inset_0()
-                .left(px(dx / scale))
-                .top(px(dy / scale))
-                .truncate()
-                .text_size(px(size))
-                .font_weight(weight)
-                .text_color(halo(alpha))
-                .child(text.clone())
-        }));
-    }
-    wrapper.child(
-        div()
-            .truncate()
-            .text_size(px(size))
-            .font_weight(weight)
-            .text_color(color)
-            .child(text),
-    )
-}
-
-/// An SVG glyph with the same halo, the copies nudged by whole device pixels.
-fn shadowed_icon(path: &'static str, icon_size: f32, color: Hsla, pinned: bool, scale: f32) -> Div {
-    let mut wrapper = div().relative().w(px(icon_size)).h(px(icon_size));
-    if pinned {
-        wrapper = wrapper.children(HALO_STEPS.map(|(dx, dy, alpha)| {
-            svg()
-                .path(path)
-                .size(px(icon_size))
-                .text_color(halo(alpha))
-                .absolute()
-                .left(px(dx / scale))
-                .top(px(dy / scale))
-        }));
-    }
-    wrapper.child(svg().path(path).size(px(icon_size)).text_color(color))
+                .top(px(expand))
+                .right(px(expand))
+                .bottom(px(expand))
+                .left(px(expand))
+                .rounded_full()
+                .bg(halo(alpha))
+        })
+        .into_iter()
+        .collect()
 }
 
 /// The progress bar's halo: the same four-way pattern as a blurred box shadow,
@@ -510,42 +489,67 @@ impl FlowIndicatorView {
                     .gap(px(8.0))
                     .h(px(LINE_HEIGHT))
                     .line_height(px(LINE_HEIGHT))
-                    .child(div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
-                        shadowed_icon(kind_icon(row.kind), ICON_SIZE, pal.muted, pinned, scale),
-                    ))
                     .child(
-                        shadowed_text(
-                            row.name.clone(),
-                            16.0,
-                            FontWeight::MEDIUM,
-                            pal.text,
-                            pinned,
-                            scale,
-                        )
-                        .flex_1()
-                        .min_w_0(),
+                        div()
+                            .relative()
+                            .children(glow_layers(pinned))
+                            .w(px(ICON_LANE))
+                            .h(px(ICON_LANE))
+                            .flex_none()
+                            .child(
+                                svg()
+                                    .path(kind_icon(row.kind))
+                                    .size(px(ICON_SIZE))
+                                    .text_color(pal.muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .children(glow_layers(pinned))
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(16.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(pal.text)
+                                    .child(row.name.clone()),
+                            ),
                     )
                     .when(row.online && row.charging, |line| {
-                        line.child(shadowed_icon(BOLT_ICON, 12.0, color, pinned, scale).flex_none())
+                        line.child(
+                            svg()
+                                .path(BOLT_ICON)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(color),
+                        )
                     })
                     .when(!row.online, |line| {
-                        line.child(shadowed_text(
-                            rust_i18n::t!("device.offline").to_string().into(),
-                            10.0,
-                            FontWeight::NORMAL,
-                            pal.muted,
-                            pinned,
-                            scale,
-                        ))
+                        line.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(pal.muted)
+                                .child(rust_i18n::t!("device.offline").to_string()),
+                        )
                     })
-                    .child(shadowed_text(
-                        row.value.clone(),
-                        16.0,
-                        FontWeight::SEMIBOLD,
-                        color,
-                        pinned,
-                        scale,
-                    )),
+                    .child(
+                        div()
+                            .relative()
+                            .children(glow_layers(pinned))
+                            .truncate()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(16.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(color)
+                                    .child(row.value.clone()),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -602,6 +606,8 @@ impl FlowIndicatorView {
                     .child(
                         div()
                             .id("flow-indicator-pin")
+                            .relative()
+                            .children(glow_layers(pinned))
                             .size(px(HEADER_LANE))
                             .flex()
                             .items_center()
@@ -612,13 +618,12 @@ impl FlowIndicatorView {
                             .hover(|style| style.bg(pal.hover))
                             .on_click(cx.listener(Self::toggle_pin))
                             .debug_selector(|| "flow-indicator-pin".into())
-                            .child(shadowed_icon(
-                                PIN_ICON,
-                                PIN_ICON_SIZE,
-                                if pinned { pal.text } else { pal.muted },
-                                pinned,
-                                scale,
-                            )),
+                            .child(
+                                svg()
+                                    .path(PIN_ICON)
+                                    .size(px(PIN_ICON_SIZE))
+                                    .text_color(if pinned { pal.text } else { pal.muted }),
+                            ),
                     ),
             )
             .child(
