@@ -102,6 +102,9 @@ pub(crate) struct Settings {
     pub(crate) show_offline: bool,
     pub(crate) max_devices: usize,
     pub(crate) display_mode: FlowIndicatorDisplayMode,
+    /// The panel's light/dark preference; the card follows it over the OS's
+    /// whenever it is not `System`.
+    pub(crate) appearance: openlogi_core::config::Appearance,
 }
 
 impl Default for Settings {
@@ -119,6 +122,7 @@ impl From<&AppSettings> for Settings {
             // writes the valid range.
             max_devices: usize::from(settings.flow_indicator_row_limit()),
             display_mode: settings.flow_indicator_display_mode,
+            appearance: settings.appearance,
         }
     }
 }
@@ -311,8 +315,8 @@ impl Palette {
         if dark {
             Self {
                 card: hsla(0.0, 0.0, 0.10, 0.94),
-                text: rgb(0xF5_F5_F7).into(),
-                muted: rgb(0xA1_A1_A6).into(),
+                text: rgb(0xD6_D6_DA).into(),
+                muted: rgb(0x9A_9A_9E).into(),
                 track: hsla(0.0, 0.0, 1.0, 0.12),
                 border: hsla(0.0, 0.0, 1.0, 0.10),
                 hover: hsla(0.0, 0.0, 1.0, 0.10),
@@ -341,7 +345,18 @@ fn shaded(mut color: Hsla, lightness: f32, alpha: f32) -> Hsla {
 
 /// The border's and the shadow's lightness offsets from the element colour.
 const BORDER_DARKEN: f32 = -0.30;
-const SHADOW_LIGHTEN: f32 = 0.35;
+const SHADOW_LIGHTEN_LIGHT: f32 = 0.35;
+const SHADOW_LIGHTEN_DARK: f32 = 0.15;
+
+/// The shadow's lightness offset from the element colour, per theme: the
+/// dark theme's glow was glaring at the light theme's strength.
+fn shadow_lighten(dark: bool) -> f32 {
+    if dark {
+        SHADOW_LIGHTEN_DARK
+    } else {
+        SHADOW_LIGHTEN_LIGHT
+    }
+}
 
 /// A bar shadow's colour: black at the step's strength. The halo is a drop
 /// shadow, so its job is to darken whatever desktop the transparent card
@@ -425,6 +440,7 @@ fn shadowed_text(
     color: Hsla,
     pinned: bool,
     scale: f32,
+    lighten: f32,
 ) -> Div {
     let mut wrapper = div().relative().truncate();
     if pinned {
@@ -438,7 +454,7 @@ fn shadowed_text(
                     .truncate()
                     .text_size(px(size))
                     .font_weight(weight)
-                    .text_color(shaded(color, SHADOW_LIGHTEN, alpha))
+                    .text_color(shaded(color, lighten, alpha))
                     .child(text.clone())
             }))
             .children(RING_OFFSETS.map(|(dx, dy)| {
@@ -465,7 +481,14 @@ fn shadowed_text(
 }
 
 /// An SVG glyph with the same blurred shadow.
-fn shadowed_icon(path: &'static str, icon_size: f32, color: Hsla, pinned: bool, scale: f32) -> Div {
+fn shadowed_icon(
+    path: &'static str,
+    icon_size: f32,
+    color: Hsla,
+    pinned: bool,
+    scale: f32,
+    lighten: f32,
+) -> Div {
     let mut wrapper = div().relative().w(px(icon_size)).h(px(icon_size));
     if pinned {
         wrapper = wrapper
@@ -473,7 +496,7 @@ fn shadowed_icon(path: &'static str, icon_size: f32, color: Hsla, pinned: bool, 
                 svg()
                     .path(path)
                     .size(px(icon_size))
-                    .text_color(shaded(color, SHADOW_LIGHTEN, alpha))
+                    .text_color(shaded(color, lighten, alpha))
                     .absolute()
                     .left(px(dx / scale))
                     .top(px(dy / scale))
@@ -525,7 +548,7 @@ pub(crate) fn take_shadow_asset(path: &str) -> Option<String> {
     clippy::cast_precision_loss,
     reason = "row counts are single digits; the conversion is exact"
 )]
-fn update_shadow_asset(rows: &[Row]) -> SharedString {
+fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
     use std::fmt::Write as _;
 
     fn escape(name: &str) -> String {
@@ -562,10 +585,12 @@ fn update_shadow_asset(rows: &[Row]) -> SharedString {
     let hash = hasher.finish();
     // Two scales: the small one keeps the near field dense, the large one
     // carries the glow far out; a real drop shadow has both.
+    let ink = if dark { "white" } else { "black" };
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="black" fill-opacity="0.55">{body}</g><g filter="url(#far)" fill="black" fill-opacity="0.55">{body}</g></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.55">{body}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.55">{body}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
+        ink = ink,
         body = body,
     );
     if let Ok(mut slot) = SHADOW_ASSET.lock() {
@@ -587,6 +612,9 @@ struct FlowIndicatorView {
     /// is shrunk to a transparent 1x1 on Wayland and hidden natively on
     /// Windows, so its placement survives the toggle.
     visible: bool,
+    /// The panel's light/dark preference, watched so the card follows the
+    /// settings app's theme over the OS's; `System` defers to the platform.
+    appearance_preference: openlogi_core::config::Appearance,
     /// The pin toggle's state, shared with the owner: the view's button writes
     /// it, and a window reopen (a display-mode change) keeps the choice.
     pinned: Rc<Cell<bool>>,
@@ -628,6 +656,7 @@ impl FlowIndicatorView {
             appearance,
             appearance_subscription: None,
             visible: true,
+            appearance_preference: openlogi_core::config::Appearance::System,
             pinned,
             mode: FlowIndicatorDisplayMode::Normal,
             #[cfg(target_os = "linux")]
@@ -650,15 +679,27 @@ impl FlowIndicatorView {
     /// (and on platforms without a watcher) the window's own appearance is
     /// the best answer available.
     fn dark_mode(&self, window: &Window) -> bool {
-        self.appearance.is_dark().unwrap_or_else(|| {
-            matches!(
-                window.appearance(),
-                WindowAppearance::Dark | WindowAppearance::VibrantDark
-            )
-        })
+        match self.appearance_preference {
+            openlogi_core::config::Appearance::Light => false,
+            openlogi_core::config::Appearance::Dark => true,
+            openlogi_core::config::Appearance::System => {
+                self.appearance.is_dark().unwrap_or_else(|| {
+                    matches!(
+                        window.appearance(),
+                        WindowAppearance::Dark | WindowAppearance::VibrantDark
+                    )
+                })
+            }
+        }
     }
 
-    fn row_view(row: &Row, pal: &Palette, pinned: bool, scale: f32) -> impl IntoElement + use<> {
+    fn row_view(
+        row: &Row,
+        pal: &Palette,
+        pinned: bool,
+        scale: f32,
+        lighten: f32,
+    ) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
@@ -675,7 +716,14 @@ impl FlowIndicatorView {
                     .h(px(LINE_HEIGHT))
                     .line_height(px(LINE_HEIGHT))
                     .child(div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
-                        shadowed_icon(kind_icon(row.kind), ICON_SIZE, pal.muted, pinned, scale),
+                        shadowed_icon(
+                            kind_icon(row.kind),
+                            ICON_SIZE,
+                            pal.muted,
+                            pinned,
+                            scale,
+                            lighten,
+                        ),
                     ))
                     .child(
                         shadowed_text(
@@ -685,12 +733,16 @@ impl FlowIndicatorView {
                             pal.text,
                             pinned,
                             scale,
+                            lighten,
                         )
                         .flex_1()
                         .min_w_0(),
                     )
                     .when(row.online && row.charging, |line| {
-                        line.child(shadowed_icon(BOLT_ICON, 12.0, color, pinned, scale).flex_none())
+                        line.child(
+                            shadowed_icon(BOLT_ICON, 12.0, color, pinned, scale, lighten)
+                                .flex_none(),
+                        )
                     })
                     .when(!row.online, |line| {
                         line.child(shadowed_text(
@@ -700,6 +752,7 @@ impl FlowIndicatorView {
                             pal.muted,
                             pinned,
                             scale,
+                            lighten,
                         ))
                     })
                     .child(shadowed_text(
@@ -709,6 +762,7 @@ impl FlowIndicatorView {
                         color,
                         pinned,
                         scale,
+                        lighten,
                     )),
             )
             .child(
@@ -736,8 +790,10 @@ impl FlowIndicatorView {
         pal: &Palette,
         pinned: bool,
         scale: f32,
+        dark: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let lighten = shadow_lighten(dark);
         div()
             .w(px(CARD_WIDTH))
             .flex()
@@ -759,10 +815,14 @@ impl FlowIndicatorView {
             .when(pinned, |card| {
                 card.child(
                     svg()
-                        .path(update_shadow_asset(&self.rows))
+                        .path(update_shadow_asset(&self.rows, dark))
                         .absolute()
                         .inset_0()
-                        .text_color(hsla(0.0, 0.0, 0.0, 0.4)),
+                        .text_color(if dark {
+                            hsla(0.0, 0.0, 1.0, 0.30)
+                        } else {
+                            hsla(0.0, 0.0, 0.0, 0.40)
+                        }),
                 )
             })
             .child(
@@ -791,6 +851,7 @@ impl FlowIndicatorView {
                                 if pinned { pal.text } else { pal.muted },
                                 pinned,
                                 scale,
+                                lighten,
                             )),
                     ),
             )
@@ -798,7 +859,7 @@ impl FlowIndicatorView {
                 div().flex().flex_col().gap(px(ROW_GAP)).children(
                     self.rows
                         .iter()
-                        .map(|row| Self::row_view(row, pal, pinned, scale)),
+                        .map(|row| Self::row_view(row, pal, pinned, scale, lighten)),
                 ),
             )
     }
@@ -835,10 +896,12 @@ impl Render for FlowIndicatorView {
             return div().size_full();
         }
         let pinned = self.pinned.get();
-        let pal = Palette::for_dark(self.dark_mode(window));
-        let root = div()
-            .size_full()
-            .child(self.card(&pal, pinned, window.scale_factor(), cx));
+        let dark = self.dark_mode(window);
+        let pal = Palette::for_dark(dark);
+        let root =
+            div()
+                .size_full()
+                .child(self.card(&pal, pinned, window.scale_factor(), dark, cx));
         #[cfg(target_os = "linux")]
         let root = Self::with_drag(root, cx);
         root
@@ -1262,6 +1325,7 @@ impl FlowIndicator {
             // compositor chose for this one.
             let card = card_size(rows.len());
             let settings_mode = self.settings.display_mode;
+            let preference = self.settings.appearance;
             #[cfg_attr(
                 not(target_os = "windows"),
                 expect(unused_variables, reason = "the live bit is Windows-only")
@@ -1271,6 +1335,7 @@ impl FlowIndicator {
                 view.rows = rows;
                 view.visible = true;
                 view.mode = settings_mode;
+                view.appearance_preference = preference;
                 // Rewrite the z-order only when the live bit disagrees: an
                 // already-topmost window must not hear about it every tick.
                 #[cfg(target_os = "windows")]
@@ -1345,6 +1410,7 @@ impl FlowIndicator {
         // ordinary window.
         let mode = self.effective_mode();
         let settings_mode = self.settings.display_mode;
+        let preference = self.settings.appearance;
         let attempts = window_attempts(mode, bounds);
         let mut layer_shell = false;
         let appearance = Arc::clone(&self.appearance);
@@ -1369,6 +1435,7 @@ impl FlowIndicator {
         };
         let configured = handle.update(cx, |view, window, cx| {
             view.mode = settings_mode;
+            view.appearance_preference = preference;
             apply_display_mode(window, mode);
             view.observe_appearance(window, cx);
             view.on_opened(window, origin);
