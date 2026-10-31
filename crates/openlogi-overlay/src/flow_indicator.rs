@@ -17,11 +17,11 @@ use std::time::SystemTime;
 use gpui::WindowDecorations;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Bounds, BoxShadow, ClickEvent, Context, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement, Point, Render, SharedString, Size,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowKind,
-    WindowOptions, div, hsla, point, px, rgb, size, svg,
+    App, AppContext as _, Bounds, ClickEvent, Context, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowHandle, WindowKind, WindowOptions, div, hsla, point, px, rgb, size,
+    svg,
 };
 #[cfg(target_os = "linux")]
 use gpui::{Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
@@ -70,22 +70,6 @@ const MARGIN: f32 = 24.0;
 /// start a pixel away from the glyph — a copy hugging the outline reads as a
 /// bold weight, while a detached, decaying falloff is what reads as a soft
 /// shadow. GPUI has no text shadow, so the halo is layered copies.
-const HALO_ALPHAS: [f32; 3] = [0.32, 0.16, 0.07];
-const HALO_STEPS: [(f32, f32, f32); 12] = [
-    (2.0, 0.0, HALO_ALPHAS[0]),
-    (-2.0, 0.0, HALO_ALPHAS[0]),
-    (0.0, 2.0, HALO_ALPHAS[0]),
-    (0.0, -2.0, HALO_ALPHAS[0]),
-    (3.0, 0.0, HALO_ALPHAS[1]),
-    (-3.0, 0.0, HALO_ALPHAS[1]),
-    (0.0, 3.0, HALO_ALPHAS[1]),
-    (0.0, -3.0, HALO_ALPHAS[1]),
-    (4.0, 0.0, HALO_ALPHAS[2]),
-    (-4.0, 0.0, HALO_ALPHAS[2]),
-    (0.0, 4.0, HALO_ALPHAS[2]),
-    (0.0, -4.0, HALO_ALPHAS[2]),
-];
-
 const BOLT_ICON: &str = "action-icons/bolt.svg";
 const MOUSE_ICON: &str = "action-icons/mouse.svg";
 const KEYBOARD_ICON: &str = "action-icons/keyboard.svg";
@@ -334,17 +318,6 @@ impl Palette {
     }
 }
 
-/// A bar shadow's colour: black at the step's strength. The halo is a drop
-/// shadow, so its job is to darken whatever desktop the transparent card
-/// floats over — the same black serves both themes.
-fn halo(alpha: f32) -> Hsla {
-    hsla(0.0, 0.0, 0.0, alpha)
-}
-
-/// The bar halo's overall strength: the blurred SVG layer carries most of
-/// the shadow, so the box shadow only supports it.
-const SHADOW_STRENGTH: f32 = 0.5;
-
 fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
     match color {
         BatteryColor::Green => rgb(0x22_C5_5E).into(),
@@ -352,23 +325,6 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
         BatteryColor::Red => rgb(0xEF_44_44).into(),
         BatteryColor::Neutral => pal.text,
     }
-}
-
-/// The progress bar's halo: the same four-way pattern as a blurred box shadow,
-/// The progress bar's halo: the same four-way pattern as a blurred box shadow,
-/// which follows the bar's rounded corners.
-fn bar_shadows(scale: f32) -> Vec<BoxShadow> {
-    HALO_STEPS
-        .iter()
-        .map(|(dx, dy, alpha)| {
-            BoxShadow::new(
-                px(dx / scale),
-                px(dy / scale),
-                halo(alpha * SHADOW_STRENGTH),
-            )
-            .blur_radius(px(2.0))
-        })
-        .collect()
 }
 
 /// The far tail of the pinned card's shadow, as a generated SVG asset: the
@@ -405,12 +361,13 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
     }
 
     let mut hasher = std::hash::DefaultHasher::new();
-    let mut body = String::new();
+    let mut names = String::new();
+    let mut bars = String::new();
     for (index, row) in rows.iter().enumerate() {
         let line_top = PADDING_Y + HEADER_LANE + HEADER_GAP + index as f32 * (ROW_HEIGHT + ROW_GAP);
         hasher.write(row.name.as_bytes());
         let _ = write!(
-            body,
+            names,
             r#"<text x="{}" y="{}" dominant-baseline="central" font-family="'Segoe UI', sans-serif" font-size="16" font-weight="500" xml:space="preserve">{}</text>"#,
             PADDING_X + ICON_LANE + 8.0,
             line_top + LINE_HEIGHT / 2.0,
@@ -419,7 +376,7 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
         // The bar's track is a stable shape and carries most of the row's
         // visual mass; its fill moves with the percentage and stays out.
         let _ = write!(
-            body,
+            bars,
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\"/>",
             PADDING_X,
             line_top + LINE_HEIGHT + LINE_GAP,
@@ -432,14 +389,15 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
     // Two scales: the small one keeps the near field dense, the large one
     // carries the glow far out; a real drop shadow has both.
     let ink = if dark { "white" } else { "black" };
-    let far_shift = 5.0;
+    // Text strokes carry far less ink than the solid bar capsules, so they
+    // get the stronger opacities; bars only support the text's presence.
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.6">{body}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.3" transform="translate(0 {far_shift})">{body}</g></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.7">{names}</g><g filter="url(#near)" fill="{ink}" fill-opacity="0.2">{bars}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.5">{names}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.12">{bars}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
         ink = ink,
-        far_shift = far_shift,
-        body = body,
+        names = names,
+        bars = bars,
     );
     if let Ok(mut slot) = SHADOW_ASSET.lock() {
         *slot = Some(svg);
@@ -541,7 +499,7 @@ impl FlowIndicatorView {
         }
     }
 
-    fn row_view(row: &Row, pal: &Palette, pinned: bool, scale: f32) -> impl IntoElement + use<> {
+    fn row_view(row: &Row, pal: &Palette) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
@@ -606,16 +564,8 @@ impl FlowIndicatorView {
                     .w_full()
                     .rounded_full()
                     .bg(pal.track)
-                    .when(pinned, |track| track.shadow(bar_shadows(scale)))
                     .when(row.fill.is_some(), |track| {
-                        track.child(
-                            div()
-                                .h_full()
-                                .w(px(fill_width))
-                                .rounded_full()
-                                .bg(color)
-                                .when(pinned, |fill| fill.shadow(bar_shadows(scale))),
-                        )
+                        track.child(div().h_full().w(px(fill_width)).rounded_full().bg(color))
                     }),
             )
     }
@@ -624,7 +574,6 @@ impl FlowIndicatorView {
         &self,
         pal: &Palette,
         pinned: bool,
-        scale: f32,
         dark: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -652,11 +601,10 @@ impl FlowIndicatorView {
                         .path(update_shadow_asset(&self.rows, dark))
                         .absolute()
                         .inset_0()
-                        .text_color(if dark {
-                            hsla(0.0, 0.0, 1.0, 0.45)
-                        } else {
-                            hsla(0.0, 0.0, 0.0, 0.5)
-                        }),
+                        // One mid-grey serves both themes: a shade darker than
+                        // the dark theme's light text, a shade lighter than the
+                        // light theme's dark text.
+                        .text_color(hsla(0.0, 0.0, 0.55, 0.55)),
                 )
             })
             .child(
@@ -688,11 +636,11 @@ impl FlowIndicatorView {
                     ),
             )
             .child(
-                div().flex().flex_col().gap(px(ROW_GAP)).children(
-                    self.rows
-                        .iter()
-                        .map(|row| Self::row_view(row, pal, pinned, scale)),
-                ),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ROW_GAP))
+                    .children(self.rows.iter().map(|row| Self::row_view(row, pal))),
             )
     }
 
@@ -730,10 +678,7 @@ impl Render for FlowIndicatorView {
         let pinned = self.pinned.get();
         let dark = self.dark_mode(window);
         let pal = Palette::for_dark(dark);
-        let root =
-            div()
-                .size_full()
-                .child(self.card(&pal, pinned, window.scale_factor(), dark, cx));
+        let root = div().size_full().child(self.card(&pal, pinned, dark, cx));
         #[cfg(target_os = "linux")]
         let root = Self::with_drag(root, cx);
         root
