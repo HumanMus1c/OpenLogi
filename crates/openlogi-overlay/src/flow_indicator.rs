@@ -335,13 +335,20 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
 /// The values are left out on purpose: they change every observation, and
 /// each distinct string set would grow GPUI's raster cache for good.
 pub(crate) const SHADOW_ASSET_PREFIX: &str = "flow-shadow-";
-static SHADOW_ASSET: Mutex<Option<String>> = Mutex::new(None);
+/// The border asset's infix: a second SVG with the same names, drawn sharp
+/// and offset a tenth of a pixel in eight directions — the glyphs' hairline
+/// black edge — served under its own path so its raster caches separately.
+pub(crate) const SHADOW_BORDER_INFIX: &str = "border-";
+static SHADOW_ASSET: Mutex<Option<(String, String)>> = Mutex::new(None);
 
-/// Serve the generated shadow to the asset source, for paths the view
-/// announced through [`update_shadow_asset`].
+/// Serve the generated shadow, or the border that pairs with it, to the
+/// asset source for paths the view announced through
+/// [`update_shadow_asset`].
 pub(crate) fn take_shadow_asset(path: &str) -> Option<String> {
-    path.strip_prefix(SHADOW_ASSET_PREFIX)?;
-    SHADOW_ASSET.lock().ok()?.clone()
+    let rest = path.strip_prefix(SHADOW_ASSET_PREFIX)?;
+    let border = rest.starts_with(SHADOW_BORDER_INFIX);
+    let (shadow, outline) = SHADOW_ASSET.lock().ok()?.clone()?;
+    Some(if border { outline } else { shadow })
 }
 
 /// Rebuild the shadow SVG for `rows` and return the asset path its raster
@@ -350,7 +357,7 @@ pub(crate) fn take_shadow_asset(path: &str) -> Option<String> {
     clippy::cast_precision_loss,
     reason = "row counts are single digits; the conversion is exact"
 )]
-fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
+fn update_shadow_asset(rows: &[Row], dark: bool) -> (SharedString, SharedString) {
     use std::fmt::Write as _;
 
     fn escape(name: &str) -> String {
@@ -399,10 +406,38 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
         names = names,
         bars = bars,
     );
-    if let Ok(mut slot) = SHADOW_ASSET.lock() {
-        *slot = Some(svg);
+    // The border: the same names drawn sharp, a tenth of a pixel in eight
+    // directions, so the glyphs gain a hairline black edge under the tint.
+    let mut outline = String::new();
+    for (dx, dy) in [
+        (0.1, 0.0),
+        (-0.1, 0.0),
+        (0.0, 0.1),
+        (0.0, -0.1),
+        (0.07, 0.07),
+        (0.07, -0.07),
+        (-0.07, 0.07),
+        (-0.07, -0.07),
+    ] {
+        let _ = write!(
+            outline,
+            r#"<g transform="translate({dx} {dy})">{names}</g>"#
+        );
     }
-    SharedString::from(format!("{SHADOW_ASSET_PREFIX}{hash:016x}.svg"))
+    let border_svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">{outline}</svg>"#,
+        width = CARD_WIDTH,
+        height = f32::from(card_size(rows.len()).height),
+    );
+    if let Ok(mut slot) = SHADOW_ASSET.lock() {
+        *slot = Some((svg, border_svg));
+    }
+    (
+        SharedString::from(format!("{SHADOW_ASSET_PREFIX}{hash:016x}.svg")),
+        SharedString::from(format!(
+            "{SHADOW_ASSET_PREFIX}{SHADOW_BORDER_INFIX}{hash:016x}.svg"
+        )),
+    )
 }
 
 /// What the widget should show: disabled, empty, or a row set.
@@ -596,15 +631,25 @@ impl FlowIndicatorView {
             })
             .debug_selector(|| "flow-indicator-card".into())
             .when(pinned, |card| {
-                card.child(
-                    svg()
-                        .path(update_shadow_asset(&self.rows, dark))
+                let (shadow, border) = update_shadow_asset(&self.rows, dark);
+                card.child(svg()
+                        .path(shadow)
                         .absolute()
                         .inset_0()
-                        // One mid-grey serves both themes: a shade darker than
-                        // the dark theme's light text, a shade lighter than the
-                        // light theme's dark text.
-                        .text_color(hsla(0.0, 0.0, 0.55, 0.55)),
+                        // A mid-grey in the light theme — a shade lighter than
+                        // its dark text; a deeper grey in the dark theme, a
+                        // shade darker than its light text.
+                        .text_color(if dark {
+                            hsla(0.0, 0.0, 0.30, 0.55)
+                        } else {
+                            hsla(0.0, 0.0, 0.55, 0.55)
+                        }))
+                .child(
+                    svg()
+                        .path(border)
+                        .absolute()
+                        .inset_0()
+                        .text_color(hsla(0.0, 0.0, 0.0, 1.0)),
                 )
             })
             .child(
