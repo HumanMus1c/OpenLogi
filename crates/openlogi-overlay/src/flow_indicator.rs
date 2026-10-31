@@ -33,7 +33,7 @@ use openlogi_core::device::{
     DeviceKind, battery_devices, flow_indicator_devices,
 };
 use openlogi_ipc::Observation;
-use openlogi_ui::action_icons::PIN_ICON;
+use openlogi_ui::action_icons::{PIN_ICON, icon_body};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -386,6 +386,27 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
             line_top + LINE_HEIGHT / 2.0,
             name
         );
+        // The kind glyph: its vendored body, scaled from its 24px view box
+        // into the 18px lane and inheriting the stock stroke attributes.
+        if let Some(body) = icon_body(kind_icon(row.kind)) {
+            let _ = write!(
+                names,
+                r#"<g transform="translate({} {}) scale(0.75)" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none">{}</g>"#,
+                PADDING_X,
+                line_top + (LINE_HEIGHT - ICON_SIZE) / 2.0,
+                body
+            );
+        }
+        // The value's mass as a capsule at its right-aligned seat: the
+        // percentage string changes every observation, so the number itself
+        // stays out of the content hash.
+        let _ = write!(
+            bars,
+            r#"<rect x="{}" y="{}" width="44" height="18" rx="9"/>"#,
+            CARD_WIDTH - PADDING_X - 44.0,
+            line_top + (LINE_HEIGHT - 18.0) / 2.0
+        );
+        hasher.write(&[u8::from(row.charging), u8::from(row.online)]);
         // The bar's track is a stable shape and carries most of the row's
         // visual mass; its fill moves with the percentage and stays out.
         let _ = write!(
@@ -512,6 +533,10 @@ impl FlowIndicatorView {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one row's whole element tree reads top to bottom"
+    )]
     fn row_view(row: &Row, pal: &Palette, pinned: bool, scale: f32) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
@@ -528,14 +553,26 @@ impl FlowIndicatorView {
                     .gap(px(8.0))
                     .h(px(LINE_HEIGHT))
                     .line_height(px(LINE_HEIGHT))
-                    .child(
-                        div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
-                            svg()
-                                .path(kind_icon(row.kind))
-                                .size(px(ICON_SIZE))
-                                .text_color(pal.muted),
-                        ),
-                    )
+                    .child({
+                        let icon = kind_icon(row.kind);
+                        let mut lane = div()
+                            .relative()
+                            .w(px(ICON_LANE))
+                            .h(px(ICON_LANE))
+                            .flex_none();
+                        if pinned {
+                            lane = lane.children(RING_DIRECTIONS.map(|(dx, dy)| {
+                                svg()
+                                    .path(icon)
+                                    .size(px(ICON_SIZE))
+                                    .text_color(hsla(0.0, 0.0, 0.0, 0.4))
+                                    .absolute()
+                                    .left(px(dx / scale))
+                                    .top(px(dy / scale))
+                            }));
+                        }
+                        lane.child(svg().path(icon).size(px(ICON_SIZE)).text_color(pal.muted))
+                    })
                     .child({
                         // The hairline border comes from GPUI's own glyphs —
                         // eight copies a device pixel out, in black at low
@@ -583,13 +620,32 @@ impl FlowIndicatorView {
                                 .child(rust_i18n::t!("device.offline").to_string()),
                         )
                     })
-                    .child(
-                        div()
-                            .text_size(px(16.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(color)
-                            .child(row.value.clone()),
-                    ),
+                    .child({
+                        let value = row.value.clone();
+                        let mut cell = div().relative().truncate();
+                        if pinned {
+                            cell = cell.children(RING_DIRECTIONS.map(|(dx, dy)| {
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .left(px(dx / scale))
+                                    .top(px(dy / scale))
+                                    .truncate()
+                                    .text_size(px(16.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(hsla(0.0, 0.0, 0.0, 0.4))
+                                    .child(value.clone())
+                            }));
+                        }
+                        cell.child(
+                            div()
+                                .truncate()
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(color)
+                                .child(value),
+                        )
+                    }),
             )
             .child(
                 div()

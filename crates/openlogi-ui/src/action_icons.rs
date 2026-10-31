@@ -114,6 +114,21 @@ pub const LOCK_KEY_ICON: &str = "action-icons/keyboard.svg";
 /// The glyph on the Flow Indicator's pin toggle.
 pub const PIN_ICON: &str = "action-icons/pin.svg";
 
+/// The inner content of a vendored glyph, for callers that must compose it
+/// into a larger SVG (the Flow Indicator's generated shadow). The wrapper
+/// carries the stock stroke attributes; inner elements inherit them.
+#[must_use]
+pub fn icon_body(path: &str) -> Option<&'static str> {
+    let bytes = ACTION_ICONS
+        .iter()
+        .find(|(candidate, _)| *candidate == path)?
+        .1;
+    let text = std::str::from_utf8(bytes).ok()?;
+    let start = text.find('>')? + 1;
+    let end = text.rfind("</svg>")?;
+    text.get(start..end)
+}
+
 /// GPUI asset source for the embedded ring glyphs, and nothing else.
 pub struct ActionIcons;
 
