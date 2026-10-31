@@ -17,14 +17,14 @@ use std::time::SystemTime;
 use gpui::WindowDecorations;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Bounds, BoxShadow, ClickEvent, Context, Div, FontWeight, Hsla,
+    App, AppContext as _, Bounds, BoxShadow, ClickEvent, Context, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ParentElement, Point, Render, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, Window, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowKind,
     WindowOptions, div, hsla, point, px, rgb, size, svg,
 };
 #[cfg(target_os = "linux")]
-use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+use gpui::{Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
 use openlogi_core::config::{
     AppSettings, Config, ConfigFile, FlowIndicatorDisplayMode, battery_devices_named,
 };
@@ -334,36 +334,16 @@ impl Palette {
     }
 }
 
-/// An element's colour shifted in lightness — darker for its border, lighter
-/// for its shadow — at the given strength. Deriving both from the element's
-/// own colour keeps each row's border and glow in its own hue.
-fn shaded(mut color: Hsla, lightness: f32, alpha: f32) -> Hsla {
-    color.l = (color.l + lightness).clamp(0.0, 1.0);
-    color.a = alpha;
-    color
-}
-
-/// The border's and the shadow's lightness offsets from the element colour.
-const BORDER_DARKEN: f32 = -0.30;
-const SHADOW_LIGHTEN_LIGHT: f32 = 0.35;
-const SHADOW_LIGHTEN_DARK: f32 = 0.15;
-
-/// The shadow's lightness offset from the element colour, per theme: the
-/// dark theme's glow was glaring at the light theme's strength.
-fn shadow_lighten(dark: bool) -> f32 {
-    if dark {
-        SHADOW_LIGHTEN_DARK
-    } else {
-        SHADOW_LIGHTEN_LIGHT
-    }
-}
-
 /// A bar shadow's colour: black at the step's strength. The halo is a drop
 /// shadow, so its job is to darken whatever desktop the transparent card
 /// floats over — the same black serves both themes.
 fn halo(alpha: f32) -> Hsla {
     hsla(0.0, 0.0, 0.0, alpha)
 }
+
+/// The bar halo's overall strength: the blurred SVG layer carries most of
+/// the shadow, so the box shadow only supports it.
+const SHADOW_STRENGTH: f32 = 0.5;
 
 fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
     match color {
@@ -374,153 +354,19 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
     }
 }
 
-/// A blur kernel stamped behind the pinned card's text and glyphs, in device
-/// pixels: a two-pixel disc plus a sparse ring. Translated copies of a shape
-/// stacked over a disc compose into a box blur of it — the same trick as
-/// stacking CSS `text-shadow`s — which is the closest GPUI gets to a soft
-/// text shadow: upstream has none, and glyph-shaped copies at sparse offsets
-/// read as an outline instead. The offsets are divided by the scale factor so
-/// every copy lands on whole device pixels.
-const STAMP_KERNEL: [(f32, f32, f32); 32] = [
-    (1.0, 0.0, 0.16),
-    (-1.0, 0.0, 0.16),
-    (0.0, 1.0, 0.16),
-    (0.0, -1.0, 0.16),
-    (1.0, 1.0, 0.16),
-    (1.0, -1.0, 0.16),
-    (-1.0, 1.0, 0.16),
-    (-1.0, -1.0, 0.16),
-    (2.0, 0.0, 0.14),
-    (-2.0, 0.0, 0.14),
-    (0.0, 2.0, 0.14),
-    (0.0, -2.0, 0.14),
-    (2.0, 2.0, 0.09),
-    (2.0, -2.0, 0.09),
-    (-2.0, 2.0, 0.09),
-    (-2.0, -2.0, 0.09),
-    (3.0, 0.0, 0.08),
-    (-3.0, 0.0, 0.08),
-    (0.0, 3.0, 0.08),
-    (0.0, -3.0, 0.08),
-    (3.0, 3.0, 0.06),
-    (3.0, -3.0, 0.06),
-    (-3.0, 3.0, 0.06),
-    (-3.0, -3.0, 0.06),
-    (4.0, 0.0, 0.05),
-    (-4.0, 0.0, 0.05),
-    (0.0, 4.0, 0.05),
-    (0.0, -4.0, 0.05),
-    (5.0, 0.0, 0.035),
-    (-5.0, 0.0, 0.035),
-    (0.0, 5.0, 0.035),
-    (0.0, -5.0, 0.035),
-];
-
-/// The thin border hugging the glyph: eight copies one device pixel out, in
-/// a colour darker than the glyph's own. It sits between the glyph's
-/// antialiased edge and the lighter shadow outside, so the edge steps from
-/// the glyph into its border and then into the pale glow.
-const RING_OFFSETS: [(f32, f32); 8] = [
-    (1.0, 0.0),
-    (-1.0, 0.0),
-    (0.0, 1.0),
-    (0.0, -1.0),
-    (1.0, 1.0),
-    (1.0, -1.0),
-    (-1.0, 1.0),
-    (-1.0, -1.0),
-];
-const RING_ALPHA: f32 = 0.75;
-
-/// A text run with the blurred shadow behind it.
-fn shadowed_text(
-    text: SharedString,
-    size: f32,
-    weight: FontWeight,
-    color: Hsla,
-    pinned: bool,
-    scale: f32,
-    lighten: f32,
-) -> Div {
-    let mut wrapper = div().relative().truncate();
-    if pinned {
-        wrapper = wrapper
-            .children(STAMP_KERNEL.map(|(dx, dy, alpha)| {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .left(px(dx / scale))
-                    .top(px(dy / scale))
-                    .truncate()
-                    .text_size(px(size))
-                    .font_weight(weight)
-                    .text_color(shaded(color, lighten, alpha))
-                    .child(text.clone())
-            }))
-            .children(RING_OFFSETS.map(|(dx, dy)| {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .left(px(dx / scale))
-                    .top(px(dy / scale))
-                    .truncate()
-                    .text_size(px(size))
-                    .font_weight(weight)
-                    .text_color(shaded(color, BORDER_DARKEN, RING_ALPHA))
-                    .child(text.clone())
-            }));
-    }
-    wrapper.child(
-        div()
-            .truncate()
-            .text_size(px(size))
-            .font_weight(weight)
-            .text_color(color)
-            .child(text),
-    )
-}
-
-/// An SVG glyph with the same blurred shadow.
-fn shadowed_icon(
-    path: &'static str,
-    icon_size: f32,
-    color: Hsla,
-    pinned: bool,
-    scale: f32,
-    lighten: f32,
-) -> Div {
-    let mut wrapper = div().relative().w(px(icon_size)).h(px(icon_size));
-    if pinned {
-        wrapper = wrapper
-            .children(STAMP_KERNEL.map(|(dx, dy, alpha)| {
-                svg()
-                    .path(path)
-                    .size(px(icon_size))
-                    .text_color(shaded(color, lighten, alpha))
-                    .absolute()
-                    .left(px(dx / scale))
-                    .top(px(dy / scale))
-            }))
-            .children(RING_OFFSETS.map(|(dx, dy)| {
-                svg()
-                    .path(path)
-                    .size(px(icon_size))
-                    .text_color(shaded(color, BORDER_DARKEN, RING_ALPHA))
-                    .absolute()
-                    .left(px(dx / scale))
-                    .top(px(dy / scale))
-            }));
-    }
-    wrapper.child(svg().path(path).size(px(icon_size)).text_color(color))
-}
-
+/// The progress bar's halo: the same four-way pattern as a blurred box shadow,
 /// The progress bar's halo: the same four-way pattern as a blurred box shadow,
 /// which follows the bar's rounded corners.
 fn bar_shadows(scale: f32) -> Vec<BoxShadow> {
     HALO_STEPS
         .iter()
         .map(|(dx, dy, alpha)| {
-            BoxShadow::new(px(dx / scale), px(dy / scale), halo(*alpha)).blur_radius(px(2.0))
+            BoxShadow::new(
+                px(dx / scale),
+                px(dy / scale),
+                halo(alpha * SHADOW_STRENGTH),
+            )
+            .blur_radius(px(2.0))
         })
         .collect()
 }
@@ -587,7 +433,7 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
     // carries the glow far out; a real drop shadow has both.
     let ink = if dark { "white" } else { "black" };
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.55">{body}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.55">{body}</g></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.6">{body}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.4">{body}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
         ink = ink,
@@ -693,13 +539,7 @@ impl FlowIndicatorView {
         }
     }
 
-    fn row_view(
-        row: &Row,
-        pal: &Palette,
-        pinned: bool,
-        scale: f32,
-        lighten: f32,
-    ) -> impl IntoElement + use<> {
+    fn row_view(row: &Row, pal: &Palette, pinned: bool, scale: f32) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
@@ -715,55 +555,48 @@ impl FlowIndicatorView {
                     .gap(px(8.0))
                     .h(px(LINE_HEIGHT))
                     .line_height(px(LINE_HEIGHT))
-                    .child(div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
-                        shadowed_icon(
-                            kind_icon(row.kind),
-                            ICON_SIZE,
-                            pal.muted,
-                            pinned,
-                            scale,
-                            lighten,
-                        ),
-                    ))
                     .child(
-                        shadowed_text(
-                            row.name.clone(),
-                            16.0,
-                            FontWeight::MEDIUM,
-                            pal.text,
-                            pinned,
-                            scale,
-                            lighten,
-                        )
-                        .flex_1()
-                        .min_w_0(),
+                        div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
+                            svg()
+                                .path(kind_icon(row.kind))
+                                .size(px(ICON_SIZE))
+                                .text_color(pal.muted),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(16.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(pal.text)
+                            .child(row.name.clone()),
                     )
                     .when(row.online && row.charging, |line| {
                         line.child(
-                            shadowed_icon(BOLT_ICON, 12.0, color, pinned, scale, lighten)
-                                .flex_none(),
+                            svg()
+                                .path(BOLT_ICON)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(color),
                         )
                     })
                     .when(!row.online, |line| {
-                        line.child(shadowed_text(
-                            rust_i18n::t!("device.offline").to_string().into(),
-                            10.0,
-                            FontWeight::NORMAL,
-                            pal.muted,
-                            pinned,
-                            scale,
-                            lighten,
-                        ))
+                        line.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(pal.muted)
+                                .child(rust_i18n::t!("device.offline").to_string()),
+                        )
                     })
-                    .child(shadowed_text(
-                        row.value.clone(),
-                        16.0,
-                        FontWeight::SEMIBOLD,
-                        color,
-                        pinned,
-                        scale,
-                        lighten,
-                    )),
+                    .child(
+                        div()
+                            .text_size(px(16.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(color)
+                            .child(row.value.clone()),
+                    ),
             )
             .child(
                 div()
@@ -793,7 +626,6 @@ impl FlowIndicatorView {
         dark: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let lighten = shadow_lighten(dark);
         div()
             .w(px(CARD_WIDTH))
             .flex()
@@ -819,9 +651,9 @@ impl FlowIndicatorView {
                         .absolute()
                         .inset_0()
                         .text_color(if dark {
-                            hsla(0.0, 0.0, 1.0, 0.30)
+                            hsla(0.0, 0.0, 1.0, 0.45)
                         } else {
-                            hsla(0.0, 0.0, 0.0, 0.40)
+                            hsla(0.0, 0.0, 0.0, 0.5)
                         }),
                 )
             })
@@ -845,21 +677,19 @@ impl FlowIndicatorView {
                             .hover(|style| style.bg(pal.hover))
                             .on_click(cx.listener(Self::toggle_pin))
                             .debug_selector(|| "flow-indicator-pin".into())
-                            .child(shadowed_icon(
-                                PIN_ICON,
-                                PIN_ICON_SIZE,
-                                if pinned { pal.text } else { pal.muted },
-                                pinned,
-                                scale,
-                                lighten,
-                            )),
+                            .child(
+                                svg()
+                                    .path(PIN_ICON)
+                                    .size(px(PIN_ICON_SIZE))
+                                    .text_color(if pinned { pal.text } else { pal.muted }),
+                            ),
                     ),
             )
             .child(
                 div().flex().flex_col().gap(px(ROW_GAP)).children(
                     self.rows
                         .iter()
-                        .map(|row| Self::row_view(row, pal, pinned, scale, lighten)),
+                        .map(|row| Self::row_view(row, pal, pinned, scale)),
                 ),
             )
     }
