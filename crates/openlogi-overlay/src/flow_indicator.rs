@@ -350,8 +350,12 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
 /// stacked over a disc compose into a box blur of it — the same trick as
 /// stacking CSS `text-shadow`s — which is the closest GPUI gets to a soft
 /// text shadow: upstream has none, and glyph-shaped copies at sparse offsets
-/// read as an outline instead. The offsets are divided by the scale factor so
-/// every copy lands on whole device pixels.
+/// read as an outline instead. The kernel sits one device pixel below the
+/// glyph (the classic `0 1px 2px` text shadow): the glyph's top edge then has
+/// no shadow behind it and stays crisp, while the soft falloff shows below.
+/// The offsets are divided by the scale factor so every copy lands on whole
+/// device pixels.
+const STAMP_SHIFT: f32 = 1.0;
 const STAMP_KERNEL: [(f32, f32, f32); 20] = [
     (1.0, 0.0, 0.10),
     (-1.0, 0.0, 0.10),
@@ -391,7 +395,7 @@ fn shadowed_text(
                 .absolute()
                 .inset_0()
                 .left(px(dx / scale))
-                .top(px(dy / scale))
+                .top(px((dy + STAMP_SHIFT) / scale))
                 .truncate()
                 .text_size(px(size))
                 .font_weight(weight)
@@ -420,7 +424,7 @@ fn shadowed_icon(path: &'static str, icon_size: f32, color: Hsla, pinned: bool, 
                 .text_color(halo(alpha))
                 .absolute()
                 .left(px(dx / scale))
-                .top(px(dy / scale))
+                .top(px((dy + STAMP_SHIFT) / scale))
         }));
     }
     wrapper.child(svg().path(path).size(px(icon_size)).text_color(color))
