@@ -243,20 +243,24 @@ The first implementation uses a vigil-watt-style badge:
 
 The overlay has no `gpui-component` theme, so the widget owns a small semantic
 palette. The tones are the same meanings the GUI already uses; a surface may
-map them differently, but it must not invent a second threshold.
+map them differently, but it must not invent a second threshold. Every overlay
+surface is a floating HUD and keeps the dark scheme whatever the OS theme is:
+the persistent card and the transient notices share one fixed look, so a light
+desktop never gets a light card with dark glyphs, rings and shadows layered on
+each other.
 
-| Role | Dark | Light | Notes |
-|---|---|---|---|
-| Card | `hsla(0, 0, 0.10, 0.94)` | `#FFFFFF` at 96% | transient notices use the dark card; a persistent desktop card follows OS appearance |
-| Text | `#F5F5F7` | `#1D1D1F` | primary device name and percentage |
-| Muted | `#A1A1A6` | `#6E6E73` | offline label, empty state, secondary status |
-| Track | white at 12% | black at 8% | battery bar background |
-| Border | white at 10% | black at 12% | card edge |
-| Charging / Full | `#22C55E` | same | `STATUS_CONNECTED` |
-| Low | `#EAB308` | same | `STATUS_CONNECTING` |
-| Critical / Error | `#EF4444` | same | `STATUS_DISABLED` |
-| Normal | primary text | primary text | no extra hue for a healthy battery |
-| Accent | `#3B82F6` | same | tray badge disc for a normal reading; OpenLogi brand accent |
+| Role | Tone | Notes |
+|---|---|---|
+| Card | `hsla(0, 0, 0.10, 0.94)` | the same card for notices and the persistent desktop card |
+| Text | `#F5F5F7` | primary device name and percentage |
+| Muted | `#A1A1A6` | offline label, empty state, secondary status |
+| Track | white at 12% | battery bar background |
+| Border | white at 10% | card edge |
+| Charging / Full | `#22C55E` | `STATUS_CONNECTED` |
+| Low | `#EAB308` | `STATUS_CONNECTING` |
+| Critical / Error | `#EF4444` | `STATUS_DISABLED` |
+| Normal | primary text | no extra hue for a healthy battery |
+| Accent | `#3B82F6` | tray badge disc for a normal reading; OpenLogi brand accent |
 
 The tray badge uses a saturated disc with white digits: accent blue for a
 normal reading, green for charging/full, amber for low, red for critical/error;
@@ -721,15 +725,24 @@ instead of claiming Linux has no tray.
   headless GNOME 50 session `xdg-desktop-portal` was D-Bus-activated almost an
   hour later, so that read failed and the card kept the light palette for the
   whole session. A later style change only reached GPUI's window state and
-  nothing repainted the card. `crates/openlogi-overlay/src/appearance.rs` now
-  owns the decision on Linux: a watcher retries the portal read (2 s, 30
-  attempts per connection) and then follows `SettingChanged`; the card's
-  one-second tick repaints it when the mode flips. macOS/Windows keep the
-  window's own appearance and now repaint through
-  `observe_window_appearance`. Verified in the GNOME session with Mutter
-  ScreenCast captures: dark card in a dark session, light card after a live
-  switch to light and dark again after switching back; an overlay launched
-  after the portal was up opened dark, the login-launched one stayed light.
+  nothing repainted the card. `crates/openlogi-overlay/src/appearance.rs` owned
+  the decision on Linux: a watcher retried the portal read (2 s, 30 attempts
+  per connection) and then followed `SettingChanged`; the card's one-second
+  tick repainted it when the mode flipped. macOS/Windows kept the window's own
+  appearance and repainted through `observe_window_appearance`. Verified in the
+  GNOME session with Mutter ScreenCast captures: dark card in a dark session,
+  light card after a live switch to light and dark again after switching back;
+  an overlay launched after the portal was up opened dark, the login-launched
+  one stayed light.
+- **The card no longer follows the theme (2026-11-01).** The light palette put
+  dark text, dark rings and a dark blurred shadow on top of each other: stamped
+  glyph copies are quantised to device pixels, so a light ring over a light
+  desktop showed stair-steps (measured 249 → 250…252 against the background)
+  and brightened the glyphs' antialiased edges, and a dark ring and shadow
+  smeared the dark letters instead. Every overlay surface now keeps the dark
+  scheme — the persistent card matches the notices — and the appearance watcher
+  (`appearance.rs`), the per-view preference and the owner's revision polling
+  were removed with it.
 - **GNOME shows no SNI tooltips; the wide face becomes a label there.** The
   AppIndicator extension's README states tooltips are deliberately
   unimplemented, so hovering the badge never shows the device tip (the
