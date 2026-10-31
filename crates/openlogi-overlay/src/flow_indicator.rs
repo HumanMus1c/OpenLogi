@@ -10,7 +10,6 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::SystemTime;
 
 #[cfg(not(target_os = "windows"))]
@@ -330,6 +329,19 @@ impl Palette {
     }
 }
 
+/// An element's colour shifted in lightness — darker for its border, lighter
+/// for its shadow — at the given strength. Deriving both from the element's
+/// own colour keeps each row's border and glow in its own hue.
+fn shaded(mut color: Hsla, lightness: f32, alpha: f32) -> Hsla {
+    color.l = (color.l + lightness).clamp(0.0, 1.0);
+    color.a = alpha;
+    color
+}
+
+/// The border's and the shadow's lightness offsets from the element colour.
+const BORDER_DARKEN: f32 = -0.30;
+const SHADOW_LIGHTEN: f32 = 0.35;
+
 /// A bar shadow's colour: black at the step's strength. The halo is a drop
 /// shadow, so its job is to darken whatever desktop the transparent card
 /// floats over — the same black serves both themes.
@@ -353,77 +365,56 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
 /// text shadow: upstream has none, and glyph-shaped copies at sparse offsets
 /// read as an outline instead. The offsets are divided by the scale factor so
 /// every copy lands on whole device pixels.
-/// The shadow's rings, in device pixels: a dense one-to-four-pixel core, then
-/// eight directions every two pixels out to the eighteen-pixel edge, with the
-/// strength decaying so the tail reads as glow. The offsets of each ring are
-/// the four winds plus the four diagonals at half the radius.
-const STAMP_RINGS: [(f32, f32); 11] = [
-    (1.0, 0.16),
-    (2.0, 0.14),
-    (3.0, 0.08),
-    (4.0, 0.06),
-    (6.0, 0.05),
-    (8.0, 0.04),
-    (10.0, 0.03),
-    (12.0, 0.025),
-    (14.0, 0.02),
-    (16.0, 0.015),
-    (18.0, 0.01),
+const STAMP_KERNEL: [(f32, f32, f32); 32] = [
+    (1.0, 0.0, 0.16),
+    (-1.0, 0.0, 0.16),
+    (0.0, 1.0, 0.16),
+    (0.0, -1.0, 0.16),
+    (1.0, 1.0, 0.16),
+    (1.0, -1.0, 0.16),
+    (-1.0, 1.0, 0.16),
+    (-1.0, -1.0, 0.16),
+    (2.0, 0.0, 0.14),
+    (-2.0, 0.0, 0.14),
+    (0.0, 2.0, 0.14),
+    (0.0, -2.0, 0.14),
+    (2.0, 2.0, 0.09),
+    (2.0, -2.0, 0.09),
+    (-2.0, 2.0, 0.09),
+    (-2.0, -2.0, 0.09),
+    (3.0, 0.0, 0.08),
+    (-3.0, 0.0, 0.08),
+    (0.0, 3.0, 0.08),
+    (0.0, -3.0, 0.08),
+    (3.0, 3.0, 0.06),
+    (3.0, -3.0, 0.06),
+    (-3.0, 3.0, 0.06),
+    (-3.0, -3.0, 0.06),
+    (4.0, 0.0, 0.05),
+    (-4.0, 0.0, 0.05),
+    (0.0, 4.0, 0.05),
+    (0.0, -4.0, 0.05),
+    (5.0, 0.0, 0.035),
+    (-5.0, 0.0, 0.035),
+    (0.0, 5.0, 0.035),
+    (0.0, -5.0, 0.035),
 ];
 
-/// The thin border hugging the glyph: eight copies half a pixel out, in a
-/// colour darker than the glyph's own. It sits between the glyph's
+/// The thin border hugging the glyph: eight copies one device pixel out, in
+/// a colour darker than the glyph's own. It sits between the glyph's
 /// antialiased edge and the lighter shadow outside, so the edge steps from
 /// the glyph into its border and then into the pale glow.
 const RING_OFFSETS: [(f32, f32); 8] = [
-    (0.5, 0.0),
-    (-0.5, 0.0),
-    (0.0, 0.5),
-    (0.0, -0.5),
-    (0.5, 0.5),
-    (0.5, -0.5),
-    (-0.5, 0.5),
-    (-0.5, -0.5),
+    (1.0, 0.0),
+    (-1.0, 0.0),
+    (0.0, 1.0),
+    (0.0, -1.0),
+    (1.0, 1.0),
+    (1.0, -1.0),
+    (-1.0, 1.0),
+    (-1.0, -1.0),
 ];
 const RING_ALPHA: f32 = 0.75;
-
-/// An element's colour shifted in lightness — darker for its border, lighter
-/// for its shadow — at the given strength. Deriving both from the element's
-/// own colour keeps each row's border and glow in its own hue.
-fn shaded(mut color: Hsla, lightness: f32, alpha: f32) -> Hsla {
-    color.l = (color.l + lightness).clamp(0.0, 1.0);
-    color.a = alpha;
-    color
-}
-
-/// The border's and the shadow's lightness offsets from the element colour.
-const BORDER_DARKEN: f32 = -0.30;
-const SHADOW_LIGHTEN: f32 = 0.35;
-
-/// The kernel's offsets and strengths, built once: for every ring the four
-/// winds at its radius and the four diagonals at half the radius times √2,
-/// so the eight directions sit on one circle.
-fn stamp_kernel() -> &'static Vec<(f32, f32, f32)> {
-    static KERNEL: OnceLock<Vec<(f32, f32, f32)>> = OnceLock::new();
-    KERNEL.get_or_init(|| {
-        STAMP_RINGS
-            .iter()
-            .flat_map(|&(radius, alpha)| {
-                let diagonal = radius * std::f32::consts::FRAC_1_SQRT_2;
-                [
-                    (radius, 0.0, alpha),
-                    (-radius, 0.0, alpha),
-                    (0.0, radius, alpha),
-                    (0.0, -radius, alpha),
-                    (diagonal, diagonal, alpha),
-                    (diagonal, -diagonal, alpha),
-                    (-diagonal, diagonal, alpha),
-                    (-diagonal, -diagonal, alpha),
-                ]
-            })
-            .collect()
-    })
-}
 
 /// A text run with the blurred shadow behind it.
 fn shadowed_text(
@@ -437,7 +428,7 @@ fn shadowed_text(
     let mut wrapper = div().relative().truncate();
     if pinned {
         wrapper = wrapper
-            .children(stamp_kernel().iter().map(|&(dx, dy, alpha)| {
+            .children(STAMP_KERNEL.map(|(dx, dy, alpha)| {
                 div()
                     .absolute()
                     .inset_0()
@@ -477,7 +468,7 @@ fn shadowed_icon(path: &'static str, icon_size: f32, color: Hsla, pinned: bool, 
     let mut wrapper = div().relative().w(px(icon_size)).h(px(icon_size));
     if pinned {
         wrapper = wrapper
-            .children(stamp_kernel().iter().map(|&(dx, dy, alpha)| {
+            .children(STAMP_KERNEL.map(|(dx, dy, alpha)| {
                 svg()
                     .path(path)
                     .size(px(icon_size))
