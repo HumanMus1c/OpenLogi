@@ -432,11 +432,13 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
     // Two scales: the small one keeps the near field dense, the large one
     // carries the glow far out; a real drop shadow has both.
     let ink = if dark { "white" } else { "black" };
+    let far_shift = 5.0;
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.6">{body}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.4">{body}</g></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="{ink}" fill-opacity="0.6">{body}</g><g filter="url(#far)" fill="{ink}" fill-opacity="0.3" transform="translate(0 {far_shift})">{body}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
         ink = ink,
+        far_shift = far_shift,
         body = body,
     );
     if let Ok(mut slot) = SHADOW_ASSET.lock() {
