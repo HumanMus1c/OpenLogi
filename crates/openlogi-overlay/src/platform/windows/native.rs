@@ -20,10 +20,11 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, GetWindowRect, IsWindow, SW_HIDE,
-    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SendMessageW, SetWindowLongW, SetWindowPos, ShowWindow, WM_SETTINGCHANGE,
-    WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_POPUP, WS_THICKFRAME,
+    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, GetWindowRect, IsWindow, LWA_ALPHA,
+    SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetLayeredWindowAttributes, SetWindowLongW,
+    SetWindowPos, ShowWindow, WM_SETTINGCHANGE, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TRANSPARENT, WS_POPUP, WS_THICKFRAME,
 };
 
 use super::{NoticePlacement, RingPlacement};
@@ -283,6 +284,11 @@ fn make_nonactivating(hwnd: HWND) -> Result<()> {
 /// single native thread: over the pin button the window takes clicks (it is
 /// how the user unpins), anywhere else the mouse falls through to whatever is
 /// under the transparent card.
+///
+/// Input pass-through needs `WS_EX_LAYERED` alongside `WS_EX_TRANSPARENT` —
+/// the transparent bit alone only affects same-thread painting, and the live
+/// card was measurably still swallowing clicks without the layered one. A
+/// layered attribute of full alpha keeps DirectComposition rendering intact.
 struct CardClickThrough {
     /// The card window's HWND, or 0 when no card is being watched.
     hwnd: AtomicIsize,
@@ -334,22 +340,28 @@ fn spawn_click_through_watch() {
     unsafe_code,
     reason = "cursor, window-bounds and style reads on the card HWND from a native watch thread"
 )]
-fn watch_click_through() {
+fn watch_click_through() -> ! {
     loop {
         let pinned = CARD_CLICK_THROUGH.pinned.load(Ordering::Acquire);
         let hwnd = CARD_CLICK_THROUGH.hwnd.load(Ordering::Acquire) as HWND;
         // SAFETY: a liveness read on the watched HWND.
         if !hwnd.is_null() && unsafe { IsWindow(hwnd) } != 0 {
-            // SAFETY: a style read and a style write that is guarded to fire
+            // SAFETY: style reads and a style write that is guarded to fire
             // only on a change, on the card window's HWND.
             unsafe {
-                let transparent =
-                    GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT.cast_signed() != 0;
-                let want_transparent = pinned && !cursor_over_pin_button(hwnd);
-                if transparent != want_transparent
-                    && let Some(style) = ex_style_with(hwnd, WS_EX_TRANSPARENT, want_transparent)
-                {
-                    SetWindowLongW(hwnd, GWL_EXSTYLE, style);
+                let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+                let active = ex & WS_EX_TRANSPARENT.cast_signed() != 0
+                    && ex & WS_EX_LAYERED.cast_signed() != 0;
+                let want = pinned && !cursor_over_pin_button(hwnd);
+                if want == active {
+                    continue;
+                }
+                let flag = (WS_EX_TRANSPARENT | WS_EX_LAYERED).cast_signed();
+                SetWindowLongW(hwnd, GWL_EXSTYLE, if want { ex | flag } else { ex & !flag });
+                if want {
+                    // Full alpha: the layering exists for hit-testing, not to
+                    // dim the card.
+                    SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
                 }
             }
         }
@@ -358,25 +370,6 @@ fn watch_click_through() {
         } else {
             std::time::Duration::from_millis(250)
         });
-    }
-}
-
-/// The card's extended style with `flag` set to `set`, or `None` when the
-/// window stopped answering style reads.
-#[expect(
-    unsafe_code,
-    reason = "extended-style read on a borrowed HWND from the watch thread"
-)]
-unsafe fn ex_style_with(hwnd: HWND, flag: u32, set: bool) -> Option<i32> {
-    // SAFETY: an extended-style read on the card window's HWND; a zero return
-    // is only an error with a last error set, and the card's style is never 0.
-    let style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };
-    if style == 0 {
-        None
-    } else if set {
-        Some(style | flag.cast_signed())
-    } else {
-        Some(style & !flag.cast_signed())
     }
 }
 

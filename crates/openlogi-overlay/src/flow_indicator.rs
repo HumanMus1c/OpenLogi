@@ -64,10 +64,11 @@ const HEADER_GAP: f32 = 6.0;
 const PIN_ICON_SIZE: f32 = 12.0;
 const MARGIN: f32 = 24.0;
 
-/// The four-way soft halo behind the pinned card's content: the four unit
-/// directions at full strength, then the same directions at twice the
-/// distance, faded — GPUI has no text shadow, so the halo is layered copies,
-/// and the second ring is what keeps it from reading as a hard outline.
+/// The four-way soft halo behind the pinned card's content, in physical
+/// pixels: the four unit directions at full strength, then the same
+/// directions at twice the distance, faded — GPUI has no text shadow, so the
+/// halo is layered copies, and the second ring is what keeps it from reading
+/// as a hard outline.
 const HALO_STRONG: f32 = 0.55;
 const HALO_SOFT: f32 = 0.25;
 const HALO_STEPS: [(f32, f32, f32); 8] = [
@@ -298,9 +299,6 @@ struct Palette {
     muted: Hsla,
     track: Hsla,
     border: Hsla,
-    /// The halo tint behind the pinned card's content — the colour that
-    /// contrasts with the text on an unknown desktop, alpha set per copy.
-    shadow: Hsla,
     hover: Hsla,
 }
 
@@ -313,7 +311,6 @@ impl Palette {
                 muted: rgb(0xA1_A1_A6).into(),
                 track: hsla(0.0, 0.0, 1.0, 0.12),
                 border: hsla(0.0, 0.0, 1.0, 0.10),
-                shadow: rgb(0x00_00_00).into(),
                 hover: hsla(0.0, 0.0, 1.0, 0.10),
             }
         } else {
@@ -323,16 +320,17 @@ impl Palette {
                 muted: rgb(0x6E_6E_73).into(),
                 track: hsla(0.0, 0.0, 0.0, 0.08),
                 border: hsla(0.0, 0.0, 0.0, 0.12),
-                shadow: rgb(0xFF_FF_FF).into(),
                 hover: hsla(0.0, 0.0, 0.0, 0.06),
             }
         }
     }
 }
 
-/// A halo copy's colour: the palette's tint at the step's strength.
-fn halo(tint: Hsla, alpha: f32) -> Hsla {
-    hsla(tint.h, tint.s, tint.l, alpha)
+/// A halo copy's colour: black at the step's strength. The halo is a drop
+/// shadow, so its job is to darken whatever desktop the transparent card
+/// floats over — the same black serves both themes.
+fn halo(alpha: f32) -> Hsla {
+    hsla(0.0, 0.0, 0.0, alpha)
 }
 
 fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
@@ -345,15 +343,16 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
 }
 
 /// A text run with the pinned card's four-way halo: offset copies behind the
-/// real one. `inset_0` bounds each copy to the wrapper so truncation clips
-/// like the original, and `left`/`top` then shift it by the step's offset.
+/// real one. The steps are physical pixels — divided by the scale factor so
+/// each copy lands on a whole device pixel and stays as crisp as the glyph
+/// it outlines — while `inset_0` keeps truncation against the wrapper.
 fn shadowed_text(
     text: SharedString,
     size: f32,
     weight: FontWeight,
     color: Hsla,
-    pal: &Palette,
     pinned: bool,
+    scale: f32,
 ) -> Div {
     let mut wrapper = div().relative().truncate();
     if pinned {
@@ -361,12 +360,12 @@ fn shadowed_text(
             div()
                 .absolute()
                 .inset_0()
-                .left(px(dx))
-                .top(px(dy))
+                .left(px(dx / scale))
+                .top(px(dy / scale))
                 .truncate()
                 .text_size(px(size))
                 .font_weight(weight)
-                .text_color(halo(pal.shadow, alpha))
+                .text_color(halo(alpha))
                 .child(text.clone())
         }));
     }
@@ -380,25 +379,18 @@ fn shadowed_text(
     )
 }
 
-/// An SVG glyph with the same halo, the copies nudged instead of inset so the
-/// antialiasing of the shifted glyphs stays crisp.
-fn shadowed_icon(
-    path: &'static str,
-    icon_size: f32,
-    color: Hsla,
-    pal: &Palette,
-    pinned: bool,
-) -> Div {
+/// An SVG glyph with the same halo, the copies nudged by whole device pixels.
+fn shadowed_icon(path: &'static str, icon_size: f32, color: Hsla, pinned: bool, scale: f32) -> Div {
     let mut wrapper = div().relative().w(px(icon_size)).h(px(icon_size));
     if pinned {
         wrapper = wrapper.children(HALO_STEPS.map(|(dx, dy, alpha)| {
             svg()
                 .path(path)
                 .size(px(icon_size))
-                .text_color(halo(pal.shadow, alpha))
+                .text_color(halo(alpha))
                 .absolute()
-                .left(px(dx))
-                .top(px(dy))
+                .left(px(dx / scale))
+                .top(px(dy / scale))
         }));
     }
     wrapper.child(svg().path(path).size(px(icon_size)).text_color(color))
@@ -406,11 +398,11 @@ fn shadowed_icon(
 
 /// The progress bar's halo: the same four-way pattern as a blurred box shadow,
 /// which follows the bar's rounded corners.
-fn bar_shadows(pal: &Palette) -> Vec<BoxShadow> {
+fn bar_shadows(scale: f32) -> Vec<BoxShadow> {
     HALO_STEPS
         .iter()
         .map(|(dx, dy, alpha)| {
-            BoxShadow::new(px(*dx), px(*dy), halo(pal.shadow, *alpha)).blur_radius(px(2.0))
+            BoxShadow::new(px(dx / scale), px(dy / scale), halo(*alpha)).blur_radius(px(2.0))
         })
         .collect()
 }
@@ -499,7 +491,7 @@ impl FlowIndicatorView {
         })
     }
 
-    fn row_view(row: &Row, pal: &Palette, pinned: bool) -> impl IntoElement + use<> {
+    fn row_view(row: &Row, pal: &Palette, pinned: bool, scale: f32) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
@@ -516,7 +508,7 @@ impl FlowIndicatorView {
                     .h(px(LINE_HEIGHT))
                     .line_height(px(LINE_HEIGHT))
                     .child(div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
-                        shadowed_icon(kind_icon(row.kind), ICON_SIZE, pal.muted, pal, pinned),
+                        shadowed_icon(kind_icon(row.kind), ICON_SIZE, pal.muted, pinned, scale),
                     ))
                     .child(
                         shadowed_text(
@@ -524,14 +516,14 @@ impl FlowIndicatorView {
                             16.0,
                             FontWeight::MEDIUM,
                             pal.text,
-                            pal,
                             pinned,
+                            scale,
                         )
                         .flex_1()
                         .min_w_0(),
                     )
                     .when(row.online && row.charging, |line| {
-                        line.child(shadowed_icon(BOLT_ICON, 12.0, color, pal, pinned).flex_none())
+                        line.child(shadowed_icon(BOLT_ICON, 12.0, color, pinned, scale).flex_none())
                     })
                     .when(!row.online, |line| {
                         line.child(shadowed_text(
@@ -539,8 +531,8 @@ impl FlowIndicatorView {
                             10.0,
                             FontWeight::NORMAL,
                             pal.muted,
-                            pal,
                             pinned,
+                            scale,
                         ))
                     })
                     .child(shadowed_text(
@@ -548,8 +540,8 @@ impl FlowIndicatorView {
                         16.0,
                         FontWeight::SEMIBOLD,
                         color,
-                        pal,
                         pinned,
+                        scale,
                     )),
             )
             .child(
@@ -558,7 +550,7 @@ impl FlowIndicatorView {
                     .w_full()
                     .rounded_full()
                     .bg(pal.track)
-                    .when(pinned, |track| track.shadow(bar_shadows(pal)))
+                    .when(pinned, |track| track.shadow(bar_shadows(scale)))
                     .when(row.fill.is_some(), |track| {
                         track.child(
                             div()
@@ -566,7 +558,7 @@ impl FlowIndicatorView {
                                 .w(px(fill_width))
                                 .rounded_full()
                                 .bg(color)
-                                .when(pinned, |fill| fill.shadow(bar_shadows(pal))),
+                                .when(pinned, |fill| fill.shadow(bar_shadows(scale))),
                         )
                     }),
             )
@@ -576,6 +568,7 @@ impl FlowIndicatorView {
         &self,
         pal: &Palette,
         pinned: bool,
+        scale: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         div()
@@ -620,17 +613,17 @@ impl FlowIndicatorView {
                                 PIN_ICON,
                                 PIN_ICON_SIZE,
                                 if pinned { pal.text } else { pal.muted },
-                                pal,
                                 pinned,
+                                scale,
                             )),
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(ROW_GAP))
-                    .children(self.rows.iter().map(|row| Self::row_view(row, pal, pinned))),
+                div().flex().flex_col().gap(px(ROW_GAP)).children(
+                    self.rows
+                        .iter()
+                        .map(|row| Self::row_view(row, pal, pinned, scale)),
+                ),
             )
     }
 
@@ -667,7 +660,9 @@ impl Render for FlowIndicatorView {
         }
         let pinned = self.pinned.get();
         let pal = Palette::for_dark(self.dark_mode(window));
-        let root = div().size_full().child(self.card(&pal, pinned, cx));
+        let root = div()
+            .size_full()
+            .child(self.card(&pal, pinned, window.scale_factor(), cx));
         #[cfg(target_os = "linux")]
         let root = Self::with_drag(root, cx);
         root
@@ -1100,8 +1095,12 @@ impl FlowIndicator {
                 view.rows = rows;
                 view.visible = true;
                 view.mode = settings_mode;
+                // Rewrite the z-order only when the live bit disagrees: an
+                // already-topmost window must not hear about it every tick.
                 #[cfg(target_os = "windows")]
-                set_topmost(window, want_topmost);
+                if window_is_topmost(window) != Some(want_topmost) {
+                    set_topmost(window, want_topmost);
+                }
                 if window.bounds().size != card {
                     window.resize(card);
                 }
@@ -1319,6 +1318,37 @@ const fn is_layer_shell(_kind: &WindowKind) -> bool {
     false
 }
 
+/// The card window's Win32 handle, for the style and z-order adjustments the
+/// platform's window kinds cannot express.
+#[cfg(target_os = "windows")]
+fn card_hwnd(window: &Window) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use windows_sys::Win32::Foundation::HWND;
+
+    let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
+    let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(handle.hwnd.get() as HWND)
+}
+
+/// Whether the card's window currently carries the topmost bit.
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "an extended-style read on the live GPUI window on its UI thread"
+)]
+fn window_is_topmost(window: &Window) -> Option<bool> {
+    let hwnd = card_hwnd(window)?;
+    // SAFETY: a style read on the live HWND owned by `window`.
+    let style = unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongW(
+            hwnd,
+            windows_sys::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE,
+        )
+    };
+    Some(style & TOPMOST_BIT != 0)
+}
+
 #[cfg(target_os = "windows")]
 #[expect(
     unsafe_code,
@@ -1376,13 +1406,9 @@ fn set_topmost(window: &Window, topmost: bool) {
         HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
     };
 
-    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+    let Some(hwnd) = card_hwnd(window) else {
         return;
     };
-    let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        return;
-    };
-    let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
     // SAFETY: a documented z-order change on the live HWND owned by `window`,
     // on the thread GPUI requires.
     unsafe {
