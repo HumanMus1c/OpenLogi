@@ -539,21 +539,33 @@ fn update_shadow_asset(rows: &[Row]) -> SharedString {
     let mut body = String::new();
     for (index, row) in rows.iter().enumerate() {
         let line_top = PADDING_Y + HEADER_LANE + HEADER_GAP + index as f32 * ROW_HEIGHT;
-        let y = line_top + LINE_HEIGHT / 2.0;
-        let x = PADDING_X + ICON_LANE + 8.0;
         hasher.write(row.name.as_bytes());
         let _ = write!(
             body,
-            r#"<text x="{x}" y="{y}" dominant-baseline="central" font-family="'Segoe UI', sans-serif" font-size="16" font-weight="500" xml:space="preserve">{}</text>"#,
+            r#"<text x="{}" y="{}" dominant-baseline="central" font-family="'Segoe UI', sans-serif" font-size="16" font-weight="500" xml:space="preserve">{}</text>"#,
+            PADDING_X + ICON_LANE + 8.0,
+            line_top + LINE_HEIGHT / 2.0,
             escape(&row.name)
+        );
+        // The bar's track is a stable shape and carries most of the row's
+        // visual mass; its fill moves with the percentage and stays out.
+        let _ = write!(
+            body,
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\"/>",
+            PADDING_X,
+            line_top + LINE_HEIGHT + LINE_GAP,
+            CARD_WIDTH - PADDING_X * 2.0,
+            BAR_HEIGHT,
+            BAR_HEIGHT / 2.0
         );
     }
     let hash = hasher.finish();
+    // Two scales: the small one keeps the near field dense, the large one
+    // carries the glow far out; a real drop shadow has both.
     let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="{sigma}"/></filter></defs><g filter="url(#glow)" fill="#000">{body}</g></svg>"##,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="near" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter><filter id="far" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#near)" fill="black" fill-opacity="0.55">{body}</g><g filter="url(#far)" fill="black" fill-opacity="0.55">{body}</g></svg>"#,
         width = CARD_WIDTH,
         height = f32::from(card_size(rows.len()).height),
-        sigma = 5.0,
         body = body,
     );
     if let Ok(mut slot) = SHADOW_ASSET.lock() {
@@ -750,7 +762,7 @@ impl FlowIndicatorView {
                         .path(update_shadow_asset(&self.rows))
                         .absolute()
                         .inset_0()
-                        .text_color(hsla(0.0, 0.0, 0.0, 0.32)),
+                        .text_color(hsla(0.0, 0.0, 0.0, 0.4)),
                 )
             })
             .child(
