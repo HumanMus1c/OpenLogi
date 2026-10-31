@@ -424,14 +424,8 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> (SharedString, SharedString,
         height = f32::from(card_size(rows.len()).height),
         names = names,
     );
-    let fill_svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><g fill="white">{names}</g></svg>"#,
-        width = CARD_WIDTH,
-        height = f32::from(card_size(rows.len()).height),
-        names = names,
-    );
     if let Ok(mut slot) = SHADOW_ASSET.lock() {
-        *slot = Some((svg, border_svg, fill_svg));
+        *slot = Some((svg, border_svg, String::new()));
     }
     (
         SharedString::from(format!("{SHADOW_ASSET_PREFIX}{hash:016x}.svg")),
@@ -550,7 +544,7 @@ impl FlowIndicatorView {
         }
     }
 
-    fn row_view(row: &Row, pal: &Palette, pinned: bool) -> impl IntoElement + use<> {
+    fn row_view(row: &Row, pal: &Palette) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
@@ -574,11 +568,6 @@ impl FlowIndicatorView {
                                 .text_color(pal.muted),
                         ),
                     )
-                    // The name is drawn by the pinned shadow asset layers
-                    // (fill + stroke + blur share one source, so the border
-                    // belongs to the real glyphs); this slot only reserves
-                    // the layout width. Unpinned, the SVG layer is absent, so
-                    // the name draws here instead.
                     .child(
                         div()
                             .flex_1()
@@ -587,7 +576,7 @@ impl FlowIndicatorView {
                             .text_size(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(pal.text)
-                            .when(!pinned, |cell| cell.child(row.name.clone())),
+                            .child(row.name.clone()),
                     )
                     .when(row.online && row.charging, |line| {
                         line.child(
@@ -652,7 +641,7 @@ impl FlowIndicatorView {
             })
             .debug_selector(|| "flow-indicator-card".into())
             .when(pinned, |card| {
-                let (shadow, border, fill) = update_shadow_asset(&self.rows, dark);
+                let (shadow, border, _fill) = update_shadow_asset(&self.rows, dark);
                 card.child(svg()
                         .path(shadow)
                         .absolute()
@@ -671,7 +660,9 @@ impl FlowIndicatorView {
                         .inset_0()
                         .text_color(hsla(0.0, 0.0, 0.0, 1.0)),
                 )
-                .child(svg().path(fill).absolute().inset_0().text_color(pal.text))
+                // No fill layer: GPUI draws the text itself with the
+                // platform rasteriser (hinted, gamma-corrected); the stroke
+                // outlines those same glyphs 0.1px out.
             })
             .child(
                 div()
@@ -706,7 +697,7 @@ impl FlowIndicatorView {
                     .flex()
                     .flex_col()
                     .gap(px(ROW_GAP))
-                    .children(self.rows.iter().map(|row| Self::row_view(row, pal, pinned))),
+                    .children(self.rows.iter().map(|row| Self::row_view(row, pal))),
             )
     }
 
