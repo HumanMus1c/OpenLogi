@@ -27,6 +27,10 @@ pub(crate) use native::make_card_frameless;
 #[cfg(target_os = "windows")]
 pub(crate) use native::set_card_click_through;
 
+/// Shift the card's window by logical pixels; see [`native::shift_card`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::shift_card;
+
 /// One native cursor/monitor snapshot, kept through bootstrap-window creation.
 pub(crate) struct RingPlacement {
     display_id: DisplayId,

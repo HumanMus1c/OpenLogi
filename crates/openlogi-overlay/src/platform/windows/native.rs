@@ -28,7 +28,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::{NoticePlacement, RingPlacement};
-use crate::flow_indicator::{HEADER_LANE, PADDING_X, PADDING_Y};
+use crate::flow_indicator::{GLOW_MARGIN, HEADER_LANE, PADDING_X, PADDING_Y};
 
 impl RingPlacement {
     pub(crate) fn capture(_cx: &mut App) -> Result<Self> {
@@ -408,9 +408,11 @@ unsafe fn cursor_over_pin_button(hwnd: HWND) -> bool {
         let scaled = |logical: f32| logical as i64 * dpi / 96;
         let right = i64::from(bounds.right);
         let grace = dpi / 96;
-        let button_left = right - scaled(PADDING_X) - scaled(HEADER_LANE);
-        let button_right = right - scaled(PADDING_X);
-        let button_top = i64::from(bounds.top) + scaled(PADDING_Y);
+        // The pinned window carries the glow margin around the card, so the
+        // button sits that much further inside.
+        let button_left = right - scaled(PADDING_X + GLOW_MARGIN) - scaled(HEADER_LANE);
+        let button_right = right - scaled(PADDING_X + GLOW_MARGIN);
+        let button_top = i64::from(bounds.top) + scaled(PADDING_Y + GLOW_MARGIN);
         let button_bottom = button_top + scaled(HEADER_LANE);
         i64::from(cursor.x) >= button_left - grace
             && i64::from(cursor.x) <= button_right + grace
@@ -444,6 +446,57 @@ pub(crate) fn set_card_visible(window: &Window, visible: bool) {
     // its visibility state.
     unsafe {
         ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    }
+}
+
+/// Move the card's window by a logical-pixel offset without resizing it: the
+/// pin toggle grows the window for the glow margin and shifts it back, so the
+/// card itself stays put.
+#[expect(
+    unsafe_code,
+    reason = "a position change on the live GPUI window's HWND, on its UI thread"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the scaled deltas are a few dozen pixels; the rounding loses nothing"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the DPI and the pixel deltas are far below f32's exact range"
+)]
+pub(crate) fn shift_card(window: &Window, dx: f32, dy: f32) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        warn!("could not get the card window handle to shift it");
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        warn!("the card window has no Win32 handle to shift");
+        return;
+    };
+    let hwnd = handle.hwnd.get() as HWND;
+    // SAFETY: a documented position change on the live HWND owned by
+    // `window`, on the thread GPUI requires.
+    unsafe {
+        let mut bounds = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(hwnd, &raw mut bounds) == 0 {
+            warn!("could not read the card window bounds to shift it");
+            return;
+        }
+        let scale = i64::from(GetDpiForWindow(hwnd)) as f32 / 96.0;
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            bounds.left + (dx * scale).round() as i32,
+            bounds.top + (dy * scale).round() as i32,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 

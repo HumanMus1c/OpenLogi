@@ -201,6 +201,31 @@ fn card_size(rows: usize) -> Size<gpui::Pixels> {
     )
 }
 
+/// The room the pinned card's far glow needs around the card, in logical
+/// pixels — about eighteen device pixels at 125% scale. The window is only
+/// this much larger while pinned; a surface cannot paint past its own edge,
+/// so an eighteen-pixel glow is impossible without it.
+pub(crate) const GLOW_MARGIN: f32 = 14.0;
+
+/// The far tail of the pinned card's shadow. Beyond the five-pixel glyph
+/// stamps a real blur has washed the glyphs into the card's own silhouette,
+/// so the tail is that silhouette: rounded layers expanding from the card's
+/// edge to the window's edge at fading strength, in logical pixels.
+const CARD_GLOW_LAYERS: [(f32, f32); 4] = [(5.0, 0.05), (8.0, 0.04), (11.0, 0.03), (14.0, 0.02)];
+
+/// The window size for a card: the card itself, grown by the glow margin on
+/// every side while pinned.
+fn window_size(rows: usize, pinned: bool) -> Size<gpui::Pixels> {
+    let card = card_size(rows);
+    if !pinned {
+        return card;
+    }
+    size(
+        px(f32::from(card.width) + GLOW_MARGIN * 2.0),
+        px(f32::from(card.height) + GLOW_MARGIN * 2.0),
+    )
+}
+
 /// The bottom-right corner of `area`, inside the screen margin.
 fn bottom_right(area: Bounds<gpui::Pixels>, card: Size<gpui::Pixels>) -> Point<gpui::Pixels> {
     let desired = point(
@@ -666,12 +691,25 @@ impl FlowIndicatorView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         div()
+            .relative()
             .w(px(CARD_WIDTH))
             .flex()
             .flex_col()
             .px(px(PADDING_X))
             .py(px(PADDING_Y))
             .rounded(px(RADIUS))
+            .when(pinned, |card| {
+                card.children(CARD_GLOW_LAYERS.map(|(expand, alpha)| {
+                    div()
+                        .absolute()
+                        .top(px(-expand))
+                        .right(px(-expand))
+                        .bottom(px(-expand))
+                        .left(px(-expand))
+                        .rounded(px(RADIUS + expand))
+                        .bg(halo(alpha))
+                }))
+            })
             .when(!pinned, |card| {
                 card.bg(pal.card)
                     .border(px(BORDER))
@@ -741,6 +779,20 @@ impl FlowIndicatorView {
                 pinned || self.mode == FlowIndicatorDisplayMode::Topmost,
             );
             crate::platform::set_card_click_through(window, pinned);
+            // Grow (or shrink) the window by the glow margin and shift it by
+            // half of that growth, so the card itself never moves.
+            let card = card_size(self.rows.len());
+            let grow = if pinned {
+                2.0 * GLOW_MARGIN
+            } else {
+                -2.0 * GLOW_MARGIN
+            };
+            window.resize(size(
+                px(f32::from(card.width) + grow),
+                px(f32::from(card.height) + grow),
+            ));
+            let shift = if pinned { -GLOW_MARGIN } else { GLOW_MARGIN };
+            crate::platform::shift_card(window, shift, shift);
         }
         info!(pinned, "Flow Indicator pin toggled");
         cx.notify();
@@ -756,6 +808,9 @@ impl Render for FlowIndicatorView {
         let pal = Palette::for_dark(self.dark_mode(window));
         let root = div()
             .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
             .child(self.card(&pal, pinned, window.scale_factor(), cx));
         #[cfg(target_os = "linux")]
         let root = Self::with_drag(root, cx);
@@ -888,7 +943,7 @@ impl FlowIndicatorView {
     #[cfg(target_os = "windows")]
     fn on_opened(&mut self, window: &mut Window, _origin: Point<gpui::Pixels>) {
         crate::platform::make_card_frameless(window);
-        window.resize(card_size(self.rows.len()));
+        window.resize(window_size(self.rows.len(), self.pinned.get()));
         // A card reopened while pinned keeps the pass-through that state
         // implies; a fresh window never inherits the old one's styles.
         if self.pinned.get() {
@@ -1178,7 +1233,7 @@ impl FlowIndicator {
             }
             // Update in place — a new window would lose the placement the
             // compositor chose for this one.
-            let card = card_size(rows.len());
+            let card = window_size(rows.len(), self.pinned.get());
             let settings_mode = self.settings.display_mode;
             #[cfg_attr(
                 not(target_os = "windows"),
@@ -1254,7 +1309,7 @@ impl FlowIndicator {
     }
 
     fn open(&mut self, rows: &[Row], remembered: Option<Point<gpui::Pixels>>, cx: &mut App) {
-        let card = card_size(rows.len());
+        let card = window_size(rows.len(), self.pinned.get());
         let origin = resolve_origin(cx, remembered, card);
         let bounds = Bounds::new(origin, card);
         // A Wayland compositor places ordinary windows itself, so ask for a
