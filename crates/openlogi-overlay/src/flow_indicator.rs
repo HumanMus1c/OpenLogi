@@ -375,6 +375,23 @@ const STAMP_KERNEL: [(f32, f32, f32); 20] = [
     (0.0, -3.0, 0.05),
 ];
 
+/// The transition ring hugging the glyph: eight copies one device pixel out,
+/// in the shadow colour at partial strength. It sits between the glyph's
+/// antialiased edge and the blur outside, restoring the edge contrast the
+/// blur copies take away — the ring reads as the shadow darkening where it
+/// meets the text, not as a stroke.
+const RING_OFFSETS: [(f32, f32); 8] = [
+    (1.0, 0.0),
+    (-1.0, 0.0),
+    (0.0, 1.0),
+    (0.0, -1.0),
+    (1.0, 1.0),
+    (1.0, -1.0),
+    (-1.0, 1.0),
+    (-1.0, -1.0),
+];
+const RING_ALPHA: f32 = 0.3;
+
 /// A text run with the blurred shadow behind it.
 fn shadowed_text(
     text: SharedString,
@@ -386,18 +403,31 @@ fn shadowed_text(
 ) -> Div {
     let mut wrapper = div().relative().truncate();
     if pinned {
-        wrapper = wrapper.children(STAMP_KERNEL.map(|(dx, dy, alpha)| {
-            div()
-                .absolute()
-                .inset_0()
-                .left(px(dx / scale))
-                .top(px(dy / scale))
-                .truncate()
-                .text_size(px(size))
-                .font_weight(weight)
-                .text_color(halo(alpha))
-                .child(text.clone())
-        }));
+        wrapper = wrapper
+            .children(STAMP_KERNEL.map(|(dx, dy, alpha)| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .left(px(dx / scale))
+                    .top(px(dy / scale))
+                    .truncate()
+                    .text_size(px(size))
+                    .font_weight(weight)
+                    .text_color(halo(alpha))
+                    .child(text.clone())
+            }))
+            .children(RING_OFFSETS.map(|(dx, dy)| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .left(px(dx / scale))
+                    .top(px(dy / scale))
+                    .truncate()
+                    .text_size(px(size))
+                    .font_weight(weight)
+                    .text_color(halo(RING_ALPHA))
+                    .child(text.clone())
+            }));
     }
     wrapper.child(
         div()
@@ -413,15 +443,25 @@ fn shadowed_text(
 fn shadowed_icon(path: &'static str, icon_size: f32, color: Hsla, pinned: bool, scale: f32) -> Div {
     let mut wrapper = div().relative().w(px(icon_size)).h(px(icon_size));
     if pinned {
-        wrapper = wrapper.children(STAMP_KERNEL.map(|(dx, dy, alpha)| {
-            svg()
-                .path(path)
-                .size(px(icon_size))
-                .text_color(halo(alpha))
-                .absolute()
-                .left(px(dx / scale))
-                .top(px(dy / scale))
-        }));
+        wrapper = wrapper
+            .children(STAMP_KERNEL.map(|(dx, dy, alpha)| {
+                svg()
+                    .path(path)
+                    .size(px(icon_size))
+                    .text_color(halo(alpha))
+                    .absolute()
+                    .left(px(dx / scale))
+                    .top(px(dy / scale))
+            }))
+            .children(RING_OFFSETS.map(|(dx, dy)| {
+                svg()
+                    .path(path)
+                    .size(px(icon_size))
+                    .text_color(halo(RING_ALPHA))
+                    .absolute()
+                    .left(px(dx / scale))
+                    .top(px(dy / scale))
+            }));
     }
     wrapper.child(svg().path(path).size(px(icon_size)).text_color(color))
 }
