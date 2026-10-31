@@ -59,13 +59,6 @@ pub(crate) fn set_card_click_through(window: &gpui::Window, pinned: bool) {
     windows::set_card_click_through(window, pinned);
 }
 
-/// Shift the card's window by logical pixels; see
-/// [`windows::shift_card`].
-#[cfg(target_os = "windows")]
-pub(crate) fn shift_card(window: &gpui::Window, dx: f32, dy: f32) {
-    windows::shift_card(window, dx, dy);
-}
-
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
