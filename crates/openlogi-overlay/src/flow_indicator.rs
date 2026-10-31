@@ -424,7 +424,7 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
             let _ = write!(
                 names,
                 r#"<g transform="translate({} {}) scale(0.75)" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none">{}</g>"#,
-                PADDING_X,
+                PADDING_X + (ICON_LANE - ICON_SIZE) / 2.0,
                 line_top + (LINE_HEIGHT - ICON_SIZE) / 2.0,
                 body
             );
@@ -583,14 +583,13 @@ impl FlowIndicatorView {
                     .h(px(LINE_HEIGHT))
                     .line_height(px(LINE_HEIGHT))
                     .child({
+                        // The glyph centres in its lane and in the line, so it
+                        // sits on the same horizontal as the texts; the ring
+                        // copies ride the glyph's own box.
                         let icon = kind_icon(row.kind);
-                        let mut lane = div()
-                            .relative()
-                            .w(px(ICON_LANE))
-                            .h(px(ICON_LANE))
-                            .flex_none();
+                        let mut icon_box = div().relative().w(px(ICON_SIZE)).h(px(ICON_SIZE));
                         if pinned {
-                            lane = lane.children(RING_DIRECTIONS.map(|(dx, dy)| {
+                            icon_box = icon_box.children(RING_DIRECTIONS.map(|(dx, dy)| {
                                 svg()
                                     .path(icon)
                                     .size(px(ICON_SIZE))
@@ -600,7 +599,16 @@ impl FlowIndicatorView {
                                     .top(px(dy / scale))
                             }));
                         }
-                        lane.child(svg().path(icon).size(px(ICON_SIZE)).text_color(pal.muted))
+                        icon_box = icon_box
+                            .child(svg().path(icon).size(px(ICON_SIZE)).text_color(pal.muted));
+                        div()
+                            .w(px(ICON_LANE))
+                            .h(px(ICON_LANE))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon_box)
                     })
                     .child({
                         // The hairline border comes from GPUI's own glyphs —
