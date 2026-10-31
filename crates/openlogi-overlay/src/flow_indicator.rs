@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::hash::Hasher as _;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 #[cfg(not(target_os = "windows"))]
@@ -19,9 +19,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, Context, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowHandle, WindowKind, WindowOptions, div, hsla, point, px, rgb, size,
-    svg,
+    Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle,
+    WindowKind, WindowOptions, div, hsla, point, px, rgb, size, svg,
 };
 #[cfg(target_os = "linux")]
 use gpui::{Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
@@ -36,8 +35,6 @@ use openlogi_ipc::Observation;
 use openlogi_ui::action_icons::{PIN_ICON, icon_body};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
-
-use crate::appearance::Appearance;
 
 /// Card width at 100% scale.
 const CARD_WIDTH: f32 = 300.0;
@@ -92,27 +89,21 @@ const VALUE_SHADOW_STEPS: [(f32, f32, f32); 16] = [
     (-1.4, -1.4, 0.06),
 ];
 
-/// The pinned card's decoration ink, one scheme per theme: `ring` is the edge
-/// the glyph copies paint, `glow` tints the soft shadow. The ink has to sit on
-/// the opposite side of the theme's text; a dark edge around the light theme's
-/// near-black glyphs only thickens them into a smudge.
+/// The pinned card's decoration ink: `ring` is the edge the glyph copies
+/// paint, `glow` tints the soft shadow. The card keeps one scheme in both OS
+/// themes, so the ink only has to sit on the opposite side of its own light
+/// text; a dark edge around dark glyphs would read as a bolder, smeared
+/// weight instead of a halo.
 #[derive(Clone, Copy)]
 struct Ink {
     ring: Hsla,
     glow: Hsla,
 }
 
-fn shadow_ink(dark: bool) -> Ink {
-    if dark {
-        Ink {
-            ring: hsla(0.0, 0.0, 0.0, 0.4),
-            glow: hsla(0.0, 0.0, 0.18, 0.8),
-        }
-    } else {
-        Ink {
-            ring: hsla(0.0, 0.0, 1.0, 0.6),
-            glow: hsla(0.0, 0.0, 1.0, 0.8),
-        }
+fn shadow_ink() -> Ink {
+    Ink {
+        ring: hsla(0.0, 0.0, 0.0, 0.4),
+        glow: hsla(0.0, 0.0, 0.18, 0.8),
     }
 }
 
@@ -144,9 +135,6 @@ pub(crate) struct Settings {
     pub(crate) show_offline: bool,
     pub(crate) max_devices: usize,
     pub(crate) display_mode: FlowIndicatorDisplayMode,
-    /// The panel's light/dark preference; the card follows it over the OS's
-    /// whenever it is not `System`.
-    pub(crate) appearance: openlogi_core::config::Appearance,
 }
 
 impl Default for Settings {
@@ -164,7 +152,6 @@ impl From<&AppSettings> for Settings {
             // writes the valid range.
             max_devices: usize::from(settings.flow_indicator_row_limit()),
             display_mode: settings.flow_indicator_display_mode,
-            appearance: settings.appearance,
         }
     }
 }
@@ -353,25 +340,16 @@ struct Palette {
 }
 
 impl Palette {
-    fn for_dark(dark: bool) -> Self {
-        if dark {
-            Self {
-                card: hsla(0.0, 0.0, 0.10, 0.94),
-                text: rgb(0xD6_D6_DA).into(),
-                muted: rgb(0x9A_9A_9E).into(),
-                track: hsla(0.0, 0.0, 1.0, 0.12),
-                border: hsla(0.0, 0.0, 1.0, 0.10),
-                hover: hsla(0.0, 0.0, 1.0, 0.10),
-            }
-        } else {
-            Self {
-                card: hsla(0.0, 0.0, 1.0, 0.96),
-                text: rgb(0x1D_1D_1F).into(),
-                muted: rgb(0x6E_6E_73).into(),
-                track: hsla(0.0, 0.0, 0.0, 0.08),
-                border: hsla(0.0, 0.0, 0.0, 0.12),
-                hover: hsla(0.0, 0.0, 0.0, 0.06),
-            }
+    /// The overlay is a floating HUD, so it keeps the dark scheme whatever the
+    /// OS theme is — the same fixed look the transient notices use.
+    fn dark() -> Self {
+        Self {
+            card: hsla(0.0, 0.0, 0.10, 0.94),
+            text: rgb(0xD6_D6_DA).into(),
+            muted: rgb(0x9A_9A_9E).into(),
+            track: hsla(0.0, 0.0, 1.0, 0.12),
+            border: hsla(0.0, 0.0, 1.0, 0.10),
+            hover: hsla(0.0, 0.0, 1.0, 0.10),
         }
     }
 }
@@ -481,19 +459,10 @@ fn update_shadow_asset(rows: &[Row]) -> SharedString {
 /// What the widget should show: disabled, empty, or a row set.
 struct FlowIndicatorView {
     rows: Vec<Row>,
-    /// The desktop's mode, watched because the window's own report can be
-    /// stuck at Light for a session started before the settings portal.
-    appearance: Arc<Appearance>,
-    /// Repaints on the platform's own appearance change; the watched mode
-    /// repaints through the tick instead.
-    appearance_subscription: Option<Subscription>,
     /// False while settings hide the card: render nothing. The window itself
     /// is shrunk to a transparent 1x1 on Wayland and hidden natively on
     /// Windows, so its placement survives the toggle.
     visible: bool,
-    /// The panel's light/dark preference, watched so the card follows the
-    /// settings app's theme over the OS's; `System` defers to the platform.
-    appearance_preference: openlogi_core::config::Appearance,
     /// The pin toggle's state, shared with the owner: the view's button writes
     /// it, and a window reopen (a display-mode change) keeps the choice.
     pinned: Rc<Cell<bool>>,
@@ -529,13 +498,10 @@ struct PendingPlace {
 }
 
 impl FlowIndicatorView {
-    fn new(rows: Vec<Row>, appearance: Arc<Appearance>, pinned: Rc<Cell<bool>>) -> Self {
+    fn new(rows: Vec<Row>, pinned: Rc<Cell<bool>>) -> Self {
         Self {
             rows,
-            appearance,
-            appearance_subscription: None,
             visible: true,
-            appearance_preference: openlogi_core::config::Appearance::System,
             pinned,
             mode: FlowIndicatorDisplayMode::Normal,
             #[cfg(target_os = "linux")]
@@ -547,44 +513,13 @@ impl FlowIndicatorView {
         }
     }
 
-    /// Repaint when the platform reports an appearance change (the live path
-    /// on macOS and Windows).
-    fn observe_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.appearance_subscription =
-            Some(cx.observe_window_appearance(window, |_, _, cx| cx.notify()));
-    }
-
-    /// The watched mode wins once the desktop has reported one; until then
-    /// (and on platforms without a watcher) the window's own appearance is
-    /// the best answer available.
-    fn dark_mode(&self, window: &Window) -> bool {
-        match self.appearance_preference {
-            openlogi_core::config::Appearance::Light => false,
-            openlogi_core::config::Appearance::Dark => true,
-            openlogi_core::config::Appearance::System => {
-                self.appearance.is_dark().unwrap_or_else(|| {
-                    matches!(
-                        window.appearance(),
-                        WindowAppearance::Dark | WindowAppearance::VibrantDark
-                    )
-                })
-            }
-        }
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "one row's whole element tree reads top to bottom"
     )]
-    fn row_view(
-        row: &Row,
-        pal: &Palette,
-        pinned: bool,
-        scale: f32,
-        dark: bool,
-    ) -> impl IntoElement + use<> {
+    fn row_view(row: &Row, pal: &Palette, pinned: bool, scale: f32) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
-        let ink = shadow_ink(dark);
+        let ink = shadow_ink();
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
         div()
@@ -734,7 +669,6 @@ impl FlowIndicatorView {
         pal: &Palette,
         pinned: bool,
         scale: f32,
-        dark: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         div()
@@ -761,7 +695,7 @@ impl FlowIndicatorView {
                         .path(update_shadow_asset(&self.rows))
                         .absolute()
                         .inset_0()
-                        .text_color(shadow_ink(dark).glow),
+                        .text_color(shadow_ink().glow),
                 )
             })
             .child(
@@ -796,7 +730,7 @@ impl FlowIndicatorView {
                 div().flex().flex_col().gap(px(ROW_GAP)).children(
                     self.rows
                         .iter()
-                        .map(|row| Self::row_view(row, pal, pinned, scale, dark)),
+                        .map(|row| Self::row_view(row, pal, pinned, scale)),
                 ),
             )
     }
@@ -833,12 +767,10 @@ impl Render for FlowIndicatorView {
             return div().size_full();
         }
         let pinned = self.pinned.get();
-        let dark = self.dark_mode(window);
-        let pal = Palette::for_dark(dark);
-        let root =
-            div()
-                .size_full()
-                .child(self.card(&pal, pinned, window.scale_factor(), dark, cx));
+        let pal = Palette::dark();
+        let root = div()
+            .size_full()
+            .child(self.card(&pal, pinned, window.scale_factor(), cx));
         #[cfg(target_os = "linux")]
         let root = Self::with_drag(root, cx);
         root
@@ -1010,10 +942,6 @@ pub(crate) struct FlowIndicator {
     /// The config that names the rows; `None` until the first successful read.
     config: Option<Config>,
     inventory: Vec<DeviceInventory>,
-    /// The desktop's light/dark mode, shared with the view that paints it.
-    appearance: Arc<Appearance>,
-    /// The appearance revision the open card last painted.
-    appearance_revision: u64,
     /// The window exists but settings hide the card: it is not closed, which
     /// is the only way a Wayland compositor keeps the placement it chose for
     /// it. Wayland hides it as a transparent 1x1, Windows natively.
@@ -1039,18 +967,12 @@ pub(crate) struct FlowIndicator {
 }
 
 impl FlowIndicator {
-    pub(crate) fn new(
-        settings: Settings,
-        config: Option<Config>,
-        appearance: Arc<Appearance>,
-    ) -> Self {
+    pub(crate) fn new(settings: Settings, config: Option<Config>) -> Self {
         Self {
             settings,
             config,
             inventory: Vec::new(),
-            appearance_revision: appearance.revision(),
             hidden: false,
-            appearance,
             window: None,
             window_mode: None,
             layer_shell: false,
@@ -1091,7 +1013,6 @@ impl FlowIndicator {
                 self.settle_place(cx);
                 self.follow_pin(cx);
                 self.persist_position(cx);
-                self.follow_appearance(cx);
             }
         }
     }
@@ -1115,20 +1036,6 @@ impl FlowIndicator {
         }
         self.pinned_seen = self.pinned.get();
         self.sync(cx);
-    }
-
-    /// Repaint the open card when the watched mode flips. The platform's own
-    /// appearance signal repaints through the view's subscription; this covers
-    /// the mode the watcher owns (and a portal that was late to the bus).
-    fn follow_appearance(&mut self, cx: &mut App) {
-        let revision = self.appearance.revision();
-        if revision == self.appearance_revision {
-            return;
-        }
-        self.appearance_revision = revision;
-        if let Some(handle) = self.window.as_ref() {
-            let _ = handle.update(cx, |_, _, cx| cx.notify());
-        }
     }
 
     /// Persist where the user dragged the card. Called once a second with the
@@ -1262,7 +1169,6 @@ impl FlowIndicator {
             // compositor chose for this one.
             let card = card_size(rows.len());
             let settings_mode = self.settings.display_mode;
-            let preference = self.settings.appearance;
             #[cfg_attr(
                 not(target_os = "windows"),
                 expect(unused_variables, reason = "the live bit is Windows-only")
@@ -1272,7 +1178,6 @@ impl FlowIndicator {
                 view.rows = rows;
                 view.visible = true;
                 view.mode = settings_mode;
-                view.appearance_preference = preference;
                 // Rewrite the z-order only when the live bit disagrees: an
                 // already-topmost window must not hear about it every tick.
                 #[cfg(target_os = "windows")]
@@ -1347,34 +1252,24 @@ impl FlowIndicator {
         // ordinary window.
         let mode = self.effective_mode();
         let settings_mode = self.settings.display_mode;
-        let preference = self.settings.appearance;
         let attempts = window_attempts(mode, bounds);
         let mut layer_shell = false;
-        let appearance = Arc::clone(&self.appearance);
         let pinned = Rc::clone(&self.pinned);
         let opened = crate::platform::open_first(
             attempts.into_iter().map(|options| vec![options]).collect(),
             |options| {
                 layer_shell = is_layer_shell(&options.kind);
                 cx.open_window(options, |_, cx| {
-                    cx.new(|_| {
-                        FlowIndicatorView::new(
-                            rows.to_vec(),
-                            Arc::clone(&appearance),
-                            Rc::clone(&pinned),
-                        )
-                    })
+                    cx.new(|_| FlowIndicatorView::new(rows.to_vec(), Rc::clone(&pinned)))
                 })
             },
         );
         let Some(handle) = opened else {
             return;
         };
-        let configured = handle.update(cx, |view, window, cx| {
+        let configured = handle.update(cx, |view, window, _| {
             view.mode = settings_mode;
-            view.appearance_preference = preference;
             apply_display_mode(window, mode);
-            view.observe_appearance(window, cx);
             view.on_opened(window, origin);
         });
         if let Err(error) = configured {
@@ -1612,7 +1507,6 @@ fn set_topmost(window: &Window, topmost: bool) {
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
-    use std::sync::Arc;
 
     use super::{SavedPosition, card_size, clamp_origin};
     use gpui::{Bounds, point, px, size};
@@ -1656,22 +1550,20 @@ mod tests {
     }
 
     /// The pinned card's edge only separates glyphs if it sits on the
-    /// opposite side of the theme's text; one near the text's own lightness
+    /// opposite side of the card's text; one near the text's own lightness
     /// reads as a bolder weight and smears the letters together.
     #[test]
-    fn the_ring_ink_contrasts_the_theme_text() {
+    fn the_ring_ink_contrasts_the_card_text() {
         use super::{Palette, shadow_ink};
 
-        for dark in [true, false] {
-            let text = Palette::for_dark(dark).text;
-            let ring = shadow_ink(dark).ring;
-            assert!(
-                (ring.l - text.l).abs() > 0.5,
-                "dark={dark}: ring lightness {} vs text {}",
-                ring.l,
-                text.l
-            );
-        }
+        let text = Palette::dark().text;
+        let ring = shadow_ink().ring;
+        assert!(
+            (ring.l - text.l).abs() > 0.5,
+            "ring lightness {} vs text {}",
+            ring.l,
+            text.l
+        );
     }
 
     #[gpui::test]
@@ -1688,13 +1580,7 @@ mod tests {
             online: true,
             kind: DeviceKind::Mouse,
         }];
-        let window = cx.add_window(|_, _| {
-            FlowIndicatorView::new(
-                rows,
-                Arc::new(crate::appearance::Appearance::new()),
-                Rc::new(Cell::new(false)),
-            )
-        });
+        let window = cx.add_window(|_, _| FlowIndicatorView::new(rows, Rc::new(Cell::new(false))));
         cx.run_until_parked();
         let shown = window
             .read_with(cx, |view, _| view.rows.len())
@@ -1724,13 +1610,8 @@ mod tests {
             .collect::<Vec<_>>();
         let window = card_size(rows.len());
         let pinned = Rc::new(Cell::new(false));
-        let (_view, cx) = cx.add_window_view(|_, _| {
-            FlowIndicatorView::new(
-                rows,
-                Arc::new(crate::appearance::Appearance::new()),
-                Rc::clone(&pinned),
-            )
-        });
+        let (_view, cx) =
+            cx.add_window_view(|_, _| FlowIndicatorView::new(rows, Rc::clone(&pinned)));
         cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(400.0)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let card = cx
@@ -1756,13 +1637,8 @@ mod tests {
             kind: DeviceKind::Mouse,
         }];
         let pinned = Rc::new(Cell::new(true));
-        let (_view, cx) = cx.add_window_view(|_, _| {
-            FlowIndicatorView::new(
-                rows,
-                Arc::new(crate::appearance::Appearance::new()),
-                Rc::clone(&pinned),
-            )
-        });
+        let (_view, cx) =
+            cx.add_window_view(|_, _| FlowIndicatorView::new(rows, Rc::clone(&pinned)));
         cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(400.0)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let card = cx
@@ -1795,13 +1671,8 @@ mod tests {
             kind: DeviceKind::Mouse,
         }];
         let pinned = Rc::new(Cell::new(false));
-        let (view, cx) = cx.add_window_view(|_, _| {
-            FlowIndicatorView::new(
-                rows,
-                Arc::new(crate::appearance::Appearance::new()),
-                Rc::clone(&pinned),
-            )
-        });
+        let (view, cx) =
+            cx.add_window_view(|_, _| FlowIndicatorView::new(rows, Rc::clone(&pinned)));
         cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(400.0)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let pin = cx
