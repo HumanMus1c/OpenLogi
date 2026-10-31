@@ -7,9 +7,10 @@
 //! mtime), and the position from an overlay-owned file beside it.
 
 use std::cell::Cell;
+use std::hash::Hasher as _;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 #[cfg(not(target_os = "windows"))]
@@ -501,6 +502,66 @@ fn bar_shadows(scale: f32) -> Vec<BoxShadow> {
         .collect()
 }
 
+/// The far tail of the pinned card's shadow, as a generated SVG asset: the
+/// device names laid out where the card draws them, run through
+/// `feGaussianBlur`. resvg rasterises the filter into an alpha mask that
+/// GPUI tints, which is a true Gaussian glow at any radius — the stamped
+/// copies stop at five pixels because beyond that their glyph detail shows.
+/// The values are left out on purpose: they change every observation, and
+/// each distinct string set would grow GPUI's raster cache for good.
+pub(crate) const SHADOW_ASSET_PREFIX: &str = "flow-shadow-";
+static SHADOW_ASSET: Mutex<Option<String>> = Mutex::new(None);
+
+/// Serve the generated shadow to the asset source, for paths the view
+/// announced through [`update_shadow_asset`].
+pub(crate) fn take_shadow_asset(path: &str) -> Option<String> {
+    path.strip_prefix(SHADOW_ASSET_PREFIX)?;
+    SHADOW_ASSET.lock().ok()?.clone()
+}
+
+/// Rebuild the shadow SVG for `rows` and return the asset path its raster
+/// must be cached under.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "row counts are single digits; the conversion is exact"
+)]
+fn update_shadow_asset(rows: &[Row]) -> SharedString {
+    use std::fmt::Write as _;
+
+    fn escape(name: &str) -> String {
+        name.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    let mut body = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        let line_top = PADDING_Y + HEADER_LANE + HEADER_GAP + index as f32 * ROW_HEIGHT;
+        let y = line_top + LINE_HEIGHT / 2.0;
+        let x = PADDING_X + ICON_LANE + 8.0;
+        hasher.write(row.name.as_bytes());
+        let _ = write!(
+            body,
+            r#"<text x="{x}" y="{y}" dominant-baseline="central" font-family="'Segoe UI', sans-serif" font-size="16" font-weight="500" xml:space="preserve">{}</text>"#,
+            escape(&row.name)
+        );
+    }
+    let hash = hasher.finish();
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><defs><filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="{sigma}"/></filter></defs><g filter="url(#glow)" fill="#000">{body}</g></svg>"##,
+        width = CARD_WIDTH,
+        height = f32::from(card_size(rows.len()).height),
+        sigma = 5.0,
+        body = body,
+    );
+    if let Ok(mut slot) = SHADOW_ASSET.lock() {
+        *slot = Some(svg);
+    }
+    SharedString::from(format!("{SHADOW_ASSET_PREFIX}{hash:016x}.svg"))
+}
+
 /// What the widget should show: disabled, empty, or a row set.
 struct FlowIndicatorView {
     rows: Vec<Row>,
@@ -683,6 +744,15 @@ impl FlowIndicatorView {
                     .window_control_area(WindowControlArea::Drag)
             })
             .debug_selector(|| "flow-indicator-card".into())
+            .when(pinned, |card| {
+                card.child(
+                    svg()
+                        .path(update_shadow_asset(&self.rows))
+                        .absolute()
+                        .inset_0()
+                        .text_color(hsla(0.0, 0.0, 0.0, 0.32)),
+                )
+            })
             .child(
                 div()
                     .h(px(HEADER_LANE))

@@ -31,7 +31,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use gpui::AppContext as _;
+use gpui::{AppContext as _, AssetSource, SharedString};
+use std::borrow::Cow;
 use tracing::{debug, info, warn};
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
@@ -45,6 +46,26 @@ use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
     spawn_click_away_dismissal,
 };
+
+/// The overlay's asset source: the shared action glyphs, plus the Flow
+/// Indicator's generated shadow — the view rebuilds that SVG under a
+/// content-hashed path and hands the bytes over when GPUI asks for it.
+struct OverlayAssets;
+
+impl AssetSource for OverlayAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if path.starts_with(flow_indicator::SHADOW_ASSET_PREFIX)
+            && let Some(svg) = flow_indicator::take_shadow_asset(path)
+        {
+            return Ok(Some(Cow::Owned(svg.into_bytes())));
+        }
+        openlogi_ui::action_icons::ActionIcons.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        openlogi_ui::action_icons::ActionIcons.list(path)
+    }
+}
 
 #[expect(
     clippy::too_many_lines,
@@ -70,7 +91,7 @@ fn main() -> Result<()> {
 
     #[cfg(target_os = "linux")]
     platform::await_compositor();
-    let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
+    let mut app = gpui_platform::application().with_assets(OverlayAssets);
     // Application construction establishes GPUI's NSApplication subclass.
     // Asking AppKit for its singleton sooner creates a plain NSApplication,
     // which lacks the `platform` ivar GPUI needs. Set Accessory policy now:
