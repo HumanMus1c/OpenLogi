@@ -70,6 +70,38 @@ const MARGIN: f32 = 24.0;
 /// start a pixel away from the glyph — a copy hugging the outline reads as a
 /// bold weight, while a detached, decaying falloff is what reads as a soft
 /// shadow. GPUI has no text shadow, so the halo is layered copies.
+/// The value's soft shadow, drawn by GPUI itself: a generated SVG cannot
+/// carry the changing digits — its raster would cache under a new path on
+/// every percentage change and the atlas never evicts paths — so the
+/// reading's glow is a small disc of low-alpha copies instead.
+const VALUE_SHADOW_STEPS: [(f32, f32, f32); 16] = [
+    (1.0, 0.0, 0.10),
+    (-1.0, 0.0, 0.10),
+    (0.0, 1.0, 0.10),
+    (0.0, -1.0, 0.10),
+    (0.7, 0.7, 0.10),
+    (0.7, -0.7, 0.10),
+    (-0.7, 0.7, 0.10),
+    (-0.7, -0.7, 0.10),
+    (2.0, 0.0, 0.06),
+    (-2.0, 0.0, 0.06),
+    (0.0, 2.0, 0.06),
+    (0.0, -2.0, 0.06),
+    (1.4, 1.4, 0.06),
+    (1.4, -1.4, 0.06),
+    (-1.4, 1.4, 0.06),
+    (-1.4, -1.4, 0.06),
+];
+
+/// The shadow tint the generated SVG wears, shared with the value's copies.
+fn shadow_tint(dark: bool) -> Hsla {
+    if dark {
+        hsla(0.0, 0.0, 0.18, 0.8)
+    } else {
+        hsla(0.0, 0.0, 0.10, 0.8)
+    }
+}
+
 /// The hairline border's eight directions, in device pixels.
 const RING_DIRECTIONS: [(f32, f32); 8] = [
     (1.0, 0.0),
@@ -397,15 +429,6 @@ fn update_shadow_asset(rows: &[Row], dark: bool) -> SharedString {
                 body
             );
         }
-        // The value's mass as a capsule at its right-aligned seat: the
-        // percentage string changes every observation, so the number itself
-        // stays out of the content hash.
-        let _ = write!(
-            bars,
-            r#"<rect x="{}" y="{}" width="44" height="18" rx="9"/>"#,
-            CARD_WIDTH - PADDING_X - 44.0,
-            line_top + (LINE_HEIGHT - 18.0) / 2.0
-        );
         hasher.write(&[u8::from(row.charging), u8::from(row.online)]);
         // The bar's track is a stable shape and carries most of the row's
         // visual mass; its fill moves with the percentage and stays out.
@@ -537,7 +560,13 @@ impl FlowIndicatorView {
         clippy::too_many_lines,
         reason = "one row's whole element tree reads top to bottom"
     )]
-    fn row_view(row: &Row, pal: &Palette, pinned: bool, scale: f32) -> impl IntoElement + use<> {
+    fn row_view(
+        row: &Row,
+        pal: &Palette,
+        pinned: bool,
+        scale: f32,
+        dark: bool,
+    ) -> impl IntoElement + use<> {
         let color = color_paint(row.color, pal);
         let inner_width = CARD_WIDTH - PADDING_X * 2.0;
         let fill_width = f32::from(row.fill.unwrap_or(0)) / 100.0 * inner_width;
@@ -624,6 +653,22 @@ impl FlowIndicatorView {
                         let value = row.value.clone();
                         let mut cell = div().relative().truncate();
                         if pinned {
+                            let tint = shadow_tint(dark);
+                            cell = cell.children(VALUE_SHADOW_STEPS.map(|(dx, dy, alpha)| {
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .left(px(dx / scale))
+                                    .top(px(dy / scale))
+                                    .truncate()
+                                    .text_size(px(16.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(Hsla {
+                                        a: tint.a * alpha,
+                                        ..tint
+                                    })
+                                    .child(value.clone())
+                            }));
                             cell = cell.children(RING_DIRECTIONS.map(|(dx, dy)| {
                                 div()
                                     .absolute()
@@ -732,7 +777,7 @@ impl FlowIndicatorView {
                 div().flex().flex_col().gap(px(ROW_GAP)).children(
                     self.rows
                         .iter()
-                        .map(|row| Self::row_view(row, pal, pinned, scale)),
+                        .map(|row| Self::row_view(row, pal, pinned, scale, dark)),
                 ),
             )
     }
