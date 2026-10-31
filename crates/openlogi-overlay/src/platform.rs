@@ -52,6 +52,13 @@ pub(crate) fn make_card_frameless(window: &gpui::Window) {
     windows::make_card_frameless(window);
 }
 
+/// Let the pinned card's mouse fall through except over its pin button; see
+/// [`windows::set_card_click_through`].
+#[cfg(target_os = "windows")]
+pub(crate) fn set_card_click_through(window: &gpui::Window, pinned: bool) {
+    windows::set_card_click_through(window, pinned);
+}
+
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 

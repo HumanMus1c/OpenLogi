@@ -6,6 +6,8 @@
 use anyhow::{Context as _, Result, ensure};
 use gpui::{App, Bounds, DevicePixels, DisplayId, Pixels, Point, Size, Window, point, size};
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use tracing::{debug, warn};
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
@@ -18,13 +20,14 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SendMessageW, SetWindowLongW, SetWindowPos, ShowWindow, WM_SETTINGCHANGE, WS_CAPTION,
-    WS_EX_NOACTIVATE, WS_POPUP, WS_THICKFRAME,
+    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, GetWindowRect, IsWindow, SW_HIDE,
+    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SendMessageW, SetWindowLongW, SetWindowPos, ShowWindow, WM_SETTINGCHANGE,
+    WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_POPUP, WS_THICKFRAME,
 };
 
 use super::{NoticePlacement, RingPlacement};
+use crate::flow_indicator::{HEADER_LANE, PADDING_X, PADDING_Y};
 
 impl RingPlacement {
     pub(crate) fn capture(_cx: &mut App) -> Result<Self> {
@@ -274,6 +277,151 @@ fn make_nonactivating(hwnd: HWND) -> Result<()> {
             .context("keep the overlay window from taking the foreground");
     }
     Ok(())
+}
+
+/// The click-through switch of the pinned Flow Indicator card, watched by a
+/// single native thread: over the pin button the window takes clicks (it is
+/// how the user unpins), anywhere else the mouse falls through to whatever is
+/// under the transparent card.
+struct CardClickThrough {
+    /// The card window's HWND, or 0 when no card is being watched.
+    hwnd: AtomicIsize,
+    /// Whether the card is pinned right now.
+    pinned: AtomicBool,
+}
+
+static CARD_CLICK_THROUGH: CardClickThrough = CardClickThrough {
+    hwnd: AtomicIsize::new(0),
+    pinned: AtomicBool::new(false),
+};
+
+/// Make the pinned card pass the mouse through, or stop it from doing so.
+///
+/// `WS_EX_TRANSPARENT` is a whole-window switch, and the pin button must stay
+/// clickable — so while the card is pinned, a native watch thread clears the
+/// switch only while the cursor is over the button's rectangle. The watch is
+/// native because a pass-through window receives no mouse events of its own
+/// to react with; the style write happens only when the answer changes.
+pub(crate) fn set_card_click_through(window: &Window, pinned: bool) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        warn!("could not get the card window handle for click-through");
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        warn!("the card window has no Win32 handle for click-through");
+        return;
+    };
+    CARD_CLICK_THROUGH
+        .hwnd
+        .store(handle.hwnd.get(), Ordering::Release);
+    CARD_CLICK_THROUGH.pinned.store(pinned, Ordering::Release);
+    spawn_click_through_watch();
+}
+
+fn spawn_click_through_watch() {
+    static SPAWNED: OnceLock<()> = OnceLock::new();
+    SPAWNED.get_or_init(|| {
+        if let Err(error) = std::thread::Builder::new()
+            .name("openlogi-card-click-through".into())
+            .spawn(watch_click_through)
+        {
+            warn!(%error, "could not spawn the click-through watch");
+        }
+    });
+}
+
+#[expect(
+    unsafe_code,
+    reason = "cursor, window-bounds and style reads on the card HWND from a native watch thread"
+)]
+fn watch_click_through() {
+    loop {
+        let pinned = CARD_CLICK_THROUGH.pinned.load(Ordering::Acquire);
+        let hwnd = CARD_CLICK_THROUGH.hwnd.load(Ordering::Acquire) as HWND;
+        // SAFETY: a liveness read on the watched HWND.
+        if !hwnd.is_null() && unsafe { IsWindow(hwnd) } != 0 {
+            // SAFETY: a style read and a style write that is guarded to fire
+            // only on a change, on the card window's HWND.
+            unsafe {
+                let transparent =
+                    GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT.cast_signed() != 0;
+                let want_transparent = pinned && !cursor_over_pin_button(hwnd);
+                if transparent != want_transparent
+                    && let Some(style) = ex_style_with(hwnd, WS_EX_TRANSPARENT, want_transparent)
+                {
+                    SetWindowLongW(hwnd, GWL_EXSTYLE, style);
+                }
+            }
+        }
+        std::thread::sleep(if pinned {
+            std::time::Duration::from_millis(30)
+        } else {
+            std::time::Duration::from_millis(250)
+        });
+    }
+}
+
+/// The card's extended style with `flag` set to `set`, or `None` when the
+/// window stopped answering style reads.
+#[expect(
+    unsafe_code,
+    reason = "extended-style read on a borrowed HWND from the watch thread"
+)]
+unsafe fn ex_style_with(hwnd: HWND, flag: u32, set: bool) -> Option<i32> {
+    // SAFETY: an extended-style read on the card window's HWND; a zero return
+    // is only an error with a last error set, and the card's style is never 0.
+    let style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };
+    if style == 0 {
+        None
+    } else if set {
+        Some(style | flag.cast_signed())
+    } else {
+        Some(style & !flag.cast_signed())
+    }
+}
+
+/// Whether the cursor sits on the pin button: the header lane's right end,
+/// plus a 2 px grace so a click at the button's edge cannot slip through.
+///
+/// All geometry is physical pixels — the process is PerMonitorV2-aware, so
+/// the cursor and the window bounds are already physical — and the logical
+/// constants scale by the window's own DPI in integers.
+#[expect(
+    unsafe_code,
+    reason = "cursor and window-bounds reads on the card HWND from the watch thread"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the layout constants are whole logical pixels, so their f32→i64 conversion is exact"
+)]
+unsafe fn cursor_over_pin_button(hwnd: HWND) -> bool {
+    // SAFETY: cursor and window-bounds reads on the card window's HWND, plus
+    // its own DPI, all read-only.
+    unsafe {
+        let mut cursor = POINT::default();
+        if GetCursorPos(&raw mut cursor) == 0 {
+            return false;
+        }
+        let mut bounds = RECT::default();
+        if GetWindowRect(hwnd, &raw mut bounds) == 0 {
+            return false;
+        }
+        let dpi = i64::from(GetDpiForWindow(hwnd));
+        if dpi == 0 {
+            return false;
+        }
+        let scaled = |logical: f32| logical as i64 * dpi / 96;
+        let right = i64::from(bounds.right);
+        let grace = dpi / 48;
+        let button_left = right - scaled(PADDING_X) - scaled(HEADER_LANE);
+        let button_right = right - scaled(PADDING_X);
+        let button_top = i64::from(bounds.top) + scaled(PADDING_Y);
+        let button_bottom = button_top + scaled(HEADER_LANE);
+        i64::from(cursor.x) >= button_left - grace
+            && i64::from(cursor.x) <= button_right + grace
+            && i64::from(cursor.y) >= button_top - grace
+            && i64::from(cursor.y) <= button_bottom + grace
+    }
 }
 
 /// Take a window off the screen without destroying it, or bring it back

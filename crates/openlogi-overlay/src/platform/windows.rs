@@ -22,6 +22,11 @@ pub(crate) use native::set_card_visible;
 #[cfg(target_os = "windows")]
 pub(crate) use native::make_card_frameless;
 
+/// Watch the pinned card's click-through switch; see
+/// [`native::set_card_click_through`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::set_card_click_through;
+
 /// One native cursor/monitor snapshot, kept through bootstrap-window creation.
 pub(crate) struct RingPlacement {
     display_id: DisplayId,

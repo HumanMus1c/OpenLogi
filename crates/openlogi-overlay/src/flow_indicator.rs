@@ -40,8 +40,8 @@ use crate::appearance::Appearance;
 
 /// Card width at 100% scale.
 const CARD_WIDTH: f32 = 300.0;
-const PADDING_X: f32 = 16.0;
-const PADDING_Y: f32 = 14.0;
+pub(crate) const PADDING_X: f32 = 16.0;
+pub(crate) const PADDING_Y: f32 = 14.0;
 const BORDER: f32 = 1.0;
 const RADIUS: f32 = 12.0;
 /// One row: the line box, the 9 px gap, and the 6 px bar.
@@ -57,8 +57,9 @@ const ROW_GAP: f32 = 16.0;
 const ICON_SIZE: f32 = 18.0;
 const ICON_LANE: f32 = 22.0;
 /// The pin toggle's lane above the rows: its hit area, and the gap to the
-/// first row.
-const HEADER_LANE: f32 = 20.0;
+/// first row. The lane's right end is the button the Windows click-through
+/// watch keeps interactive; it reads these constants for that rectangle.
+pub(crate) const HEADER_LANE: f32 = 20.0;
 const HEADER_GAP: f32 = 6.0;
 const PIN_ICON_SIZE: f32 = 12.0;
 const MARGIN: f32 = 24.0;
@@ -344,8 +345,8 @@ fn color_paint(color: BatteryColor, pal: &Palette) -> Hsla {
 }
 
 /// A text run with the pinned card's four-way halo: offset copies behind the
-/// real one. The wrapper keeps the caller's layout slot; each copy truncates
-/// against the same bounds.
+/// real one. `inset_0` bounds each copy to the wrapper so truncation clips
+/// like the original, and `left`/`top` then shift it by the step's offset.
 fn shadowed_text(
     text: SharedString,
     size: f32,
@@ -356,10 +357,12 @@ fn shadowed_text(
 ) -> Div {
     let mut wrapper = div().relative().truncate();
     if pinned {
-        wrapper = wrapper.children(HALO_STEPS.map(|(_dx, _dy, alpha)| {
+        wrapper = wrapper.children(HALO_STEPS.map(|(dx, dy, alpha)| {
             div()
                 .absolute()
                 .inset_0()
+                .left(px(dx))
+                .top(px(dy))
                 .truncate()
                 .text_size(px(size))
                 .font_weight(weight)
@@ -645,10 +648,13 @@ impl FlowIndicatorView {
         let pinned = !self.pinned.get();
         self.pinned.set(pinned);
         #[cfg(target_os = "windows")]
-        set_topmost(
-            window,
-            pinned || self.mode == FlowIndicatorDisplayMode::Topmost,
-        );
+        {
+            set_topmost(
+                window,
+                pinned || self.mode == FlowIndicatorDisplayMode::Topmost,
+            );
+            crate::platform::set_card_click_through(window, pinned);
+        }
         info!(pinned, "Flow Indicator pin toggled");
         cx.notify();
     }
@@ -794,6 +800,11 @@ impl FlowIndicatorView {
     fn on_opened(&mut self, window: &mut Window, _origin: Point<gpui::Pixels>) {
         crate::platform::make_card_frameless(window);
         window.resize(card_size(self.rows.len()));
+        // A card reopened while pinned keeps the pass-through that state
+        // implies; a fresh window never inherits the old one's styles.
+        if self.pinned.get() {
+            crate::platform::set_card_click_through(window, true);
+        }
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
