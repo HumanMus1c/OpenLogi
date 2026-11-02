@@ -198,6 +198,12 @@ loaded for any Rust or `Cargo.toml` edit.
   worktree so parallel work doesn't collide; trivial fixes may go straight to master.
 - Commits are small and focused — split unrelated concerns into separate commits; never
   one giant unreviewable diff.
+- Every commit that changes behaviour or ownership adds or updates its entry in
+  [docs/plans/fork-ledger.md](docs/plans/fork-ledger.md) in the same commit: the
+  change, its root cause, the verification evidence (or that none was recorded), and
+  whether it was kept, superseded, or reverted. `chore`, `style`, `test`, `build`,
+  `ci`, and docs-only commits are exempt. The ledger is a commit history; design
+  decisions still live in the owning plan.
 - Before rebasing, managing issues, or preparing/adopting/reviewing/merging a PR, read the
   [GitHub workflow](docs/DEVELOPMENT.md#github-workflow). It owns fresh-base checks,
   PR format, contributor authorship, merge policy, and current-head CI handling.
