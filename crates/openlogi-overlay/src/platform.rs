@@ -52,6 +52,18 @@ pub(crate) fn make_card_frameless(window: &gpui::Window) {
     windows::make_card_frameless(window);
 }
 
+/// Keep the card's window from taking the foreground when clicked.
+#[cfg(target_os = "windows")]
+pub(crate) fn make_card_nonactivating(window: &gpui::Window) {
+    windows::make_card_nonactivating(window);
+}
+
+/// Move the card by a logical offset without resizing or activating it.
+#[cfg(target_os = "windows")]
+pub(crate) fn move_card_by(window: &gpui::Window, delta: gpui::Point<gpui::Pixels>) {
+    windows::move_card_by(window, delta);
+}
+
 /// Let the pinned card's mouse fall through except over its pin button; see
 /// [`windows::set_card_click_through`].
 #[cfg(target_os = "windows")]

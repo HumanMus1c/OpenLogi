@@ -16,6 +16,7 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
+mod appearance;
 mod backlight;
 mod flow_indicator;
 mod ipc;
@@ -53,7 +54,7 @@ struct OverlayAssets;
 
 impl AssetSource for OverlayAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        if path.starts_with(flow_indicator::SHADOW_ASSET_PREFIX)
+        if flow_indicator::is_shadow_asset(path)
             && let Some(svg) = flow_indicator::take_shadow_asset(path)
         {
             return Ok(Some(Cow::Owned(svg.into_bytes())));
@@ -76,6 +77,10 @@ fn main() -> Result<()> {
     openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
+    // Started before the window loop: at login the settings portal can appear
+    // seconds after us, and the regular card must already know the mode when
+    // it opens.
+    let appearance = appearance::Appearance::start();
     let ipc::Handle {
         mut invocations,
         mut backlights,
@@ -143,7 +148,12 @@ fn main() -> Result<()> {
         cx.spawn(async move |cx| {
             let (settings, config) = flow_indicator::load_settings().unwrap_or_default();
             info!(enabled = settings.enabled, "flow indicator settings loaded");
-            let mut indicator = flow_indicator::FlowIndicator::new(settings, Some(config));
+            let mut indicator = flow_indicator::FlowIndicator::new(
+                settings,
+                Some(config),
+                appearance,
+                flow_indicator::load_pinned(),
+            );
             while let Some(command) = flow_command_rx.recv().await {
                 cx.update(|cx| indicator.handle(command, cx));
             }

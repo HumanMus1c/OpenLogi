@@ -22,6 +22,16 @@ pub(crate) use native::set_card_visible;
 #[cfg(target_os = "windows")]
 pub(crate) use native::make_card_frameless;
 
+/// Keep the card's window from taking the foreground when clicked; see
+/// [`native::make_card_nonactivating`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::make_card_nonactivating;
+
+/// Move the card without resizing or activating it; see
+/// [`native::move_card_by`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::move_card_by;
+
 /// Watch the pinned card's click-through switch; see
 /// [`native::set_card_click_through`].
 #[cfg(target_os = "windows")]

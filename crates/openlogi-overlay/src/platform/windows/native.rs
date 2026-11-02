@@ -28,7 +28,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::{NoticePlacement, RingPlacement};
-use crate::flow_indicator::{HEADER_LANE, PADDING_X, PADDING_Y};
+use crate::flow_indicator::{HEADER_LANE, PADDING_X, PADDING_Y, SHADOW_MARGIN};
 
 impl RingPlacement {
     pub(crate) fn capture(_cx: &mut App) -> Result<Self> {
@@ -353,18 +353,19 @@ fn watch_click_through() -> ! {
                 let active = ex & WS_EX_TRANSPARENT.cast_signed() != 0
                     && ex & WS_EX_LAYERED.cast_signed() != 0;
                 let want = pinned && !cursor_over_pin_button(hwnd);
-                if want == active {
-                    continue;
-                }
-                let flag = (WS_EX_TRANSPARENT | WS_EX_LAYERED).cast_signed();
-                SetWindowLongW(hwnd, GWL_EXSTYLE, if want { ex | flag } else { ex & !flag });
-                if want {
-                    // Full alpha: the layering exists for hit-testing, not to
-                    // dim the card.
-                    SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+                if want != active {
+                    let flag = (WS_EX_TRANSPARENT | WS_EX_LAYERED).cast_signed();
+                    SetWindowLongW(hwnd, GWL_EXSTYLE, if want { ex | flag } else { ex & !flag });
+                    if want {
+                        // Full alpha: the layering exists for hit-testing, not to
+                        // dim the card.
+                        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+                    }
                 }
             }
         }
+        // Every pass must reach this sleep: the style already matching is the
+        // steady state, not a reason to spin the watch thread.
         std::thread::sleep(if pinned {
             // Short enough that a click right after the cursor leaves the
             // button still finds the pass-through switch already flipped.
@@ -406,11 +407,11 @@ unsafe fn cursor_over_pin_button(hwnd: HWND) -> bool {
             return false;
         }
         let scaled = |logical: f32| logical as i64 * dpi / 96;
-        let right = i64::from(bounds.right);
+        let right = i64::from(bounds.right) - scaled(SHADOW_MARGIN);
         let grace = dpi / 96;
         let button_left = right - scaled(PADDING_X) - scaled(HEADER_LANE);
         let button_right = right - scaled(PADDING_X);
-        let button_top = i64::from(bounds.top) + scaled(PADDING_Y);
+        let button_top = i64::from(bounds.top) + scaled(SHADOW_MARGIN) + scaled(PADDING_Y);
         let button_bottom = button_top + scaled(HEADER_LANE);
         i64::from(cursor.x) >= button_left - grace
             && i64::from(cursor.x) <= button_right + grace
@@ -496,6 +497,89 @@ pub(crate) fn make_card_frameless(window: &Window) {
     unsafe { SendMessageW(hwnd, WM_SETTINGCHANGE, 1, 0) };
 }
 
+/// Move the card by a logical offset without resizing or activating it.
+///
+/// A row-count change resizes the window from its top-left; when the card sits
+/// on the bottom edge, the owner moves it up by the height delta so the edge
+/// stays put. The physical offset is derived from the window's current DPI, so
+/// the move stays on the card's own monitor.
+#[expect(
+    unsafe_code,
+    reason = "DPI, window-rect and a position-only move on a live window's HWND, on its owning thread"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "card offsets are screen-sized, so the rounded physical offset fits an i32"
+)]
+fn move_window_by(hwnd: HWND, delta: Point<Pixels>) {
+    // SAFETY: reads and a move on the live window's HWND, on its owning thread;
+    // the DPI and window rect are read-only.
+    let (dpi, rect) = unsafe {
+        (GetDpiForWindow(hwnd), {
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &raw mut rect) == 0 {
+                return;
+            }
+            rect
+        })
+    };
+    if dpi == 0 {
+        return;
+    }
+    let scale = f64::from(dpi) / 96.0;
+    let dx = (f64::from(f32::from(delta.x)) * scale).round() as i32;
+    let dy = (f64::from(f32::from(delta.y)) * scale).round() as i32;
+    // SAFETY: a position-only move of the live window's HWND, on the thread
+    // GPUI requires, without activating it.
+    if unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            rect.left + dx,
+            rect.top + dy,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        warn!("could not move the Flow Indicator card after a resize");
+    }
+}
+
+/// Move the card window by a logical offset; see [`move_window_by`].
+pub(crate) fn move_card_by(window: &Window, delta: Point<Pixels>) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        warn!("could not get the card window handle to move it");
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        warn!("the card window has no Win32 handle to move it");
+        return;
+    };
+    move_window_by(handle.hwnd.get() as HWND, delta);
+}
+
+/// Keep the Flow Indicator's window from taking the foreground when clicked.
+///
+/// GPUI's pop-up answers `WM_MOUSEACTIVATE` with `MA_ACTIVATE`, so without
+/// `WS_EX_NOACTIVATE` clicking the pin or starting a drag makes the overlay the
+/// foreground process. The card carries no keyboard controls, so it never
+/// needs activation.
+pub(crate) fn make_card_nonactivating(window: &Window) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        warn!("could not get the card window handle to keep it non-activating");
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        warn!("the card window has no Win32 handle to keep it non-activating");
+        return;
+    };
+    if let Err(error) = make_nonactivating(handle.hwnd.get() as HWND) {
+        warn!(%error, "could not keep the card from taking the foreground");
+    }
+}
+
 #[expect(
     unsafe_code,
     reason = "SetWindowPos on a borrowed HWND, with physical screen bounds"
@@ -522,6 +606,7 @@ fn set_bounds(hwnd: HWND, bounds: Bounds<DevicePixels>, flags: u32) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    use gpui::px;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     };
@@ -606,5 +691,34 @@ mod tests {
             PopUp::GPUI_EX_STYLE,
             "the overlay stays a topmost tool window"
         );
+    }
+
+    #[test]
+    #[expect(unsafe_code, reason = "read the test pop-up's DPI and rect")]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the test offsets are small whole physical pixels"
+    )]
+    fn the_card_move_uses_the_window_dpi() {
+        let window = PopUp::open();
+        let before = {
+            let mut rect = RECT::default();
+            // SAFETY: `window.0` is a live window this thread created.
+            assert_ne!(unsafe { GetWindowRect(window.0, &raw mut rect) }, 0);
+            rect
+        };
+        // SAFETY: `window.0` is a live window this thread created.
+        let dpi = unsafe { GetDpiForWindow(window.0) };
+        assert_ne!(dpi, 0, "a live window reports its DPI");
+        move_window_by(window.0, point(px(10.0), px(20.0)));
+        let after = {
+            let mut rect = RECT::default();
+            // SAFETY: `window.0` is a live window this thread created.
+            assert_ne!(unsafe { GetWindowRect(window.0, &raw mut rect) }, 0);
+            rect
+        };
+        let scale = f64::from(dpi) / 96.0;
+        assert_eq!(after.left - before.left, (10.0 * scale).round() as i32);
+        assert_eq!(after.top - before.top, (20.0 * scale).round() as i32);
     }
 }

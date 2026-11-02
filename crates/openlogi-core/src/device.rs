@@ -656,25 +656,36 @@ pub fn first_battery_readout(devices: &[BatteryDevice]) -> Option<&BatteryDevice
         .find(|device| device.online && device.has_readout())
 }
 
+/// The rows a floating indicator can show, and how many matching devices its
+/// row limit hid.
+pub struct FlowIndicatorRows<'a> {
+    /// The rows the card shows, low-first and capped at the limit.
+    pub rows: Vec<&'a BatteryDevice>,
+    /// Matching devices the limit hid.
+    pub hidden: usize,
+}
+
 /// Rows for the floating indicator: devices with something to show, offline
 /// ones only when `show_offline`, sorted low-first and capped at `limit`.
 ///
 /// Charging and full devices sort after healthy discharging ones, and readings
 /// with no value sort last. The tie-break is the display name, so a stable
-/// inventory does not reorder equal rows between polls.
+/// inventory does not reorder equal rows between polls. `hidden` tells a
+/// surface how many matching devices did not fit.
 #[must_use]
-pub fn flow_indicator_devices(
+pub fn flow_indicator_rows(
     devices: &[BatteryDevice],
     show_offline: bool,
     limit: usize,
-) -> Vec<&BatteryDevice> {
+) -> FlowIndicatorRows<'_> {
     let mut rows: Vec<&BatteryDevice> = devices
         .iter()
         .filter(|device| device.has_readout() && (device.online || show_offline))
         .collect();
     rows.sort_by_key(|device| indicator_sort_key(device));
+    let hidden = rows.len().saturating_sub(limit);
     rows.truncate(limit);
-    rows
+    FlowIndicatorRows { rows, hidden }
 }
 
 fn indicator_sort_key(device: &BatteryDevice) -> (u8, u8, bool, String) {
@@ -1019,7 +1030,7 @@ mod tests {
         BatteryStatus, BatteryTone, BatteryValue, Capabilities, DeviceInventory, DeviceKind,
         DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
         ModelTransport, PairedDevice, ReceiverInfo, battery_devices, first_battery_readout,
-        flow_indicator_devices, prettify_codename,
+        flow_indicator_rows, prettify_codename,
     };
 
     #[test]
@@ -1536,18 +1547,18 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
+        let all = flow_indicator_rows(&devices, true, 4);
         assert_eq!(
-            names(flow_indicator_devices(&devices, true, 4)),
+            names(all.rows),
             ["Nearly Empty", "Offline Low", "Healthy", "Charging"]
         );
-        assert_eq!(
-            names(flow_indicator_devices(&devices, false, 4)),
-            ["Nearly Empty", "Healthy", "Charging"]
-        );
-        assert_eq!(
-            names(flow_indicator_devices(&devices, true, 2)),
-            ["Nearly Empty", "Offline Low"]
-        );
+        assert_eq!(all.hidden, 0);
+        let online = flow_indicator_rows(&devices, false, 4);
+        assert_eq!(names(online.rows), ["Nearly Empty", "Healthy", "Charging"]);
+        assert_eq!(online.hidden, 0);
+        let capped = flow_indicator_rows(&devices, true, 2);
+        assert_eq!(names(capped.rows), ["Nearly Empty", "Offline Low"]);
+        assert_eq!(capped.hidden, 2);
     }
 
     #[test]
@@ -1574,7 +1585,8 @@ mod tests {
         ];
 
         assert_eq!(
-            flow_indicator_devices(&devices, true, 5)
+            flow_indicator_rows(&devices, true, 5)
+                .rows
                 .into_iter()
                 .filter_map(|device| device.name.as_deref())
                 .collect::<Vec<_>>(),

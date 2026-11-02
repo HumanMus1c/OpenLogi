@@ -19,7 +19,9 @@ Reading the entries:
   recorded" means no evidence was saved, not that the change was untested.
 - Entries are oldest first inside each theme; themes follow the first commit.
 - Maintenance is defined in `AGENTS.md` (Git & GitHub): behavioural commits
-  update their entry in the same commit; mechanical commits are exempt.
+  update their entry in the same commit; mechanical commits are exempt. A new
+  entry starts with `pending` in place of its hash; the next docs commit fills
+  it in.
 
 | Theme | Commits |
 |---|---:|
@@ -38,7 +40,8 @@ Reading the entries:
 
 Nine behavioural commits also updated the plan in the same commit:
 `3090ead7`, `338f81c2`, `3f9c2219`, `0eaae721`, `37662f8e`, `181a7d02`,
-`df8f287d`, `fe92d9a5`, `ce2ffcc9`.
+`df8f287d`, `fe92d9a5`, `ce2ffcc9`. Post-ledger commits are listed in §12;
+they are outside the 85-commit count.
 
 ## 1. Shared reading rules and settings
 
@@ -611,3 +614,33 @@ Nine behavioural commits also updated the plan in the same commit:
   Formatting only; no behaviour change.
 - `05e041b6` **chore: ignore the local diagnostic scratch directory** — kept.
   Keeps local diagnostics out of Git.
+
+## 12. Post-ledger work (2026-11-02)
+
+These commits follow the ledger's original scope. Their entries are added with
+`pending` hashes; the next docs commit fills them in.
+
+- `pending` **feat(overlay): refresh the Flow Indicator card** — kept.
+  Why: the card carried three conflicting shadow mechanisms, the regular card
+  could not follow the settings appearance after `a6542197`, the first pin could
+  stall on GPUI's font-database scan, the Linux card reopened for a stacking
+  change, and Windows clicks activated the overlay. Rows also had no way to say
+  how many devices the limit hid, and newer device kinds had no icon.
+  Fix: restore the Linux settings-portal watcher (`appearance.rs`, zbus) and keep
+  only the pinned card dark; bake names and readings into path-only SVG shadows
+  off the UI thread (`usvg`), with contact copies for the near field and
+  per-reading assets; persist the pinned state; keep the card's window across
+  row-count, DPI, and display-mode changes with a shadow margin; switch X11
+  stacking live through `_NET_WM_STATE_ABOVE` and cut its input to the pin
+  button with the Shape extension; make the Windows card non-activating; add
+  headset/gamepad/camera icons and a `+N` hidden-row label.
+  Verified: Windows `cargo check -p openlogi-agent -p openlogi-overlay
+  --all-targets`; `cargo test -p openlogi-core -p openlogi-overlay
+  -p openlogi-agent` (675 passed, 0 failed, 4 ignored); `cargo clippy
+  -p openlogi-core -p openlogi-ui -p openlogi-overlay -p openlogi-agent
+  --all-targets -- -D warnings`; `cargo fmt --all -- --check`; three offscreen
+  Windows captures (`pinned-card`, `pinned-status`, `pinned-reading`) rendered
+  and inspected; Linux `cargo check -p openlogi-overlay` in WSL (1.99.1)
+  passed. Live desktop and hardware states remain unverified.
+  Status: kept. This restores theme following for the regular card, reversing
+  part of `a6542197`, while the pinned card stays dark.

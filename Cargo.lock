@@ -5955,8 +5955,10 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
+ "usvg 0.46.0",
  "windows-sys 0.61.2",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]
