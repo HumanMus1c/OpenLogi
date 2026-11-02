@@ -617,10 +617,10 @@ they are outside the 85-commit count.
 
 ## 12. Post-ledger work (2026-11-02)
 
-These commits follow the ledger's original scope. Their entries are added with
-`pending` hashes; the next docs commit fills them in.
+These commits follow the ledger's original scope. Their entries were added with
+`pending` hashes; the docs commit that follows them fills the hashes in.
 
-- `pending` **feat(overlay): refresh the Flow Indicator card** — kept.
+- `e8f7de7c` **feat(overlay): refresh the Flow Indicator card** — kept.
   Why: the card carried three conflicting shadow mechanisms, the regular card
   could not follow the settings appearance after `a6542197`, the first pin could
   stall on GPUI's font-database scan, the Linux card reopened for a stacking
@@ -644,7 +644,7 @@ These commits follow the ledger's original scope. Their entries are added with
   passed. Live desktop and hardware states remain unverified.
   Status: kept. This restores theme following for the regular card, reversing
   part of `a6542197`, while the pinned card stays dark.
-- `pending` **feat(agent): raise the Flow Indicator with the GUI from the tray** — kept.
+- `62daaf5e` **feat(agent): raise the Flow Indicator with the GUI from the tray** — kept.
   Why: Show focused one GUI window and left the card behind; a second launch
   exits on the single-instance lock, so the card could not be brought up that
   way.

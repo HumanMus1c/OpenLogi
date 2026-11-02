@@ -201,9 +201,10 @@ loaded for any Rust or `Cargo.toml` edit.
 - Every commit that changes behaviour or ownership adds or updates its entry in
   [docs/plans/fork-ledger.md](docs/plans/fork-ledger.md) in the same commit: the
   change, its root cause, the verification evidence (or that none was recorded), and
-  whether it was kept, superseded, or reverted. `chore`, `style`, `test`, `build`,
-  `ci`, and docs-only commits are exempt. The ledger is a commit history; design
-  decisions still live in the owning plan.
+  whether it was kept, superseded, or reverted. Start the entry with a `pending`
+  hash; the next docs commit fills it in, since a commit cannot name its own hash.
+  `chore`, `style`, `test`, `build`, `ci`, and docs-only commits are exempt. The
+  ledger is a commit history; design decisions still live in the owning plan.
 - Before rebasing, managing issues, or preparing/adopting/reviewing/merging a PR, read the
   [GitHub workflow](docs/DEVELOPMENT.md#github-workflow). It owns fresh-base checks,
   PR format, contributor authorship, merge policy, and current-head CI handling.
