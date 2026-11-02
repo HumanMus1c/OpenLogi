@@ -1,9 +1,10 @@
 # Fork change ledger
 
-Scope: every commit unique to this fork, i.e. `upstream/master..HEAD` at
-2026-11-02 (upstream `e581c205`, HEAD `ffff85ee`): 85 commits — 16 already on
-`master`, 69 on `feat/tray-light-menu`. Working-tree changes are not commits and
-are outside this ledger.
+Scope: every commit unique to this fork before this ledger, i.e.
+`upstream/master..ffff85ee` at 2026-11-02 (upstream `e581c205`): 85 commits — 16
+already on `master`, 69 on `feat/tray-light-menu`. The docs commits that added
+this ledger follow the range. Working-tree changes are not commits and are
+outside this ledger.
 
 This is a history, not a design document. Decisions, measurements, and the
 per-surface verification logs stay in the owning plan
