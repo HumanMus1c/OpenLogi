@@ -8,11 +8,13 @@
 //! The menu is smaller than macOS's: Settings / About / Check-for-Updates go
 //! through `openlogi://` deeplinks there, and Windows has no scheme
 //! registration yet — so just "Show Main Window" (also the left-click action)
-//! and "Quit OpenLogi". Show focuses the running GUI if there is one (a
-//! second launch would exit on the `openlogi.lock` singleton) or spawns the
-//! sibling `OpenLogi.exe` / `openlogi-desktop.exe`. Quit terminates the GUI
-//! first — a surviving GUI's IPC retry loop would immediately respawn the
-//! agent we are quitting — then exits.
+//! and "Quit OpenLogi". Show raises the GUI's windows and the Flow Indicator
+//! card together, keeping the stacking order they already had, and focuses the
+//! topmost GUI window; with no GUI running (a second launch would exit on the
+//! `openlogi.lock` singleton) it spawns the sibling `OpenLogi.exe` /
+//! `openlogi-desktop.exe`. Quit terminates the GUI first — a surviving GUI's
+//! IPC retry loop would immediately respawn the agent we are quitting — then
+//! exits.
 //!
 //! Everything runs on one dedicated thread: the hidden window, its message
 //! pump, and the menu. The icon is re-added when Explorer restarts (the
@@ -39,13 +41,14 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
-    GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
-    LoadIconW, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
-    RegisterWindowMessageW, SW_RESTORE, SetForegroundWindow, ShowWindow, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU,
-    WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED,
-    WNDCLASSW, WS_OVERLAPPED,
+    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GWL_EXSTYLE, GetCursorPos,
+    GetMessageW, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_NOTOPMOST,
+    HWND_TOPMOST, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR, LoadIconW,
+    MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+    SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos,
+    ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    WM_APP, WM_CONTEXTMENU, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE,
+    WM_THEMECHANGED, WNDCLASSW, WS_EX_TOPMOST, WS_OVERLAPPED,
 };
 
 use crate::shutdown::{self, ShutdownRequestSender};
@@ -333,7 +336,7 @@ unsafe extern "system" fn wnd_proc(
     match msg {
         WM_TRAY => {
             match lparam as u32 {
-                WM_LBUTTONUP => open_or_focus_gui(),
+                WM_LBUTTONUP => show_openlogi(),
                 // SAFETY: win32 dispatches this callback on the tray thread —
                 // the one that created `hwnd` and pumps its messages — so the
                 // handle is live for the whole call, and `TrackPopupMenu` gets
@@ -693,27 +696,180 @@ unsafe fn show_menu(hwnd: HWND) {
         DestroyMenu(menu);
 
         match cmd as usize {
-            ID_SHOW => open_or_focus_gui(),
+            ID_SHOW => show_openlogi(),
             ID_QUIT => quit(hwnd),
             _ => {}
         }
     }
 }
 
-/// Focus the running GUI's window, or launch the sibling GUI binary when no
-/// GUI is running (a second launch would just exit on the `openlogi.lock`
-/// singleton, so spawning blindly does nothing visible).
-fn open_or_focus_gui() {
-    let pids = gui_pids();
-    if pids.is_empty() {
-        spawn_gui();
-        return;
+/// Focus the running OpenLogi windows, or launch the GUI when none is running.
+///
+/// The whole group moves together: the GUI's windows and the Flow Indicator
+/// card keep the stacking order they already had, so settings stay above the
+/// main window and the card keeps its place. Only a GUI window takes the
+/// foreground — the card is a passive readout and must not take focus.
+fn show_openlogi() {
+    let gui = gui_pids();
+    let windows = openlogi_windows(&gui, &overlay_pids());
+    let plan = plan_show(&windows);
+
+    // Back to front: each raise leaves the group in its original order.
+    for window in &plan.raise {
+        // A background process cannot move another process's normal window
+        // above the foreground window with `HWND_TOP` — the call reports
+        // success and the z-order stays put. Passing through the topmost band
+        // and back does move it, and leaves a previously normal window normal.
+        // Windows already in the topmost band are left alone, so a pinned card
+        // keeps its state.
+        // SAFETY: z-order changes with no move, resize, or activation, on
+        // windows `EnumWindows` just reported as live for this user.
+        unsafe {
+            SetWindowPos(
+                *window as HWND,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            SetWindowPos(
+                *window as HWND,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
     }
-    if !focus_window_of(&pids) {
+
+    match plan.foreground {
+        Some(window) => {
+            // SAFETY: the handle came from the same live enumeration; a
+            // minimized window is restored because the click asked for it.
+            unsafe {
+                if IsIconic(window as HWND) != 0 {
+                    ShowWindow(window as HWND, SW_RESTORE);
+                }
+                SetForegroundWindow(window as HWND);
+            }
+        }
         // Running but windowless should not happen (the GUI always has its
         // main window); log rather than spawn a doomed duplicate.
-        warn!("GUI process is running but no window was found to focus");
+        None if !gui.is_empty() => {
+            warn!("GUI process is running but no window was found to focus");
+        }
+        None => spawn_gui(),
     }
+}
+
+/// One window the tray raises, recorded in `EnumWindows` order (front to back).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StackWindow {
+    hwnd: isize,
+    /// A GUI window; the card never takes the foreground.
+    gui: bool,
+    minimized: bool,
+    /// Already in the topmost band; the raise leaves it there.
+    topmost: bool,
+}
+
+/// The OpenLogi windows on screen: every visible GUI window plus the Flow
+/// Indicator card, in `EnumWindows` order.
+fn openlogi_windows(gui: &[u32], overlay: &[u32]) -> Vec<StackWindow> {
+    struct Search<'a> {
+        gui: &'a [u32],
+        overlay: &'a [u32],
+        windows: Vec<StackWindow>,
+    }
+
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> i32 {
+        // SAFETY: lparam is the &mut Search passed to EnumWindows below and
+        // outlives the enumeration; the win32 queries take a valid hwnd.
+        unsafe {
+            let search = &mut *(lparam as *mut Search<'_>);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &raw mut pid);
+            let gui = search.gui.contains(&pid);
+            let card = !gui && search.overlay.contains(&pid) && is_flow_card(hwnd);
+            if !(gui || card) || IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            search.windows.push(StackWindow {
+                hwnd: hwnd as isize,
+                gui,
+                minimized: IsIconic(hwnd) != 0,
+                topmost: GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST.cast_signed() != 0,
+            });
+            1
+        }
+    }
+
+    let mut search = Search {
+        gui,
+        overlay,
+        windows: Vec::new(),
+    };
+    // SAFETY: the callback only dereferences the &mut Search for the duration
+    // of this call.
+    unsafe {
+        EnumWindows(Some(collect), std::ptr::addr_of_mut!(search) as LPARAM);
+    }
+    search.windows
+}
+
+/// Whether `hwnd` is the Flow Indicator card.
+///
+/// The card is the overlay's only window that outlives a session; the ring,
+/// notices, lock-key and backlight windows are transient and stay out of the
+/// raised group. Its title is the cross-process identity the overlay sets.
+fn is_flow_card(hwnd: HWND) -> bool {
+    // The title is short enough for 64 UTF-16 units; `GetWindowTextW` copies
+    // at most this many and returns the count it wrote.
+    let mut title = [0u16; 64];
+    // SAFETY: a title read into a buffer this call owns. A window owned by
+    // another process reports its cached title; no message is sent.
+    let len = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), 64) };
+    let Ok(len) = usize::try_from(len) else {
+        return false;
+    };
+    let expected = wide(openlogi_core::brand::FLOW_INDICATOR_TITLE);
+    len + 1 == expected.len() && title[..len] == expected[..len]
+}
+
+/// What a Show click does with the windows it found.
+struct ShowPlan {
+    /// Back to front. Raising in this order restores the group's stacking as
+    /// it was.
+    raise: Vec<isize>,
+    /// The window that takes the foreground; `None` when only the card is up.
+    foreground: Option<isize>,
+}
+
+/// Plan the raise: preserve the current front-to-back order, and hand the
+/// keyboard to the topmost GUI window rather than to the card.
+///
+/// Topmost windows are already above everything normal and stay in their band,
+/// so only normal windows are raised — among them the order is kept.
+fn plan_show(windows: &[StackWindow]) -> ShowPlan {
+    // Restoring a minimized window is a visible change the click did not ask
+    // for, so prefer a window that is already showing; when every GUI window
+    // is minimized, bring the topmost one back.
+    let foreground = windows
+        .iter()
+        .find(|window| window.gui && !window.minimized)
+        .or_else(|| windows.iter().find(|window| window.gui))
+        .map(|window| window.hwnd);
+    let raise = windows
+        .iter()
+        .rev()
+        .filter(|window| !window.minimized && !window.topmost)
+        .map(|window| window.hwnd)
+        .collect();
+    ShowPlan { raise, foreground }
 }
 
 /// PIDs of this user's running GUI processes: `OpenLogi.exe` (installed /
@@ -729,6 +885,17 @@ fn open_or_focus_gui() {
 /// Show/Quit — their windows are invisible to `EnumWindows` and their
 /// processes unkillable anyway, but don't even consider them.
 fn gui_pids() -> Vec<u32> {
+    matching_pids(is_gui_process_name)
+}
+
+/// PIDs of this user's running overlay helpers — the process that owns the
+/// Flow Indicator card.
+fn overlay_pids() -> Vec<u32> {
+    matching_pids(|name| name.eq_ignore_ascii_case("openlogi-overlay.exe"))
+}
+
+/// PIDs of this user's processes whose image name `is_target` accepts.
+fn matching_pids(is_target: impl Fn(&str) -> bool) -> Vec<u32> {
     use sysinfo::{Pid, Process, ProcessesToUpdate, System};
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
@@ -739,7 +906,7 @@ fn gui_pids() -> Vec<u32> {
         .processes()
         .values()
         .filter(|p| {
-            is_gui_process_name(&p.name().to_string_lossy())
+            is_target(&p.name().to_string_lossy())
                 && (own_user.is_none() || p.user_id() == own_user)
         })
         .map(|p| p.pid().as_u32())
@@ -753,43 +920,6 @@ fn gui_pids() -> Vec<u32> {
 /// both. Windows reports image names with their on-disk case, so this holds.
 fn is_gui_process_name(name: &str) -> bool {
     name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-desktop.exe")
-}
-
-/// Bring the first visible top-level window owned by one of `pids` to the
-/// foreground, restoring it if minimized. Returns whether one was found.
-fn focus_window_of(pids: &[u32]) -> bool {
-    struct Search<'a> {
-        pids: &'a [u32],
-        focused: bool,
-    }
-    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
-        // SAFETY: lparam is the &mut Search passed to EnumWindows below and
-        // outlives the enumeration; the win32 queries take a valid hwnd.
-        unsafe {
-            let search = &mut *(lparam as *mut Search<'_>);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, &raw mut pid);
-            if search.pids.contains(&pid) && IsWindowVisible(hwnd) != 0 {
-                if IsIconic(hwnd) != 0 {
-                    ShowWindow(hwnd, SW_RESTORE);
-                }
-                SetForegroundWindow(hwnd);
-                search.focused = true;
-                return 0; // stop enumerating
-            }
-            1
-        }
-    }
-    let mut search = Search {
-        pids,
-        focused: false,
-    };
-    // SAFETY: the callback only dereferences the &mut Search for the duration
-    // of this call.
-    unsafe {
-        EnumWindows(Some(enum_proc), std::ptr::addr_of_mut!(search) as LPARAM);
-    }
-    search.focused
 }
 
 /// Launch the GUI binary sitting next to the agent.
@@ -887,7 +1017,81 @@ fn wide_truncated(s: &str, max: usize) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_gui_process_name, wide_truncated};
+    use super::{StackWindow, is_gui_process_name, plan_show, wide_truncated};
+
+    fn window(hwnd: isize, gui: bool, minimized: bool) -> StackWindow {
+        StackWindow {
+            hwnd,
+            gui,
+            minimized,
+            topmost: false,
+        }
+    }
+
+    fn pinned_card(hwnd: isize) -> StackWindow {
+        StackWindow {
+            hwnd,
+            gui: false,
+            minimized: false,
+            topmost: true,
+        }
+    }
+
+    #[test]
+    fn a_show_keeps_the_group_in_its_stacking_order() {
+        // Front to back: the card, Settings, the main window.
+        let plan = plan_show(&[
+            window(1, false, false),
+            window(2, true, false),
+            window(3, true, false),
+        ]);
+        assert_eq!(plan.raise, vec![3, 2, 1], "raised back to front");
+        assert_eq!(
+            plan.foreground,
+            Some(2),
+            "the topmost GUI window takes the foreground"
+        );
+    }
+
+    #[test]
+    fn the_card_is_raised_without_taking_the_foreground() {
+        let plan = plan_show(&[window(7, false, false)]);
+        assert_eq!(plan.raise, vec![7]);
+        assert_eq!(plan.foreground, None);
+    }
+
+    #[test]
+    fn the_card_keeps_its_place_under_the_gui() {
+        let plan = plan_show(&[window(2, true, false), window(1, false, false)]);
+        assert_eq!(
+            plan.raise,
+            vec![1, 2],
+            "the card rises first, the panel last"
+        );
+        assert_eq!(plan.foreground, Some(2));
+    }
+
+    #[test]
+    fn a_pinned_card_stays_in_the_topmost_band() {
+        let plan = plan_show(&[pinned_card(1), window(2, true, false)]);
+        assert_eq!(plan.raise, vec![2], "only the normal window is raised");
+        assert_eq!(plan.foreground, Some(2));
+    }
+
+    #[test]
+    fn a_minimized_window_keeps_its_state_unless_no_gui_window_is_showing() {
+        let plan = plan_show(&[window(1, true, false), window(2, true, true)]);
+        assert_eq!(plan.raise, vec![1], "a minimized window is not raised");
+        assert_eq!(plan.foreground, Some(1));
+
+        let plan = plan_show(&[window(2, true, true)]);
+        assert!(plan.raise.is_empty());
+        assert_eq!(
+            plan.foreground,
+            Some(2),
+            "it is the only window to bring back"
+        );
+    }
 
     #[test]
     fn the_cli_binary_is_not_the_gui() {

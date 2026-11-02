@@ -644,3 +644,15 @@ These commits follow the ledger's original scope. Their entries are added with
   passed. Live desktop and hardware states remain unverified.
   Status: kept. This restores theme following for the regular card, reversing
   part of `a6542197`, while the pinned card stays dark.
+- `pending` **feat(agent): raise the Flow Indicator with the GUI from the tray** — kept.
+  Why: Show focused one GUI window and left the card behind; a second launch
+  exits on the single-instance lock, so the card could not be brought up that
+  way.
+  Fix: enumerate the GUI's visible windows and the overlay's card (matched by
+  `FLOW_INDICATOR_TITLE`), preserve their front-to-back order, raise normal
+  windows through the topmost band, keep minimized and topmost windows as they
+  are, and hand the foreground to the topmost GUI window — never to the card.
+  Verified: five `plan_show` unit tests in the agent suite; the agent's 145
+  tests (39 lib + 106 main) and Clippy `-D warnings` passed on the final tree.
+  A live Windows tray raise was not recorded.
+  Status: kept.
