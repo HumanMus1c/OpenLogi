@@ -700,3 +700,25 @@ entry starts with `pending`; the docs commit that follows fills the hashes.
   the new focus and pinned-state cases; the live GNOME pointer re-pick was not
   recorded.
   Status: kept.
+
+- `pending` **feat(overlay): finish the Flow Indicator card's placement, input, and pin** — kept.
+  Why: the shadow halo swallowed clicks, the saved origin changed meaning on
+  differently scaled displays, Windows could move the card after a topology or
+  DPI change, a dropped agent left frozen readings looking live, the panel
+  language did not reach the card, the pin had no accessible name or hint, and
+  long names kept their full baked shadow past the ellipsis.
+  Fix: store the card origin in physical virtual-desktop pixels with its
+  monitor and restore it across topology/DPI changes; apply the visible card or
+  the pin as the native/input region (X11 input shape, Windows hit-test,
+  skip-taskbar); mark readings stale after a five-second disconnect; poll
+  settings and theme every 200 ms; carry the panel language into the shared
+  catalog; add the pin's role, label, toggled state, and inline hint;
+  pre-truncate the painted name before baking its shadow; and refine the
+  contact/ambient shadow and per-track bar asset.
+  Verified: Windows `cargo test -p openlogi-overlay` (109) and `cargo fmt
+  --all -- --check`; Linux (WSL) overlay 112 tests and Clippy recorded before
+  the split. Live Windows checks covered the halo hit-test, pin UIA toggle,
+  tray/file round-trip, 125% capture, and the localized pin label. The stale
+  disconnect path has unit coverage only. Linux X11 input region and card
+  startup were checked; the GNOME pointer re-pick and macOS remain unverified.
+  Status: kept.

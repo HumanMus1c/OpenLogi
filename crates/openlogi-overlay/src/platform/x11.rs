@@ -61,6 +61,41 @@ impl CardWindow {
             .ok()
             .and_then(|cookie| cookie.reply().ok())
             .map_or(0, |reply| reply.atom);
+        let skip_taskbar_atom = connection
+            .intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR")
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map_or(0, |reply| reply.atom);
+        let skip_pager_atom = connection
+            .intern_atom(false, b"_NET_WM_STATE_SKIP_PAGER")
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map_or(0, |reply| reply.atom);
+        // The card is a passive HUD, not a task: keep it out of task lists and
+        // pagers. The states are added in one EWMH message, as for ABOVE.
+        if state_atom != 0 && skip_taskbar_atom != 0 && skip_pager_atom != 0 {
+            let event = ClientMessageEvent::new(
+                32,
+                handle.window.get(),
+                state_atom,
+                [1, skip_taskbar_atom, skip_pager_atom, 1, 0],
+            );
+            let sent: anyhow::Result<()> = (|| {
+                connection
+                    .send_event(
+                        false,
+                        root,
+                        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                        event,
+                    )?
+                    .check()?;
+                connection.flush()?;
+                Ok(())
+            })();
+            if let Err(error) = sent {
+                debug!(%error, "X11: could not hide the card from task lists");
+            }
+        }
         let attributes = match connection
             .get_window_attributes(handle.window.get())
             .ok()?
@@ -169,16 +204,17 @@ impl CardWindow {
         }
     }
 
-    /// Keep pointer input inside the pin button while the card is pinned, or
-    /// restore the whole window when it is not.
+    /// Keep pointer input inside `region`, or restore the whole window when it
+    /// is `None`.
     ///
     /// X11 has no per-window click-through bit; the Shape extension's input
     /// shape is the native switch. A null source mask restores the default
-    /// whole-window shape. `pin` is in the card's logical window coordinates.
-    pub(crate) fn set_click_through(&self, pinned: bool, scale: f32, pin: Bounds<Pixels>) {
+    /// whole-window shape. `region` is in the card's logical window
+    /// coordinates.
+    pub(crate) fn set_input_region(&self, scale: f32, region: Option<Bounds<Pixels>>) {
         let shaped: anyhow::Result<()> = (|| {
-            if pinned {
-                let (x, y, width, height) = physical_rect(pin, scale);
+            if let Some(region) = region {
+                let (x, y, width, height) = physical_rect(region, scale);
                 self.connection
                     .shape_rectangles(
                         SO::SET,

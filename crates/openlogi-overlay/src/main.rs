@@ -67,6 +67,16 @@ impl AssetSource for OverlayAssets {
     }
 }
 
+/// An observation's language overrides the panel language only when it names
+/// one. A "nothing to show" notice or lock-key observation carries `None`,
+/// meaning "no content", not "reset the shared catalog to this helper
+/// process's system locale"; the config poll owns the panel language.
+fn apply_observed_language(language: Option<&str>) {
+    if let Some(language) = language {
+        openlogi_core::locale::activate(Some(language));
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the overlay bootstraps its independent IPC observation tasks"
@@ -75,6 +85,11 @@ fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
 
     openlogi_core::locale::activate(None);
+    // The panel's language, not this helper's system locale: the card, ring,
+    // and notices all share one catalog, so settle it before any window opens.
+    if let Some((settings, _)) = flow_indicator::load_settings() {
+        openlogi_core::locale::activate(settings.language.as_deref());
+    }
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
     // Started before the window loop: at login the settings portal can appear
@@ -87,6 +102,8 @@ fn main() -> Result<()> {
         mut notices,
         mut lock_keys,
         mut state,
+        mut flow_pinned,
+        flow_pin_reports,
         commands,
     } = ipc::spawn();
 
@@ -112,7 +129,9 @@ fn main() -> Result<()> {
         cx.spawn(async move |_cx| {
             while let Some(observation) = state.recv().await {
                 if observation_commands
-                    .send(flow_indicator::Command::Observation(Box::new(observation)))
+                    .send(flow_indicator::Command::Observation(
+                        observation.map(Box::new),
+                    ))
                     .is_err()
                 {
                     break;
@@ -120,25 +139,67 @@ fn main() -> Result<()> {
             }
         })
         .detach();
+        let flow_pin_commands = flow_commands.clone();
+        cx.spawn(async move |_cx| {
+            while let Some(observed) = flow_pinned.recv().await {
+                if flow_pin_commands
+                    .send(flow_indicator::Command::FlowPinned(observed.pinned))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // Live settings and theme: a stat and two atomics every 200 ms cost
+        // nothing next to the panel's own repaint, and they close most of the
+        // delay the card used to show when the settings app switched themes.
+        // The desktop mode is watched here too, since the portal signal only
+        // moves a revision the owner has to be told to read.
+        let settings_commands = flow_commands.clone();
+        let watched_appearance = Arc::clone(&appearance);
         cx.spawn(async move |cx| {
             let mut stamp = flow_indicator::config_stamp();
+            let mut revision = watched_appearance.revision();
             loop {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
+                    .timer(std::time::Duration::from_millis(200))
                     .await;
                 let now = flow_indicator::config_stamp();
                 if now != stamp {
                     stamp = now;
-                    if let Some((settings, config)) = flow_indicator::load_settings()
-                        && flow_commands
+                    if let Some((settings, config)) = flow_indicator::load_settings() {
+                        openlogi_core::locale::activate(settings.language.as_deref());
+                        if settings_commands
                             .send(flow_indicator::Command::Settings(Box::new((
                                 settings, config,
                             ))))
                             .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                let current = watched_appearance.revision();
+                if current != revision {
+                    revision = current;
+                    if settings_commands
+                        .send(flow_indicator::Command::Tick)
+                        .is_err()
                     {
                         break;
                     }
                 }
+            }
+        })
+        .detach();
+        // The once-a-second tick owns the window-side settles and saving the
+        // dragged position; neither needs the theme poll's cadence.
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
                 if flow_commands.send(flow_indicator::Command::Tick).is_err() {
                     break;
                 }
@@ -147,12 +208,16 @@ fn main() -> Result<()> {
         .detach();
         cx.spawn(async move |cx| {
             let (settings, config) = flow_indicator::load_settings().unwrap_or_default();
+            // The card follows the panel's language, not this helper process's
+            // own system locale (which can differ when launched from a shell).
+            openlogi_core::locale::activate(settings.language.as_deref());
             info!(enabled = settings.enabled, "flow indicator settings loaded");
             let mut indicator = flow_indicator::FlowIndicator::new(
                 settings,
                 Some(config),
                 appearance,
                 flow_indicator::load_pinned(),
+                flow_pin_reports,
             );
             while let Some(command) = flow_command_rx.recv().await {
                 cx.update(|cx| indicator.handle(command, cx));
@@ -161,7 +226,7 @@ fn main() -> Result<()> {
         .detach();
         cx.spawn(async move |cx| {
             while let Some(observed) = notices.recv().await {
-                openlogi_core::locale::activate(observed.language.as_deref());
+                apply_observed_language(observed.language.as_deref());
                 let Some(cards) = shelf.borrow_mut().observe(observed.notices) else {
                     continue;
                 };
@@ -173,7 +238,7 @@ fn main() -> Result<()> {
             // The agent's timer is the indicator's only clock: it reports
             // nothing showing when the time is up, or when it is gone.
             while let Some(observed) = lock_keys.recv().await {
-                openlogi_core::locale::activate(observed.language.as_deref());
+                apply_observed_language(observed.language.as_deref());
                 cx.update(|cx| lock_key::present(cx, observed.shown));
             }
         })
@@ -187,7 +252,7 @@ fn main() -> Result<()> {
                     cx.update(close_all_ring_windows);
                     continue;
                 };
-                openlogi_core::locale::activate(invocation.language.as_deref());
+                apply_observed_language(invocation.language.as_deref());
                 cx.update(|cx| {
                     close_all_ring_windows(cx);
                     #[cfg_attr(

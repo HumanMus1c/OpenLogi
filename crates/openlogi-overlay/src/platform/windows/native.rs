@@ -7,28 +7,32 @@ use anyhow::{Context as _, Result, ensure};
 use gpui::{App, Bounds, DevicePixels, DisplayId, Pixels, Point, Size, Window, point, size};
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use tracing::{debug, warn};
-use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::time::Instant;
+use tracing::{debug, info, warn};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-    MonitorFromPoint, MonitorFromWindow,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, GetWindowRect, IsWindow, LWA_ALPHA,
-    SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetLayeredWindowAttributes, SetWindowLongW,
-    SetWindowPos, ShowWindow, WM_SETTINGCHANGE, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TRANSPARENT, WS_POPUP, WS_THICKFRAME,
+    GW_HWNDPREV, GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindow, GetWindowLongW, GetWindowRect,
+    IsWindow, IsWindowVisible, LWA_ALPHA, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
+    SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, ShowWindow, WM_DPICHANGED,
+    WM_SETTINGCHANGE, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_POPUP,
+    WS_THICKFRAME,
 };
+use windows_sys::core::BOOL;
 
-use super::{NoticePlacement, RingPlacement};
-use crate::flow_indicator::{HEADER_LANE, PADDING_X, PADDING_Y, SHADOW_MARGIN};
+use super::{MonitorInfo, NoticePlacement, RingPlacement};
+use crate::flow_indicator::{HEADER_LANE, PADDING_X, PADDING_Y, SHADOW_MARGIN, TOPMOST_BIT};
 
 impl RingPlacement {
     pub(crate) fn capture(_cx: &mut App) -> Result<Self> {
@@ -136,6 +140,174 @@ fn device_bounds(rect: RECT) -> Bounds<DevicePixels> {
             DevicePixels(rect.bottom - rect.top),
         ),
     )
+}
+
+/// Every active display, in physical virtual-desktop pixels.
+///
+/// The card's saved position is physical so two displays with different scale
+/// factors cannot reinterpret one number into two places. The work area is
+/// where a restored card is clamped; the full rect only finds the display
+/// that owns a saved point.
+#[expect(
+    unsafe_code,
+    reason = "EnumDisplayMonitors and GetMonitorInfoW with checked outputs"
+)]
+pub(crate) fn monitor_layout() -> Vec<MonitorInfo> {
+    unsafe extern "system" fn collect(
+        monitor: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        // SAFETY: `data` is the &mut Vec passed below, which outlives the
+        // synchronous enumeration; the monitor queries are read-only.
+        unsafe {
+            let layout = &mut *(data as *mut Vec<MonitorInfo>);
+            if let Some(info) = monitor_info(monitor) {
+                layout.push(info);
+            }
+        }
+        1
+    }
+
+    let mut layout: Vec<MonitorInfo> = Vec::new();
+    // SAFETY: the callback only writes into `layout`, which outlives the call.
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(collect),
+            std::ptr::addr_of_mut!(layout) as LPARAM,
+        );
+    }
+    // EnumDisplayMonitors promises no order, and the card compares layouts to
+    // notice a topology change.
+    layout.sort_by(|a, b| a.device.cmp(&b.device));
+    layout
+}
+
+/// One monitor's device name, physical rects and effective DPI.
+#[expect(unsafe_code, reason = "read-only monitor queries with checked outputs")]
+fn monitor_info(monitor: HMONITOR) -> Option<MonitorInfo> {
+    // SAFETY: a zeroed MONITORINFOEXW is the required input shape; cbSize is
+    // set before the call.
+    let mut info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
+    info.monitorInfo.cbSize = u32::try_from(std::mem::size_of::<MONITORINFOEXW>()).ok()?;
+    // SAFETY: `info` is the extended struct and carries its own size; a
+    // removed monitor reports failure rather than geometry.
+    if unsafe { GetMonitorInfoW(monitor, std::ptr::addr_of_mut!(info).cast::<MONITORINFO>()) } == 0
+    {
+        return None;
+    }
+    let (mut dpi, mut dpi_y) = (0, 0);
+    // SAFETY: both outputs are writable for the call; a failed HRESULT is not
+    // used as a DPI.
+    let hr = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi, &raw mut dpi_y) };
+    let dpi = if hr >= 0 && dpi != 0 { dpi } else { 96 };
+    let len = info
+        .szDevice
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(info.szDevice.len());
+    Some(MonitorInfo {
+        device: String::from_utf16_lossy(&info.szDevice[..len]),
+        display_id: DisplayId::from(monitor as usize as u64),
+        monitor: device_bounds(info.monitorInfo.rcMonitor),
+        work: device_bounds(info.monitorInfo.rcWork),
+        dpi,
+    })
+}
+
+/// The card window's HWND, for the style and geometry calls below.
+fn card_window_hwnd(window: &Window) -> Option<HWND> {
+    // GPUI's `Window` has its own `window_handle`; ask the raw handle trait.
+    let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(handle.hwnd.get() as HWND)
+}
+
+/// The physical origin of the visible card, plus the monitor's device name.
+///
+/// The margin is the card's own layout scale, not the monitor's DPI: while a
+/// DPI change is still being reconciled the painted card is the authority.
+#[expect(
+    unsafe_code,
+    reason = "window-rect and monitor queries on the live card HWND"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a logical shadow margin scaled by a display DPI is a small whole pixel count"
+)]
+fn physical_placement(hwnd: HWND, scale: f32) -> Option<(Point<DevicePixels>, String)> {
+    // SAFETY: the window rect and its monitor are read-only queries on the
+    // live card HWND.
+    let (mut rect, monitor) = unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &raw mut rect) == 0 {
+            return None;
+        }
+        (rect, MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST))
+    };
+    let margin = (f64::from(SHADOW_MARGIN) * f64::from(scale)).round() as i32;
+    rect.left += margin;
+    rect.top += margin;
+    let info = monitor_info(monitor)?;
+    Some((
+        point(DevicePixels(rect.left), DevicePixels(rect.top)),
+        info.device,
+    ))
+}
+
+/// Put the visible card at `origin` without resizing or activating it.
+#[expect(
+    unsafe_code,
+    reason = "window-rect read and position-only SetWindowPos on the live card HWND"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a logical shadow margin scaled by a display DPI is a small whole pixel count"
+)]
+fn place_visible(hwnd: HWND, scale: f32, origin: Point<DevicePixels>) -> bool {
+    let margin = (f64::from(SHADOW_MARGIN) * f64::from(scale)).round() as i32;
+    let target = point(
+        DevicePixels(origin.x.0 - margin),
+        DevicePixels(origin.y.0 - margin),
+    );
+    // SAFETY: a rect read and a position-only SetWindowPos on the live card
+    // HWND; no size, z-order, or activation changes.
+    unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &raw mut rect) == 0 {
+            return false;
+        }
+        if rect.left == target.x.0 && rect.top == target.y.0 {
+            return true;
+        }
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            target.x.0,
+            target.y.0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        ) != 0
+    }
+}
+
+/// The visible card's physical origin and the monitor it is on.
+pub(crate) fn card_physical_placement(window: &Window) -> Option<(Point<DevicePixels>, String)> {
+    physical_placement(card_window_hwnd(window)?, window.scale_factor())
+}
+
+/// Put the visible card at a physical origin; see [`place_visible`].
+pub(crate) fn place_card_visible(window: &Window, origin: Point<DevicePixels>) -> bool {
+    let Some(hwnd) = card_window_hwnd(window) else {
+        return false;
+    };
+    place_visible(hwnd, window.scale_factor(), origin)
 }
 
 /// Move a bootstrap window onto its monitor, then to `bounds` at the DPI it
@@ -294,20 +466,48 @@ struct CardClickThrough {
     hwnd: AtomicIsize,
     /// Whether the card is pinned right now.
     pinned: AtomicBool,
+    /// The DPI GPUI currently lays the card out at, in the same units the
+    /// native hit test needs. `0` until the first window is reported.
+    ///
+    /// `GetDpiForWindow` is the monitor's answer, which can disagree with
+    /// GPUI's cached scale after a display topology change; the hit test must
+    /// follow the painted card, not the monitor.
+    layout_dpi: AtomicU32,
+    /// The monitor's DPI, reported from the window's owning UI thread. The
+    /// watch thread must not be the authority: its own DPI awareness decides
+    /// what `GetDpiForWindow` returns there.
+    os_dpi: AtomicU32,
+    /// Set by the watch when the window moved with the left button down, so
+    /// the owner can tell a user drag from Windows repositioning the card.
+    user_moved: AtomicBool,
 }
 
 static CARD_CLICK_THROUGH: CardClickThrough = CardClickThrough {
     hwnd: AtomicIsize::new(0),
     pinned: AtomicBool::new(false),
+    layout_dpi: AtomicU32::new(0),
+    os_dpi: AtomicU32::new(0),
+    user_moved: AtomicBool::new(false),
 };
 
-/// Make the pinned card pass the mouse through, or stop it from doing so.
+/// When the watch last asked the window to apply a missed DPI change, in
+/// milliseconds since the watch started. At most one request per second.
+static LAST_DPI_RECONCILE: AtomicU64 = AtomicU64::new(0);
+
+fn millis_since_start() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(EPOCH.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Let the card's mouse through outside its interactive area.
 ///
-/// `WS_EX_TRANSPARENT` is a whole-window switch, and the pin button must stay
-/// clickable — so while the card is pinned, a native watch thread clears the
-/// switch only while the cursor is over the button's rectangle. The watch is
-/// native because a pass-through window receives no mouse events of its own
-/// to react with; the style write happens only when the answer changes.
+/// `WS_EX_TRANSPARENT` is a whole-window switch, and Windows has no
+/// cross-process partial input region, so a native watch thread keeps the
+/// window interactive only while the cursor is over that area: the whole
+/// visible card when regular, the pin button when pinned. The shadow margin is
+/// therefore click-through in both states. The watch is native because a
+/// pass-through window receives no mouse events of its own to react with; the
+/// style write happens only when the answer changes.
 pub(crate) fn set_card_click_through(window: &Window, pinned: bool) {
     let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
         warn!("could not get the card window handle for click-through");
@@ -321,7 +521,101 @@ pub(crate) fn set_card_click_through(window: &Window, pinned: bool) {
         .hwnd
         .store(handle.hwnd.get(), Ordering::Release);
     CARD_CLICK_THROUGH.pinned.store(pinned, Ordering::Release);
+    set_card_layout_scale(window);
     spawn_click_through_watch();
+}
+
+/// Report the scale GPUI is laying the card out at, and the monitor DPI the
+/// window actually has, to the native watch.
+///
+/// The watch cannot ask GPUI for the former (it runs outside the UI thread),
+/// and its own DPI awareness must not decide the latter; the UI thread owns
+/// both answers and stores them here on every settle.
+#[expect(
+    unsafe_code,
+    reason = "a read-only DPI query on the live card HWND, on its owning thread"
+)]
+pub(crate) fn set_card_layout_scale(window: &Window) -> u32 {
+    let layout = layout_dpi(window.scale_factor());
+    let previous = CARD_CLICK_THROUGH.layout_dpi.swap(layout, Ordering::AcqRel);
+    if previous != 0 && previous != layout {
+        info!(previous, layout, "Flow Indicator layout scale changed");
+    }
+    if let Some(hwnd) = card_window_hwnd(window) {
+        // SAFETY: a read-only DPI query on the card HWND, on the thread that
+        // owns it.
+        let os = unsafe { GetDpiForWindow(hwnd) };
+        CARD_CLICK_THROUGH
+            .os_dpi
+            .store(if os == 0 { 96 } else { os }, Ordering::Release);
+    }
+    layout
+}
+
+/// Whether the card's monitor DPI and GPUI's layout scale disagree.
+///
+/// A display topology change can leave GPUI's cached scale at the previous
+/// monitor's value without a `WM_DPICHANGED`; the owner uses this to fall back
+/// to reopening the window after the watch's re-sent message has had a chance.
+#[expect(
+    unsafe_code,
+    reason = "a read-only DPI query on the live card HWND, on its owning thread"
+)]
+pub(crate) fn card_dpi_mismatch(window: &Window) -> bool {
+    let Some(hwnd) = card_window_hwnd(window) else {
+        return false;
+    };
+    // SAFETY: a read-only DPI query on the card HWND, on the thread that owns
+    // it.
+    let os = unsafe { GetDpiForWindow(hwnd) };
+    os != 0 && os != layout_dpi(window.scale_factor())
+}
+
+/// Whether the card needs to be put back into the topmost band.
+///
+/// `WS_EX_TOPMOST` set with `SetWindowLongW` is only a style bit: a window can
+/// keep the bit while sitting in the normal band (a shell or driver z-order
+/// reset does this), and checking the bit alone therefore reports "topmost"
+/// while ordinary windows cover the card. A visible window without the bit
+/// above it is the evidence that the band was lost.
+#[expect(
+    unsafe_code,
+    reason = "style and z-order reads on the live card HWND, on its owning thread"
+)]
+pub(crate) fn card_needs_raise(window: &Window) -> bool {
+    let Some(hwnd) = card_window_hwnd(window) else {
+        return false;
+    };
+    // SAFETY: read-only style and z-order queries on the card HWND, on the
+    // thread that owns it.
+    unsafe {
+        if GetWindowLongW(hwnd, GWL_EXSTYLE) & TOPMOST_BIT == 0 {
+            return true;
+        }
+        let mut above = GetWindow(hwnd, GW_HWNDPREV);
+        while !above.is_null() {
+            if IsWindowVisible(above) != 0 && GetWindowLongW(above, GWL_EXSTYLE) & TOPMOST_BIT == 0
+            {
+                return true;
+            }
+            above = GetWindow(above, GW_HWNDPREV);
+        }
+    }
+    false
+}
+
+/// Whether the card moved while the left button was down since the last call.
+pub(crate) fn take_card_user_moved() -> bool {
+    CARD_CLICK_THROUGH.user_moved.swap(false, Ordering::AcqRel)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a window scale of a few hundred percent rounds to a small positive DPI"
+)]
+fn layout_dpi(scale: f32) -> u32 {
+    (f64::from(scale) * 96.0).round().clamp(1.0, 10_000.0) as u32
 }
 
 fn spawn_click_through_watch() {
@@ -341,18 +635,45 @@ fn spawn_click_through_watch() {
     reason = "cursor, window-bounds and style reads on the card HWND from a native watch thread"
 )]
 fn watch_click_through() -> ! {
+    let mut last_rect: Option<RECT> = None;
     loop {
         let pinned = CARD_CLICK_THROUGH.pinned.load(Ordering::Acquire);
         let hwnd = CARD_CLICK_THROUGH.hwnd.load(Ordering::Acquire) as HWND;
+        let mut delay = std::time::Duration::from_millis(250);
         // SAFETY: a liveness read on the watched HWND.
         if !hwnd.is_null() && unsafe { IsWindow(hwnd) } != 0 {
             // SAFETY: style reads and a style write that is guarded to fire
-            // only on a change, on the card window's HWND.
+            // only on a change, on the card window's HWND; the rect and key
+            // state reads are read-only.
             unsafe {
+                let dpi = effective_layout_dpi(hwnd);
+                reconcile_dpi(hwnd, dpi);
+                let mut rect = RECT::default();
+                if GetWindowRect(hwnd, &raw mut rect) != 0 {
+                    if let Some(previous) = last_rect
+                        && (rect.left != previous.left
+                            || rect.top != previous.top
+                            || rect.right != previous.right
+                            || rect.bottom != previous.bottom)
+                        && left_button_down()
+                    {
+                        // The OS also moves the card when a display changes;
+                        // only a move with the button held is the user's.
+                        CARD_CLICK_THROUGH.user_moved.store(true, Ordering::Release);
+                    }
+                    last_rect = Some(rect);
+                } else {
+                    last_rect = None;
+                }
+                let inside = cursor_in_window(hwnd, 0.0, dpi);
                 let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
                 let active = ex & WS_EX_TRANSPARENT.cast_signed() != 0
                     && ex & WS_EX_LAYERED.cast_signed() != 0;
-                let want = pinned && !cursor_over_pin_button(hwnd);
+                let want = if pinned {
+                    !cursor_over_pin_button(hwnd, dpi)
+                } else {
+                    !cursor_in_window(hwnd, SHADOW_MARGIN, dpi)
+                };
                 if want != active {
                     let flag = (WS_EX_TRANSPARENT | WS_EX_LAYERED).cast_signed();
                     SetWindowLongW(hwnd, GWL_EXSTYLE, if want { ex | flag } else { ex & !flag });
@@ -362,37 +683,111 @@ fn watch_click_through() -> ! {
                         SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
                     }
                 }
+                // Inside the window, poll fast enough that a click right after
+                // the cursor enters its interactive area is not lost. Outside,
+                // only the approach needs watching.
+                delay = if inside {
+                    std::time::Duration::from_millis(15)
+                } else {
+                    std::time::Duration::from_millis(30)
+                };
             }
+        } else {
+            last_rect = None;
         }
         // Every pass must reach this sleep: the style already matching is the
         // steady state, not a reason to spin the watch thread.
-        std::thread::sleep(if pinned {
-            // Short enough that a click right after the cursor leaves the
-            // button still finds the pass-through switch already flipped.
-            std::time::Duration::from_millis(15)
-        } else {
-            std::time::Duration::from_millis(250)
-        });
+        std::thread::sleep(delay);
     }
 }
 
-/// Whether the cursor sits on the pin button: the header lane's right end,
-/// plus a 1 px grace so a click at the button's edge cannot slip through.
+/// The DPI the card is painted at, falling back to the monitor's before the
+/// UI thread has reported one.
+#[expect(unsafe_code, reason = "a read-only DPI query on the watched HWND")]
+fn effective_layout_dpi(hwnd: HWND) -> u32 {
+    let stored = CARD_CLICK_THROUGH.layout_dpi.load(Ordering::Acquire);
+    if stored != 0 {
+        return stored;
+    }
+    // SAFETY: a read-only DPI query on the watched HWND.
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 { 96 } else { dpi }
+}
+
+/// Ask the window to apply a DPI change GPUI missed.
 ///
-/// All geometry is physical pixels — the process is PerMonitorV2-aware, so
-/// the cursor and the window bounds are already physical — and the logical
-/// constants scale by the window's own DPI in integers.
+/// A display topology change can leave GPUI's cached scale behind the monitor
+/// the card is on: the card then paints at the old scale while the monitor
+/// reports the new DPI, and the native hit test drifts off the painted pin.
+/// `WM_DPICHANGED` is how GPUI learns the new scale, so the watch re-sends it
+/// with the window's current physical rect; the next owner tick resizes the
+/// card and stores the new layout scale.
+#[expect(
+    unsafe_code,
+    reason = "DPI/rect reads and a same-process synchronous WM_DPICHANGED send on the watched HWND"
+)]
+fn reconcile_dpi(hwnd: HWND, layout_dpi: u32) {
+    // The UI thread's answer is the authority. Falling back to this thread's
+    // own query would let its DPI awareness mask a real mismatch.
+    let stored = CARD_CLICK_THROUGH.os_dpi.load(Ordering::Acquire);
+    let os_dpi = if stored != 0 {
+        stored
+    } else {
+        // SAFETY: a read-only DPI query on the watched HWND.
+        unsafe { GetDpiForWindow(hwnd) }
+    };
+    if os_dpi == 0 || os_dpi == layout_dpi {
+        return;
+    }
+    let now = millis_since_start();
+    if now.saturating_sub(LAST_DPI_RECONCILE.load(Ordering::Relaxed)) < 1_000 {
+        return;
+    }
+    LAST_DPI_RECONCILE.store(now, Ordering::Relaxed);
+    let mut rect = RECT::default();
+    // SAFETY: a read-only rect query on the watched HWND.
+    if unsafe { GetWindowRect(hwnd, &raw mut rect) } == 0 {
+        return;
+    }
+    info!(
+        os_dpi,
+        layout_dpi, "Flow Indicator: re-applying a missed DPI change"
+    );
+    let wparam = ((os_dpi as usize) << 16) | os_dpi as usize;
+    // SAFETY: SendMessage is synchronous and the window belongs to this
+    // process, so the window proc reads `rect` before this call returns; it
+    // runs on the window's thread, outside GPUI's app borrow.
+    unsafe {
+        SendMessageW(
+            hwnd,
+            WM_DPICHANGED,
+            wparam,
+            std::ptr::addr_of!(rect) as isize,
+        );
+    }
+}
+
+/// Whether the left mouse button is down, for telling a user drag from an
+/// OS-driven window move.
+#[expect(unsafe_code, reason = "a read-only key-state query")]
+fn left_button_down() -> bool {
+    // SAFETY: a read-only key-state query.
+    unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON)) < 0 }
+}
+
+/// Whether the cursor is inside the window, optionally inset by a logical
+/// margin on every side.
 #[expect(
     unsafe_code,
     reason = "cursor and window-bounds reads on the card HWND from the watch thread"
 )]
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "the layout constants are whole logical pixels, so their f32→i64 conversion is exact"
+    reason = "the layout inset is a whole logical pixel, so its f32→i64 conversion is exact"
 )]
-unsafe fn cursor_over_pin_button(hwnd: HWND) -> bool {
-    // SAFETY: cursor and window-bounds reads on the card window's HWND, plus
-    // its own DPI, all read-only.
+unsafe fn cursor_in_window(hwnd: HWND, inset: f32, dpi: u32) -> bool {
+    // SAFETY: cursor and window-bounds reads on the card window's HWND, all
+    // read-only.
     unsafe {
         let mut cursor = POINT::default();
         if GetCursorPos(&raw mut cursor) == 0 {
@@ -402,7 +797,51 @@ unsafe fn cursor_over_pin_button(hwnd: HWND) -> bool {
         if GetWindowRect(hwnd, &raw mut bounds) == 0 {
             return false;
         }
-        let dpi = i64::from(GetDpiForWindow(hwnd));
+        let dpi = i64::from(dpi);
+        if dpi == 0 {
+            return false;
+        }
+        let inset = inset as i64 * dpi / 96;
+        let left = i64::from(bounds.left) + inset;
+        let right = i64::from(bounds.right) - inset;
+        let top = i64::from(bounds.top) + inset;
+        let bottom = i64::from(bounds.bottom) - inset;
+        i64::from(cursor.x) >= left
+            && i64::from(cursor.x) <= right
+            && i64::from(cursor.y) >= top
+            && i64::from(cursor.y) <= bottom
+    }
+}
+
+/// Whether the cursor sits on the pin button: the header lane's right end,
+/// plus a 1 px grace so a click at the button's edge cannot slip through.
+///
+/// All geometry is physical pixels — the process is PerMonitorV2-aware, so
+/// the cursor and the window bounds are already physical — and the logical
+/// constants scale by the scale GPUI paints the card at, in integers. Using the
+/// monitor's DPI here instead made the hot zone drift off the painted pin
+/// whenever GPUI had missed a DPI change.
+#[expect(
+    unsafe_code,
+    reason = "cursor and window-bounds reads on the card HWND from the watch thread"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the layout constants are whole logical pixels, so their f32→i64 conversion is exact"
+)]
+unsafe fn cursor_over_pin_button(hwnd: HWND, dpi: u32) -> bool {
+    // SAFETY: cursor and window-bounds reads on the card window's HWND, all
+    // read-only.
+    unsafe {
+        let mut cursor = POINT::default();
+        if GetCursorPos(&raw mut cursor) == 0 {
+            return false;
+        }
+        let mut bounds = RECT::default();
+        if GetWindowRect(hwnd, &raw mut bounds) == 0 {
+            return false;
+        }
+        let dpi = i64::from(dpi);
         if dpi == 0 {
             return false;
         }
