@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     parseDisplayMode,
+    parseFlowPinned,
     parseFlowPosition,
     parseState,
     serializeState,
@@ -56,4 +57,11 @@ test('the app position file seeds the first flow placement', () => {
     assert.deepEqual(parseFlowPosition('x = -4.5\ny = 0\n'), {x: -4.5, y: 0});
     assert.equal(parseFlowPosition('x = 1570.0\n'), null);
     assert.equal(parseFlowPosition(''), null);
+});
+
+test('only an explicitly pinned card hands keyboard focus back', () => {
+    assert.equal(parseFlowPinned('x = 1\ny = 2\npinned = true\n'), true);
+    assert.equal(parseFlowPinned('pinned = false\n'), false);
+    assert.equal(parseFlowPinned('x = 1\ny = 2\n'), false);
+    assert.equal(parseFlowPinned(''), false);
 });

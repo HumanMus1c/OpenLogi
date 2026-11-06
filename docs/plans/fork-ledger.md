@@ -686,3 +686,17 @@ entry starts with `pending`; the docs commit that follows fills the hashes.
   the live Windows tray click flipped the card and the placement file after the
   overlay wiring landed. macOS remains uncompiled.
   Status: kept.
+
+- `pending` **fix(hook): keep the pinned card click-through on GNOME** — kept.
+  Why: Mutter kept routing clicks inside a focused card's old frame after the
+  card's input region shrank to the pin, so the transparent HUD swallowed
+  clicks until focus moved; the extension also did not know the card's pinned
+  state.
+  Fix: watch the placement file's `pinned` field, hand keyboard focus back to
+  the last non-card window, and warp the pointer just outside the card and back
+  so Mutter re-picks the input region; add a `RepickPointer` D-Bus diagnostic,
+  bump the extension metadata, and document the live check.
+  Verified: `node --test` in the extension directory passed 10 tests, including
+  the new focus and pinned-state cases; the live GNOME pointer re-pick was not
+  recorded.
+  Status: kept.

@@ -27,6 +27,9 @@ const DBUS_INTERFACE = `
     <method name="GetFocusedWmClass">
       <arg type="s" direction="out" name="wmClass"/>
     </method>
+    <method name="RepickPointer">
+      <arg type="b" direction="in" name="nudge"/>
+    </method>
     <signal name="FocusedWmClassChanged">
       <arg type="s" name="wmClass"/>
     </signal>
@@ -97,6 +100,13 @@ export default class OpenLogiFrontmostExtension extends Extension {
         if (!win)
             return '';
         return win.get_wm_class() || '';
+    }
+
+    // D-Bus method org.openlogi.Frontmost.RepickPointer. A live diagnostic
+    // for the pinned card's pointer focus; nudge=true leaves and re-enters
+    // the card's frame, false warps to the current position.
+    RepickPointer(nudge) {
+        this._windowState?.repickPointer(nudge);
     }
 
     _emitFocusedWmClassChanged() {

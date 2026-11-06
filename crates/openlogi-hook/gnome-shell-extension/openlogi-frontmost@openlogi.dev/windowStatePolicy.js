@@ -78,3 +78,9 @@ export function parseFlowPosition(toml) {
     const saved = {x: Number(x[1]), y: Number(y[1])};
     return Number.isFinite(saved.x) && Number.isFinite(saved.y) ? saved : null;
 }
+
+/// Whether the card is pinned, from the app's flow-indicator.toml. A file
+/// written before pinning existed keeps the card regular.
+export function parseFlowPinned(toml) {
+    return /^\s*pinned\s*=\s*true\s*$/m.test(toml ?? '');
+}
