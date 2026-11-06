@@ -36,8 +36,9 @@ use objc2::{
 };
 use objc2_app_kit::NSStatusItem;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
-    NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
+    NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
+    NSImage, NSRunningApplication, NSWorkspace, NSWorkspaceSessionDidBecomeActiveNotification,
+    NSWorkspaceSessionDidResignActiveNotification,
 };
 use objc2_foundation::{NSNotification, NSString};
 use openlogi_agent_core::observable::ObservableState;
@@ -260,6 +261,13 @@ define_class!(
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
             open_command(DeeplinkCommand::OpenSettings);
+        }
+
+        #[unsafe(method(toggleFlowPin:))]
+        fn toggle_flow_pin(&self, _sender: Option<&AnyObject>) {
+            let _ = openlogi_agent::flow_pin::flow_pin().toggle();
+            // Rebuild after the menu closes so its checkmark follows the state.
+            DispatchQueue::main().exec_async(refresh_battery_readout);
         }
 
         #[unsafe(method(openAbout:))]
@@ -542,6 +550,20 @@ fn build_menu(
         "m",
     );
     menu.addItem(&show);
+    let pinned = openlogi_agent::flow_pin::flow_pin().pinned();
+    let pin = status_item::new_action_item(
+        mtm,
+        &rust_i18n::t!("flow_indicator.pin_card"),
+        sel!(toggleFlowPin:),
+        target,
+        "",
+    );
+    pin.setState(if pinned {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+    menu.addItem(&pin);
     status_item::add_separator(&menu, mtm);
 
     let settings = status_item::new_action_item(

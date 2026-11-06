@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use ksni::menu::{MenuItem, StandardItem};
+use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
 use ksni::{OfflineReason, ToolTip, Tray, TrayMethods as _};
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::config::{Config, TrayBadgeStyle};
@@ -347,6 +347,17 @@ impl Tray for OpenLogiTray {
                 label: rust_i18n::t!("app.show_main_window").to_string(),
                 activate: Box::new(|_| open_gui()),
                 ..StandardItem::default()
+            }
+            .into(),
+        );
+        items.push(
+            CheckmarkItem {
+                label: rust_i18n::t!("flow_indicator.pin_card").to_string(),
+                checked: openlogi_agent::flow_pin::flow_pin().pinned(),
+                activate: Box::new(|_| {
+                    let _ = openlogi_agent::flow_pin::flow_pin().toggle();
+                }),
+                ..CheckmarkItem::default()
             }
             .into(),
         );

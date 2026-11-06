@@ -5,4 +5,5 @@
 //! owns the scripted demo devices ([`mock`]), which `openlogi-agent --mock`
 //! serves in place of real hardware and the mock binary serves standalone.
 
+pub mod flow_pin;
 pub mod mock;

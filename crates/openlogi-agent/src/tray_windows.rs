@@ -44,11 +44,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GWL_EXSTYLE, GetCursorPos,
     GetMessageW, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_NOTOPMOST,
     HWND_TOPMOST, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR, LoadIconW,
-    MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-    SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos,
-    ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WM_APP, WM_CONTEXTMENU, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE,
-    WM_THEMECHANGED, WNDCLASSW, WS_EX_TOPMOST, WS_OVERLAPPED,
+    MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
+    RegisterWindowMessageW, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetForegroundWindow, SetWindowPos, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL,
+    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_EX_TOPMOST, WS_OVERLAPPED,
 };
 
 use crate::shutdown::{self, ShutdownRequestSender};
@@ -84,6 +84,7 @@ const WM_TRAY_UPDATE: u32 = WM_APP + 2;
 /// Menu command ids returned by `TrackPopupMenu`.
 const ID_SHOW: usize = 1;
 const ID_QUIT: usize = 2;
+const ID_FLOW_PIN: usize = 3;
 
 /// The tooltip prefix and the fallback when no device has a readout.
 const BRAND_TIP: &str = "OpenLogi";
@@ -647,6 +648,13 @@ unsafe fn show_menu(hwnd: HWND) {
             ID_SHOW,
             wide(&rust_i18n::t!("app.show_main_window")).as_ptr(),
         );
+        let pinned = openlogi_agent::flow_pin::flow_pin().pinned();
+        AppendMenuW(
+            menu,
+            MF_STRING | if pinned { MF_CHECKED } else { 0 },
+            ID_FLOW_PIN,
+            wide(&rust_i18n::t!("flow_indicator.pin_card")).as_ptr(),
+        );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         let rows: Vec<String> = if TRAY_BATTERY.load(Ordering::Relaxed) {
             let config = current_config();
@@ -697,6 +705,9 @@ unsafe fn show_menu(hwnd: HWND) {
 
         match cmd as usize {
             ID_SHOW => show_openlogi(),
+            ID_FLOW_PIN => {
+                let _ = openlogi_agent::flow_pin::flow_pin().toggle();
+            }
             ID_QUIT => quit(hwnd),
             _ => {}
         }

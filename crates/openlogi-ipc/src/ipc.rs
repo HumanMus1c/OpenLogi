@@ -157,7 +157,8 @@ pub use succession::Identity;
 ///      input hook dropped) when the suite switches between real hardware and
 ///      the scripted demo inventory, where killing the process would skip
 ///      that teardown.
-pub const PROTOCOL_VERSION: u32 = 43;
+/// v44: Flow Indicator pin state observation and report appended for the tray.
+pub const PROTOCOL_VERSION: u32 = 44;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -694,6 +695,20 @@ pub struct NoticeObservation {
     pub language: Option<String>,
 }
 
+/// The Flow Indicator card's pinned state, stamped with its generation.
+///
+/// Its own cell rather than a field of [`AgentSnapshot`]: pinning is a
+/// presentation choice the tray and the overlay share, not device state, and
+/// waking the GUI on every pin change would be wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowPinnedObservation {
+    /// See [`Generation`]. Pass it back to the next
+    /// [`Agent::observe_flow_pinned`].
+    pub generation: Generation,
+    /// Whether the card is pinned.
+    pub pinned: bool,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -977,4 +992,17 @@ pub trait Agent {
     /// the process would skip the teardown. This method is appended to
     /// preserve the existing service-method order.
     async fn request_shutdown();
+
+    /// Long-poll the Flow Indicator's pinned state. Answers as soon as it
+    /// differs from generation `since`, or with the unchanged state after
+    /// [`OBSERVE_HOLD`]. Pass `0` to read the current state at once.
+    ///
+    /// Appended to preserve the existing service-method order.
+    async fn observe_flow_pinned(since: Generation) -> FlowPinnedObservation;
+
+    /// Report the overlay's current pinned state so the tray's checkmark
+    /// follows a pin toggled on the card itself.
+    ///
+    /// Appended to preserve the existing service-method order.
+    async fn report_flow_pinned(pinned: bool);
 }

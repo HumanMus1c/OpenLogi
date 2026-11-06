@@ -672,3 +672,17 @@ entry starts with `pending`; the docs commit that follows fills the hashes.
   Verified: `cargo test -p openlogi-ui` passed (6 unit tests and the catalog
   parity test).
   Status: kept.
+
+- `pending` **feat(agent): share the Flow Indicator pin through the tray** — kept.
+  Why: the pinned card had no keyboard or external path, and the tray and card
+  needed one source for the pin; a second copy would drift.
+  Fix: append `FlowPinnedObservation`, `observe_flow_pinned`, and
+  `report_flow_pinned` to the IPC contract (v44); the agent owns a `FlowPin`
+  seeded from `flow-indicator.toml` with a generation-stamped watch; Windows,
+  Linux, and macOS trays render a checked item that toggles it; the CLI profile
+  capture test agent implements the appended methods.
+  Verified: Windows `cargo test -p openlogi-ipc -p openlogi-agent` (28 IPC,
+  40 lib, 106 bin) and Linux (28 IPC, 41 lib) were recorded for the final tree;
+  the live Windows tray click flipped the card and the placement file after the
+  overlay wiring landed. macOS remains uncompiled.
+  Status: kept.

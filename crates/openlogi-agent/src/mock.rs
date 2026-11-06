@@ -81,11 +81,11 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation,
-    Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind,
-    NoticeObservation, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
-    SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowPinnedObservation, ForegroundApps,
+    FoundDevice, Generation, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
+    MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD, Observation, ObservedLight,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -1180,6 +1180,14 @@ impl Agent for MockAgent {
         // No firmware, hook, or input-worker state to tear down: the serving
         // loop just leaves.
         let _ = self.shutdown.send(());
+    }
+
+    async fn observe_flow_pinned(self, _: Context, since: Generation) -> FlowPinnedObservation {
+        crate::flow_pin::flow_pin().observe(since).await
+    }
+
+    async fn report_flow_pinned(self, _: Context, pinned: bool) {
+        crate::flow_pin::flow_pin().set(pinned);
     }
 
     async fn identity(self, _: Context) -> Identity {

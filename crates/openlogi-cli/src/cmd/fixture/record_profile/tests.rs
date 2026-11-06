@@ -20,10 +20,10 @@ use openlogi_fixture::{
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
-    ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
-    LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
-    SavedConfigVerdict,
+    ClientKind, ConfigReloadError, FlowPinnedObservation, ForegroundApps, Generation, Identity,
+    InventoryHealth, LockKeyObservation, MonitorEvent, NoticeObservation, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -120,6 +120,18 @@ impl Agent for TestAgent {
 
     async fn request_shutdown(self, _: TarpcContext) {
         unreachable!("profile capture must never shut the agent down")
+    }
+
+    async fn observe_flow_pinned(
+        self,
+        _: TarpcContext,
+        _since: Generation,
+    ) -> FlowPinnedObservation {
+        unreachable!("profile capture has no overlay")
+    }
+
+    async fn report_flow_pinned(self, _: TarpcContext, _pinned: bool) {
+        unreachable!("profile capture has no overlay")
     }
 
     async fn status(self, _: TarpcContext) -> AgentStatus {

@@ -30,9 +30,10 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
-    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowPinnedObservation, Generation,
+    Identity, LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -178,6 +179,14 @@ impl Agent for AgentServer {
         {
             warn!("shutdown requested over IPC, but the lifecycle channel is closed");
         }
+    }
+
+    async fn observe_flow_pinned(self, _: Context, since: Generation) -> FlowPinnedObservation {
+        openlogi_agent::flow_pin::flow_pin().observe(since).await
+    }
+
+    async fn report_flow_pinned(self, _: Context, pinned: bool) {
+        openlogi_agent::flow_pin::flow_pin().set(pinned);
     }
 
     async fn observe_backlight(self, _: Context, since: Generation) -> BacklightObservation {
