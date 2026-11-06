@@ -656,3 +656,19 @@ These commits follow the ledger's original scope. Their entries were added with
   tests (39 lib + 106 main) and Clippy `-D warnings` passed on the final tree.
   A live Windows tray raise was not recorded.
   Status: kept.
+
+## 13. P3 overlay polish and pin sharing (2026-11-06)
+
+These commits finish the P2/P3 Flow Indicator work from the working tree. Each
+entry starts with `pending`; the docs commit that follows fills the hashes.
+
+- `pending` **feat(i18n): localize the Flow Indicator page and add pin labels** — kept.
+  Why: every non-English catalog still carried the Flow Indicator settings page
+  in English (including zh-CN), and the pin had no localized strings for its
+  accessible label or the tray menu.
+  Fix: translate the Flow Indicator section in the 23 non-English catalogs
+  (Chinese reviewed; the rest best-effort for Crowdin) and add `pin_card`,
+  `unpin_card`, and `more_devices` to every catalog in the same order.
+  Verified: `cargo test -p openlogi-ui` passed (6 unit tests and the catalog
+  parity test).
+  Status: kept.
