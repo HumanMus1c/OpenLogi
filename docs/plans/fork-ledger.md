@@ -659,10 +659,10 @@ These commits follow the ledger's original scope. Their entries were added with
 
 ## 13. P3 overlay polish and pin sharing (2026-11-06)
 
-These commits finish the P2/P3 Flow Indicator work from the working tree. Each
-entry starts with `pending`; the docs commit that follows fills the hashes.
+These commits finish the P2/P3 Flow Indicator work from the working tree. The
+docs commit that follows fills the hashes.
 
-- `pending` **feat(i18n): localize the Flow Indicator page and add pin labels** — kept.
+- `1cf7a29e` **feat(i18n): localize the Flow Indicator page and add pin labels** — kept.
   Why: every non-English catalog still carried the Flow Indicator settings page
   in English (including zh-CN), and the pin had no localized strings for its
   accessible label or the tray menu.
@@ -673,7 +673,7 @@ entry starts with `pending`; the docs commit that follows fills the hashes.
   parity test).
   Status: kept.
 
-- `pending` **feat(agent): share the Flow Indicator pin through the tray** — kept.
+- `b6b460be` **feat(agent): share the Flow Indicator pin through the tray** — kept.
   Why: the pinned card had no keyboard or external path, and the tray and card
   needed one source for the pin; a second copy would drift.
   Fix: append `FlowPinnedObservation`, `observe_flow_pinned`, and
@@ -687,7 +687,7 @@ entry starts with `pending`; the docs commit that follows fills the hashes.
   overlay wiring landed. macOS remains uncompiled.
   Status: kept.
 
-- `pending` **fix(hook): keep the pinned card click-through on GNOME** — kept.
+- `15f208d4` **fix(hook): keep the pinned card click-through on GNOME** — kept.
   Why: Mutter kept routing clicks inside a focused card's old frame after the
   card's input region shrank to the pin, so the transparent HUD swallowed
   clicks until focus moved; the extension also did not know the card's pinned
@@ -701,7 +701,7 @@ entry starts with `pending`; the docs commit that follows fills the hashes.
   recorded.
   Status: kept.
 
-- `pending` **feat(overlay): finish the Flow Indicator card's placement, input, and pin** — kept.
+- `156ee3e4` **feat(overlay): finish the Flow Indicator card's placement, input, and pin** — kept.
   Why: the shadow halo swallowed clicks, the saved origin changed meaning on
   differently scaled displays, Windows could move the card after a topology or
   DPI change, a dropped agent left frozen readings looking live, the panel
