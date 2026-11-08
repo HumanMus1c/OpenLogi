@@ -6,7 +6,7 @@ use crate::ui::components::Toggle;
 use crate::ui::slider_row::SliderRow;
 
 use super::visual::LightView;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::{
     BoxShadow, Context, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, hsla, point, prelude::FluentBuilder as _, px, rgb,

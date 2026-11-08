@@ -89,8 +89,8 @@ use openlogi_ipc::{
     FlowPairingCommandError, FlowPinnedObservation, ForegroundApps, FoundDevice, Generation,
     Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind,
     NoticeObservation, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
-    SavedConfig, SavedConfigVerdict,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict,
 };
 use succession::Compat;
 use tarpc::context::Context;

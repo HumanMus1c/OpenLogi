@@ -23,8 +23,8 @@ use openlogi_ipc::{
     ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget, FlowPairingCommandError,
     FlowPinnedObservation, FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth,
     LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
-    SavedConfig, SavedConfigVerdict,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;

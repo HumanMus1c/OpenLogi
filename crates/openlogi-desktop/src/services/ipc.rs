@@ -1381,7 +1381,7 @@ mod tests {
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
 
         tokio::select! {
-            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, DeviceSource::Hardware, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             // Retry between two reconnect ticks, so only the retry can launch.

@@ -524,11 +524,7 @@ fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> 
 /// Build and install the menu-bar status item into [`TRAY`], which keeps it
 /// (and, through it, its menu) and the action target the menu items weakly
 /// reference alive until [`set_visible`] removes it.
-fn install_status_item(
-    mtm: MainThreadMarker,
-    app_icon: AppIcon,
-    observable: Arc<ObservableState>,
-) {
+fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon, observable: Arc<ObservableState>) {
     let target = MenuTarget::new(mtm);
     let status_item = status_item::create_status_item();
     status_item::set_png_icon(&status_item, mtm, glyph(app_icon), "OpenLogi");

@@ -7,7 +7,7 @@ use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceConfig, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, PairedDevice, StandaloneDevice, prettify_codename,
+    LightCapabilities, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
@@ -256,6 +256,11 @@ impl super::AppState {
 /// unreachable (their receiver is unplugged), structurally transient, or a
 /// legacy same-model duplicate are suppressed — see [`append_offline_known`]
 /// (#271/#280/#387).
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the inventory: the persisted-name fallback and the \
+              offline-known merge need the same key, identity and asset locals"
+)]
 pub(super) fn build_device_list(
     inventories: &[DeviceInventory],
     standalone: &[StandaloneDevice],

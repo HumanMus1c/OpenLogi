@@ -503,6 +503,22 @@ impl NotifyArea for Shell {
     }
 }
 
+/// Our icon as the shell identifies it (`hWnd` + `uID`), for the one call
+/// that names the icon without adding or refreshing it (`NIM_DELETE` on quit).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
+)]
+fn notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    // SAFETY: NOTIFYICONDATAW is a plain C struct of integers, handles and
+    // arrays; all-zero is its empty state.
+    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid
+}
+
 /// Add or modify the shell icon with a bounded tooltip.
 #[expect(
     clippy::cast_possible_truncation,
