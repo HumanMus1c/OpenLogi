@@ -762,3 +762,26 @@ docs commit that follows fills the hashes.
   selected ... display=MX Vertical` and the dev config kept `MX Master 3S`,
   `MX Keys`, and `MX Vertical`.
   Status: kept.
+
+## 16. Upstream merge (2026-11-08)
+
+- `pending` **chore: merge upstream/master into feat/tray-light-menu** — kept.
+  Why: the fork needed the 225 upstream commits since `929fa4ec` (Flow, onboard
+  memory, sidetone, Kit 0.8.1 on GPUI 0.3.10, #2296/#2297 tray re-add fixes)
+  without losing the fork's tray, card, and battery work; 53 files conflicted.
+  Fix: dropped the fork's `[patch."https://github.com/longbridge/gpui-kit"]`
+  backport (the footer API is upstream in v0.8.1) and kept the `vendor/ksni`
+  patch; folded the fork's `request_shutdown`, `observe_flow_pinned`, and
+  `report_flow_pinned` into upstream's unreleased v46 (append-only, goldens
+  updated); kept the fork's thin `bin/mock_agent.rs` wrapper and ported
+  upstream's mock wiring into the modular `src/mock.rs` (`mod flow`, sidetone,
+  onboard, host switch, Flow RPCs); kept the Windows tray's
+  badge-aware check-before-readd probe (`LAST_TIP` cleared before `NIM_MODIFY`)
+  over upstream's plain re-add; added `SliderRow::value_color` so the battery
+  band paints brightness values on upstream's shared row (gallery updated);
+  kept the window-bounds memory and made upstream's `WindowFit` the fresh-frame
+  default; unioned the 24 locale catalogs (991 keys each, parity checked) and
+  the `flow_indicator` page between General and Updates (index 3 on Linux).
+  Verified: none recorded yet (build and runtime verification follow in the
+  Windows rebuild task); conflict-marker scan clean.
+  Status: kept.

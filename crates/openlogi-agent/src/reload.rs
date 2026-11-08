@@ -17,6 +17,7 @@ pub(crate) fn apply_tray_settings(config: &Config) {
         use std::sync::Arc;
 
         crate::tray::set_icon(settings.app_icon);
+        crate::tray::set_visible(settings.show_in_menu_bar, settings.app_icon);
         crate::tray::relocalize();
         crate::tray::set_battery_readout(settings.tray_battery);
         crate::tray::set_config(Arc::new(config.clone()));

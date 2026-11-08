@@ -35,13 +35,14 @@ use super::{MonitorInfo, NoticePlacement, RingPlacement};
 use crate::flow_indicator::{HEADER_LANE, PADDING_X, PADDING_Y, SHADOW_MARGIN, TOPMOST_BIT};
 
 impl RingPlacement {
-    pub(crate) fn capture(_cx: &mut App) -> Result<Self> {
+    pub(crate) fn capture(_cx: &mut App, edge: Pixels) -> Result<Self> {
         let sample = sample_monitor()?;
         Ok(Self {
             display_id: sample.display_id,
             cursor: sample.cursor,
             display: sample.display,
             dpi: sample.dpi,
+            edge,
         })
     }
 

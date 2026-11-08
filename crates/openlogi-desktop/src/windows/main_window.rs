@@ -11,22 +11,34 @@ use std::path::PathBuf;
 use gpui::{
     App, AppContext as _, Bounds, Pixels, Point, Size, Styled as _, WindowBounds, WindowOptions, px,
 };
-use gpui_component::{ActiveTheme as _, Root};
+use gpui_kit::component::{ActiveTheme as _, Root};
 use openlogi_core::brand::APP_ID;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::app::AppView;
 use crate::ui::theme;
-use crate::windows::{WindowRegistry, titlebar_options};
+use crate::windows::{WindowFit, WindowRegistry, titlebar_options};
+
+/// The client size a fresh main window opens at when the work area holds it.
+pub(super) const PREFERRED_SIZE: Size<Pixels> = Size {
+    width: px(1280.),
+    height: px(820.),
+};
+
+/// How far the user may shrink the main window. The height keeps the buttons
+/// tab's mouse model above its scale floor (`MODEL_MIN_H` + the chrome/padding
+/// reserve) so its side labels never overlap; below this the model can't
+/// shrink further without crowding. [`WindowFit`] lowers it only on a work
+/// area too small to hold it.
+pub(super) const MIN_SIZE: Size<Pixels> = Size {
+    width: px(720.),
+    height: px(680.),
+};
 
 /// The main window's last frame, beside the config file. The Flow Indicator
 /// owns its own `flow-indicator.toml`; this is the settings window only.
 const STATE_FILE: &str = "window-state.json";
-const DEFAULT_WIDTH: f32 = 1280.0;
-const DEFAULT_HEIGHT: f32 = 820.0;
-const MIN_WIDTH: f32 = 720.0;
-const MIN_HEIGHT: f32 = 680.0;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 struct WindowState {
@@ -85,8 +97,8 @@ fn save_state(bounds: Bounds<Pixels>) {
 
 fn clamp_to_area(state: WindowState, area: Bounds<Pixels>) -> Bounds<Pixels> {
     let size = Size::new(
-        px(state.width.max(MIN_WIDTH)),
-        px(state.height.max(MIN_HEIGHT)),
+        px(state.width.max(f32::from(MIN_SIZE.width))),
+        px(state.height.max(f32::from(MIN_SIZE.height))),
     );
     let max = Point::new(
         px(
@@ -178,17 +190,19 @@ const fn restored_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
 }
 
 fn window_options(cx: &mut App) -> WindowOptions {
+    // A fresh window opens at the authored size fitted to this display; a
+    // remembered frame takes precedence, clamped back into the display.
+    let fit = WindowFit::on_primary_display(PREFERRED_SIZE, MIN_SIZE, cx);
     let saved = if persistence_supported() {
         saved_bounds(cx)
     } else {
         None
     };
-    let bounds = saved.map_or_else(
-        || Bounds::centered(None, Size::new(px(DEFAULT_WIDTH), px(DEFAULT_HEIGHT)), cx),
-        restored_bounds,
-    );
+    let mut options = WindowOptions::from(fit);
+    if let Some(bounds) = saved {
+        options.window_bounds = Some(WindowBounds::Windowed(restored_bounds(bounds)));
+    }
     WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
         // Advertise a Wayland xdg-toplevel app_id (and X11 WM_CLASS). Without it
         // the window ships no app_id, so GNOME's `get_wm_class()` returns empty
         // and our own `gnome_shell` frontmost backend reports OpenLogi as `None`
@@ -196,15 +210,11 @@ fn window_options(cx: &mut App) -> WindowOptions {
         // is the shared `brand::APP_ID`, matching the desktop file's
         // `StartupWMClass` and the macOS bundle-id family.
         app_id: Some(APP_ID.into()),
-        // Min height keeps the buttons tab's mouse model above its scale floor
-        // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
-        // overlap; below this the model can't shrink further without crowding.
-        window_min_size: Some(Size::new(px(MIN_WIDTH), px(MIN_HEIGHT))),
         // Linux: transparent chrome so `AppView::render` can draw a client-side
         // `TitleBar` (the compositor declines server-side decorations and gpui's
         // fallback is unpainted). macOS/Windows keep their native titlebar.
         titlebar: Some(titlebar_options("OpenLogi")),
-        ..WindowOptions::default()
+        ..options
     }
 }
 

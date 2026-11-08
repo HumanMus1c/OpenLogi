@@ -12,7 +12,7 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use openlogi_agent_core::action_ring::ActionRingManager;
+use openlogi_agent_core::action_ring::{ActionRingActivation, ActionRingManager};
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
@@ -24,16 +24,16 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
-    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    LightCommand, OnboardState, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, FlowPinnedObservation, Generation,
-    Identity, LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate, RingObservation, SavedConfig,
-    SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
+    FlowPairingCommandError, FlowPinnedObservation, Generation, Identity, LockKeyObservation,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -135,8 +135,9 @@ impl AgentServer {
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::autostart::reconcile(launch_at_login);
-                // The tray's readout, badge style, names, and language are
-                // live settings; the demo tree applies the same function.
+                // The tray's readout, badge style, names, menu-bar visibility,
+                // and language are live settings; the demo tree applies the
+                // same function.
                 crate::reload::apply_tray_settings(&reloaded);
                 Ok(revision)
             }
@@ -321,6 +322,19 @@ impl Agent for AgentServer {
         self.shared.set_disable_keys(&route, desired).await
     }
 
+    async fn read_onboard(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardState, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadOnboard, |c| async move {
+                openlogi_hid::get_onboard_on(&c).await
+            })
+            .await
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         Hook::prompt_accessibility();
     }
@@ -437,6 +451,17 @@ impl Agent for AgentServer {
             .rename_easy_switch_host(&route, slot, name)
             .await
     }
+
+    async fn switch_host(self, _: Context, route: DeviceRoute, host: u8) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ChangeHost, |c| async move {
+                let changed = openlogi_hid::switch_host_on(&c, host).await?;
+                info!(%route, host, changed, "switch_host");
+                Ok(())
+            })
+            .await
+    }
     async fn reload_saved_config(
         self,
         _: Context,
@@ -452,6 +477,28 @@ impl Agent for AgentServer {
     ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         let revision = self.reload(Some(&saved)).await?;
         Ok(saved_config_verdict(&saved, revision))
+    }
+
+    async fn read_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadSidetone, |c| async move {
+                openlogi_hid::get_sidetone_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared.set_sidetone(&route, level).await
     }
 
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
@@ -551,16 +598,7 @@ impl Agent for AgentServer {
         slot: ActionRingSlot,
     ) -> Result<(), ActionRingCommandError> {
         let activation = self.action_ring.activate(session_id, slot)?;
-        self.dispatcher
-            .dispatch(&activation.action, Some(&activation.device_key));
-        self.ring_haptics.play(
-            activation.haptic_route,
-            HapticWaveform::DampStateChange,
-            "activation",
-        );
-        // After the confirmation buzz, so it plays before the engine is
-        // handed back.
-        self.ring_haptics.end_session(session_id);
+        run_ring_activation(&self.dispatcher, &self.ring_haptics, session_id, activation);
         Ok(())
     }
 
@@ -568,6 +606,61 @@ impl Agent for AgentServer {
         self.action_ring.cancel(session_id);
         self.ring_haptics.end_session(session_id);
     }
+
+    async fn read_flow_identity(self, _: Context) -> Result<FlowIdentity, FlowPairingCommandError> {
+        self.shared.flow.pairing().identity().await
+    }
+
+    async fn start_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().start().await
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: Context,
+        target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().pair(target).await
+    }
+
+    async fn confirm_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().confirm().await
+    }
+
+    async fn cancel_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().cancel().await
+    }
+
+    async fn stop_flow_pairing(self, _: Context) {
+        self.shared.flow.pairing().stop().await;
+    }
+
+    async fn action_ring_unhover(
+        self,
+        _: Context,
+        session_id: u64,
+    ) -> Result<(), ActionRingCommandError> {
+        self.action_ring.unhover(session_id)
+    }
+}
+
+/// Run the action a ring session closed on, whether a click on the overlay
+/// or the release of a held trigger chose it, and confirm it with a buzz.
+pub(crate) fn run_ring_activation(
+    dispatcher: &ActionDispatcher,
+    haptics: &RingHapticPlayer,
+    session_id: u64,
+    activation: ActionRingActivation,
+) {
+    dispatcher.dispatch(&activation.action, Some(&activation.device_key));
+    haptics.play(
+        activation.haptic_route,
+        HapticWaveform::DampStateChange,
+        "activation",
+    );
+    // After the confirmation buzz, so it plays before the engine is handed
+    // back.
+    haptics.end_session(session_id);
 }
 
 /// Coalescing Actions Ring haptic player: at most one waveform is in flight,
@@ -1072,6 +1165,7 @@ impl RingHapticPlayer {
 /// `main` holds the single-instance lock (`agent.lock`), so no other live agent
 /// owns this socket and any leftover is from a dead instance.
 pub async fn run(server: AgentServer) {
+    tokio::spawn(reload_after_flow_pairing(server.clone()));
     let listener = match transport::bind() {
         Ok(listener) => listener,
         Err(e) => {
@@ -1098,6 +1192,16 @@ pub async fn run(server: AgentServer) {
                     tokio::spawn(response);
                 }),
         );
+    }
+}
+
+/// Reload `config.toml` each time Flow pairing saved a peer in it, so the
+/// peer reaches Flow and the snapshot the way a saved edit would.
+async fn reload_after_flow_pairing(server: AgentServer) {
+    let mut saved = server.shared.flow.pairing().saved();
+    while saved.changed().await.is_ok() {
+        // A failed reload logged why and kept the config it had.
+        let _ = server.reload(None).await;
     }
 }
 

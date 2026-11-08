@@ -4,7 +4,7 @@ use super::{
     AppState, IconName, InteractiveElement as _, SettingField, SettingGroup, SettingItem,
     SettingPage,
 };
-use gpui_component::radio::{Radio, RadioGroup};
+use gpui_kit::component::radio::{Radio, RadioGroup};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use openlogi_core::config::TrayBadgeStyle;
 use openlogi_core::config::{

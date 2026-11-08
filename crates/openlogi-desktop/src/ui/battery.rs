@@ -8,7 +8,7 @@ use gpui::{
     App, BorderStyle, Bounds, Corners, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder,
     RenderOnce, Styled, Window, canvas, point, prelude::FluentBuilder as _, px, quad, size,
 };
-use gpui_component::h_flex;
+use gpui_kit::component::h_flex;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryReading, BatteryStatus};
 
 use super::theme::{self, Palette, Typography as _};
@@ -87,7 +87,7 @@ fn inline_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
             gpui::div()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::reading_color(battery.color(), pal))
-                .child(value_label(battery)),
+                .child(ValueSlot::new(battery)),
         )
 }
 
@@ -119,7 +119,7 @@ fn status_readout(battery: &BatteryInfo, online: bool, pal: Palette) -> impl Int
             gpui::div()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::reading_color(battery.color(), pal))
-                .child(value_label(battery)),
+                .child(ValueSlot::new(battery)),
         )
         .when_some(context_label(battery, online), |row, label| {
             row.child(gpui::div().text_color(pal.text_muted).child(label))
@@ -136,7 +136,7 @@ fn summary_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
             gpui::div()
                 .text_heading()
                 .text_color(theme::reading_color(battery.color(), pal))
-                .child(value_label(battery)),
+                .child(ValueSlot::new(battery)),
         )
         .child(
             gpui::div()
@@ -146,11 +146,57 @@ fn summary_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
         )
 }
 
+/// [`value_label`] in a slot at least as wide as the widest percentage,
+/// right-aligned. A falling charge (74% → 71%, 10% → 9%) then moves neither
+/// the glyph before the value nor the words after it. The width is measured
+/// in the text style the slot renders in, so each presentation reserves its
+/// own.
+#[derive(IntoElement)]
+struct ValueSlot {
+    label: String,
+}
+
+impl ValueSlot {
+    fn new(battery: &BatteryInfo) -> Self {
+        Self {
+            label: value_label(battery),
+        }
+    }
+}
+
+impl RenderOnce for ValueSlot {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let widest = gpui::SharedString::from(percent_label(100));
+        let style = window.text_style();
+        let run = style.to_run(widest.len());
+        let width = window
+            .text_system()
+            .shape_line(
+                widest,
+                style.font_size.to_pixels(window.rem_size()),
+                &[run],
+                None,
+            )
+            .width
+            // A text element lays out at its shaped width rounded up.
+            .ceil();
+        h_flex()
+            .flex_none()
+            .min_w(width)
+            .justify_end()
+            .child(self.label)
+    }
+}
+
+fn percent_label(percentage: u8) -> String {
+    format!("{percentage}%")
+}
+
 /// The headline value: the percentage, or the level's word for a device
 /// that reports no percentage.
 pub(crate) fn value_label(battery: &BatteryInfo) -> String {
     match battery.reading() {
-        BatteryReading::Percent(percentage) => format!("{percentage}%"),
+        BatteryReading::Percent(percentage) => percent_label(percentage),
         BatteryReading::Level(BatteryLevel::Full) => tr!("device.full").to_string(),
         BatteryReading::Level(BatteryLevel::Good) => tr!("device.battery_good").to_string(),
         BatteryReading::Level(BatteryLevel::Low | BatteryLevel::Critical) => {
@@ -442,4 +488,48 @@ fn paint_error_mark(body: Bounds<gpui::Pixels>, color: Hsla, window: &mut Window
         color,
         BorderStyle::default(),
     ));
+}
+#[cfg(test)]
+mod tests {
+    use gpui::InteractiveElement as _;
+
+    use super::*;
+
+    /// Title-bar readouts at a one-, two- and three-digit charge, each in a
+    /// box as wide as its content.
+    struct InlineReadouts;
+
+    impl gpui::Render for InlineReadouts {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui_kit::component::v_flex()
+                .items_start()
+                .children([9, 74, 100].map(|percentage| {
+                    gpui::div()
+                        .debug_selector(move || format!("inline-{percentage}"))
+                        .child(BatteryIndicator::inline(&BatteryInfo {
+                            percentage: Some(percentage),
+                            level: BatteryLevel::Good,
+                            status: BatteryStatus::Discharging,
+                        }))
+                }))
+        }
+    }
+
+    /// A falling charge must not resize the title-bar readout, or the glyph
+    /// beside it jumps whenever the digit count changes.
+    #[gpui::test]
+    fn the_inline_readout_keeps_its_width_as_the_charge_falls(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_, cx) = cx.add_window_view(|_, _| InlineReadouts);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let width = |cx: &mut gpui::VisualTestContext, selector| {
+            cx.debug_bounds(selector)
+                .expect("the readout renders")
+                .size
+                .width
+        };
+        let full = width(cx, "inline-100");
+        assert_eq!(width(cx, "inline-74"), full);
+        assert_eq!(width(cx, "inline-9"), full);
+    }
 }

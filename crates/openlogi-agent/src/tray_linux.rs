@@ -726,6 +726,7 @@ mod tests {
                 model_info: None,
                 capabilities: None,
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }
     }

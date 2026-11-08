@@ -17,9 +17,10 @@
 //! exits.
 //!
 //! Everything runs on one dedicated thread: the hidden window, its message
-//! pump, and the menu. The icon is re-added when Explorer restarts (the
-//! `TaskbarCreated` broadcast), and the glyph tracks the taskbar theme
-//! (black on a light taskbar, white on a dark one) at install time.
+//! pump, and the menu. The icon is re-added when a `TaskbarCreated`
+//! broadcast finds it gone (an Explorer restart), and the glyph tracks the
+//! taskbar theme (black on a light taskbar, white on a dark one) at install
+//! time.
 
 #![expect(
     unsafe_code,
@@ -358,9 +359,14 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
-            // Explorer restarted; every tray icon was dropped. Re-add ours,
-            // reusing the current handle when the state has not changed.
-            apply_tray(hwnd, true);
+            let mut shell = Shell { hwnd };
+            match shell.readd() {
+                Readd::StillPresent => debug!("TaskbarCreated, tray icon still present"),
+                Readd::Restored => info!("tray icon re-added after TaskbarCreated"),
+                Readd::Lost => {
+                    warn!("Shell_NotifyIconW(NIM_ADD) failed after TaskbarCreated — no tray icon");
+                }
+            }
             0
         }
         // SAFETY: handing the system back the message it just delivered,
@@ -381,8 +387,10 @@ fn refresh_tray(hwnd: HWND) {
 /// Install the icon, or refresh both the icon and the tip in place.
 ///
 /// The badge/tip are recomputed from the same snapshot, and the icon is rebuilt
-/// only when the badge, taskbar theme, or icon size changed.
-fn apply_tray(hwnd: HWND, add: bool) {
+/// only when the badge, taskbar theme, or icon size changed. Answers whether
+/// the shell holds the icon afterwards, so the `TaskbarCreated` re-add can
+/// tell a present icon from a lost one.
+fn apply_tray(hwnd: HWND, add: bool) -> bool {
     let summary = current_summary();
     let tip = tip_for(summary.as_ref());
     let key = desired_key(hwnd, summary.as_ref());
@@ -392,7 +400,7 @@ fn apply_tray(hwnd: HWND, add: bool) {
         && current.is_some_and(|icon| icon.key == key)
         && LAST_TIP.with_borrow(|last| last == &tip)
     {
-        return;
+        return true;
     }
 
     let reuse = current.filter(|icon| icon.key == key);
@@ -402,9 +410,9 @@ fn apply_tray(hwnd: HWND, add: bool) {
             Some(icon) if !icon.handle.is_null() => icon,
             Some(_) => {
                 warn!("tray icon creation failed — keeping the current icon");
-                return;
+                return false;
             }
-            None => return,
+            None => return false,
         },
     };
     let built_new = reuse.is_none();
@@ -417,7 +425,7 @@ fn apply_tray(hwnd: HWND, add: bool) {
         if built_new && icon.owned {
             destroy_icon(icon.handle);
         }
-        return;
+        return false;
     }
 
     let previous = CURRENT_ICON.with_borrow_mut(|slot| slot.replace(icon));
@@ -434,6 +442,64 @@ fn apply_tray(hwnd: HWND, add: bool) {
         info!(?key, "tray icon updated");
     } else {
         debug!(?key, "tray tooltip updated");
+    }
+    true
+}
+
+/// What a `TaskbarCreated` broadcast found when it came to re-add the icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readd {
+    /// The shell still had the icon; nothing was added.
+    StillPresent,
+    /// The icon was gone and is back.
+    Restored,
+    /// The icon was gone and the shell refused to add it again.
+    Lost,
+}
+
+/// The two notification-area calls the `TaskbarCreated` handler makes. A
+/// trait so the re-add decision runs against a test double: CI has no
+/// Explorer to hold an icon.
+trait NotifyArea {
+    /// Refresh our icon in place (`NIM_MODIFY`). False when the shell does
+    /// not have it.
+    fn modify(&mut self) -> bool;
+    /// Add our icon (`NIM_ADD`). False when the shell refused it.
+    fn add(&mut self) -> bool;
+
+    /// Answer a `TaskbarCreated` broadcast. Explorer sends it after a restart
+    /// that dropped every icon, but other programs broadcast it too while our
+    /// icon is still there (#2296). `NIM_ADD` fails on an icon that exists,
+    /// so check with `NIM_MODIFY` first and add only an icon that is gone.
+    fn readd(&mut self) -> Readd {
+        if self.modify() {
+            Readd::StillPresent
+        } else if self.add() {
+            Readd::Restored
+        } else {
+            Readd::Lost
+        }
+    }
+}
+
+/// The real notification area, addressed through our hidden window. Only
+/// built in [`wnd_proc`], for the window it is running for.
+struct Shell {
+    hwnd: HWND,
+}
+
+impl NotifyArea for Shell {
+    fn modify(&mut self) -> bool {
+        // Force a real `NIM_MODIFY`: `apply_tray`'s unchanged shortcut would
+        // answer "present" without asking the shell, which may have dropped
+        // the icon in an Explorer restart. The tip is never empty, so the
+        // cleared cache cannot match it.
+        LAST_TIP.with_borrow_mut(String::clear);
+        apply_tray(self.hwnd, false)
+    }
+
+    fn add(&mut self) -> bool {
+        apply_tray(self.hwnd, true)
     }
 }
 
@@ -972,10 +1038,6 @@ fn spawn_gui() {
 /// the agent we are about to exit), then the icon, then the agent. Mirrors
 /// the macOS Quit semantics; the GUI holds no unsaved state (config writes
 /// are immediate).
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "NOTIFYICONDATAW is a few hundred bytes"
-)]
 fn quit(hwnd: HWND) {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut system = System::new();
@@ -989,12 +1051,9 @@ fn quit(hwnd: HWND) {
             }
         }
     }
-    // SAFETY: removing the icon this thread added.
+    let nid = notify_data(hwnd);
+    // SAFETY: removing the icon this thread added; `nid` outlives the call.
     unsafe {
-        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
     destroy_current_icon();
@@ -1028,7 +1087,7 @@ fn wide_truncated(s: &str, max: usize) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StackWindow, is_gui_process_name, plan_show, wide_truncated};
+    use super::{NotifyArea, Readd, StackWindow, is_gui_process_name, plan_show, wide_truncated};
 
     fn window(hwnd: isize, gui: bool, minimized: bool) -> StackWindow {
         StackWindow {
@@ -1128,5 +1187,56 @@ mod tests {
         let wide = wide_truncated(&boundary, MAX);
         assert_eq!(wide.len(), MAX);
         assert_eq!(wide[MAX - 1], 0);
+    }
+
+    /// The notification area as a `TaskbarCreated` broadcast finds it.
+    struct FakeShell {
+        has_icon: bool,
+        refuses_add: bool,
+        adds: usize,
+    }
+
+    impl NotifyArea for FakeShell {
+        fn modify(&mut self) -> bool {
+            self.has_icon
+        }
+
+        fn add(&mut self) -> bool {
+            self.adds += 1;
+            // Like the real shell, a duplicate add fails.
+            let added = !self.has_icon && !self.refuses_add;
+            self.has_icon |= added;
+            added
+        }
+    }
+
+    #[test]
+    fn taskbar_created_adds_only_a_missing_icon() {
+        // (icon still there, shell refuses adds) → (outcome, NIM_ADD calls).
+        // The first two rows are #2296: something re-sent TaskbarCreated
+        // every 60 s while Explorer kept the icon, and each blind NIM_ADD
+        // failed and logged a false "no tray icon".
+        let table = [
+            (true, false, Readd::StillPresent, 0),
+            (true, true, Readd::StillPresent, 0),
+            (false, false, Readd::Restored, 1),
+            (false, true, Readd::Lost, 1),
+        ];
+        for (has_icon, refuses_add, outcome, adds) in table {
+            let mut shell = FakeShell {
+                has_icon,
+                refuses_add,
+                adds: 0,
+            };
+            assert_eq!(
+                shell.readd(),
+                outcome,
+                "has_icon={has_icon} refuses_add={refuses_add}"
+            );
+            assert_eq!(
+                shell.adds, adds,
+                "has_icon={has_icon} refuses_add={refuses_add}"
+            );
+        }
     }
 }

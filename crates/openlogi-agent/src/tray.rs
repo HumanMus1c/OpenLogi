@@ -87,6 +87,10 @@ thread_local! {
     /// The config the menu rows name devices from, replaced on every reload.
     /// Main-thread only, like the menu it feeds.
     static CONFIG: RefCell<Option<Arc<Config>>> = const { RefCell::new(None) };
+    /// The inventory state the readout re-reads, kept so a live [`set_visible`]
+    /// install can wire the battery rows. Main-thread only, like the tray it
+    /// feeds.
+    static OBSERVABLE: RefCell<Option<Arc<ObservableState>>> = const { RefCell::new(None) };
 }
 
 /// The menu-bar glyph for `icon`: a monochrome template the system tints for
@@ -211,6 +215,28 @@ fn spawn_battery_watcher(observable: Arc<ObservableState>) {
     }
 }
 
+/// Show or hide the menu-bar item to match the "Show in menu bar" setting,
+/// after a config reload — so the toggle applies without an agent restart.
+/// Same shape as [`set_icon`]: the work hops to the main queue. Installing
+/// an already-shown item or removing a hidden one is a no-op.
+pub fn set_visible(show: bool, app_icon: AppIcon) {
+    DispatchQueue::main().exec_async(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let installed = TRAY.with_borrow(Option::is_some);
+        if show && !installed {
+            let Some(observable) = OBSERVABLE.with_borrow(Clone::clone) else {
+                return;
+            };
+            install_status_item(mtm, app_icon, observable);
+            refresh_battery_readout();
+        } else if !show && let Some(state) = TRAY.take() {
+            status_item::remove_status_item(&state.item);
+            info!("menu-bar item removed");
+        }
+    });
+}
 struct SessionTargetIvars {
     gate: Arc<ActivityGate>,
 }
@@ -399,9 +425,8 @@ fn gui_is_running() -> bool {
 ///
 /// `show_in_menu_bar` honors the user's preference: when `false`, the same
 /// Accessory loop runs with no status item (the agent stays fully headless; the
-/// tokio core still does all the work). The toggle takes effect on the agent's
-/// next launch — a no-restart live toggle would need a main-thread hop from the
-/// IPC reload path (deferred; it can't be verified headlessly).
+/// tokio core still does all the work). A later config reload flips it live
+/// through [`set_visible`].
 /// `tray_battery` controls whether the item carries the battery readout; a
 /// live toggle comes through [`set_battery_readout`].
 /// `observable` is the shared inventory state the readout re-reads on every
@@ -422,6 +447,7 @@ pub fn run_app_loop(
 ) -> ! {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
     CONFIG.with_borrow_mut(|slot| *slot = Some(config));
+    OBSERVABLE.with_borrow_mut(|slot| *slot = Some(Arc::clone(&observable)));
     TRAY_BATTERY.store(tray_battery, Ordering::Relaxed);
     MOCK_AGENT.store(mock, Ordering::Relaxed);
     let Some(mtm) = MainThreadMarker::new() else {
@@ -437,9 +463,14 @@ pub fn run_app_loop(
     // Before `run()`: AppKit remaps the probes for the keyboard layout only
     // once the loop has turned with them in the main menu.
     openlogi_inject::prepare_menu_shortcuts(mtm);
-    // Bind the status item (+ its target/menu) so they outlive `run()` — the
-    // menu items only weakly reference the target. `None` when hidden.
-    let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon, observable));
+    // `TRAY` keeps the status item (which retains its menu) and the target
+    // the menu items only weakly reference alive past `run()`.
+    if show_in_menu_bar {
+        install_status_item(mtm, app_icon, Arc::clone(&observable));
+    }
+    // One watcher for the whole loop: a live `set_visible` re-install must not
+    // stack a second refresh thread, and a hidden item's refresh is a no-op.
+    spawn_battery_watcher(observable);
 
     // AppKit documents that an app launched into an inactive session receives
     // `NSWorkspaceSessionDidResignActiveNotification` between its will- and
@@ -490,35 +521,26 @@ fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> 
     target
 }
 
-/// Build and install the menu-bar status item, returning the objects that must
-/// stay alive for the app's lifetime (the status item, the action target the
-/// menu items weakly reference, and the menu itself), and start the battery
-/// state watcher.
+/// Build and install the menu-bar status item into [`TRAY`], which keeps it
+/// (and, through it, its menu) and the action target the menu items weakly
+/// reference alive until [`set_visible`] removes it.
 fn install_status_item(
     mtm: MainThreadMarker,
     app_icon: AppIcon,
     observable: Arc<ObservableState>,
-) -> (
-    Retained<objc2_app_kit::NSStatusItem>,
-    Retained<MenuTarget>,
-    Retained<objc2_app_kit::NSMenu>,
 ) {
     let target = MenuTarget::new(mtm);
     let status_item = status_item::create_status_item();
     status_item::set_png_icon(&status_item, mtm, glyph(app_icon), "OpenLogi");
-    TRAY.with_borrow_mut(|slot| {
-        *slot = Some(TrayState {
-            item: status_item.clone(),
-            target: target.clone(),
-            observable: Arc::clone(&observable),
-        });
-    });
     let menu = build_menu(mtm, &target, None);
     status_item.setMenu(Some(&menu));
-    spawn_battery_watcher(observable);
+    TRAY.set(Some(TrayState {
+        item: status_item,
+        target,
+        observable,
+    }));
 
     info!("menu-bar item installed");
-    (status_item, target, menu)
 }
 
 /// Build the tray menu with the current locale's titles. The one constructor

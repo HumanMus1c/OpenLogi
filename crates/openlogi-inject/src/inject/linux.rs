@@ -23,7 +23,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
+use super::{HeldKey, HeldOutput, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
 
@@ -502,9 +502,9 @@ pub(super) fn run_apple_script(_src: &str) {
 }
 
 pub(super) fn run_shell_command(cmd: &str) {
-    let _ = std::process::Command::new("/bin/sh")
-        .args(["-c", cmd])
-        .output();
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", cmd]);
+    super::run_to_end(command, "shell command");
 }
 
 /// Settle time after creating the uinput device, before its first emit.
@@ -548,7 +548,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_LEFT,  KeyCode::KEY_RIGHT, KeyCode::KEY_UP,       KeyCode::KEY_DOWN,
     KeyCode::KEY_HOME,  KeyCode::KEY_END,   KeyCode::KEY_PAGEUP,   KeyCode::KEY_PAGEDOWN,
     KeyCode::KEY_TAB,   KeyCode::KEY_ENTER, KeyCode::KEY_BACKSPACE, KeyCode::KEY_DELETE,
-    KeyCode::KEY_ESC,   KeyCode::KEY_SPACE,
+    KeyCode::KEY_ESC,   KeyCode::KEY_SPACE, KeyCode::KEY_INSERT,
     // Modifiers (KEY_LEFTMETA used by LockScreen Super+L and Hyprland Super+Ctrl+L)
     KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
     // Function keys
@@ -627,9 +627,34 @@ fn rel_ev(axis: RelativeAxisCode, value: i32) -> InputEvent {
 /// Two separate frames give the kernel distinct timestamps for press and
 /// release, which matches what the kernel `uinput` docs show and avoids
 /// toolkits treating a zero-duration event as invalid.
+///
+/// A modifier a held chord keeps down on the device gets neither edge. The
+/// kernel drops the repeated press, but the release would lift the held
+/// chord's modifier while that chord is still held (#2413).
 fn press_key(mods: &[KeyCode], key: KeyCode) {
-    emit(&key_phase_events(mods, key, KeyPhase::Down));
-    emit(&key_phase_events(mods, key, KeyPhase::Up));
+    super::with_held_output(|held| {
+        let mods = unheld_modifiers(mods, held);
+        emit(&key_phase_events(&mods, key, KeyPhase::Down));
+        emit(&key_phase_events(&mods, key, KeyPhase::Up));
+    });
+}
+
+/// The keys of `mods` no held chord keeps down on the device.
+fn unheld_modifiers(mods: &[KeyCode], held: &HeldOutput) -> Vec<KeyCode> {
+    let held: Vec<KeyCode> = [
+        HeldKey::Control,
+        HeldKey::Shift,
+        HeldKey::Alt,
+        HeldKey::Super,
+    ]
+    .into_iter()
+    .filter(|&key| held.owns(key))
+    .filter_map(held_keycode)
+    .collect();
+    mods.iter()
+        .copied()
+        .filter(|code| !held.contains(code))
+        .collect()
 }
 
 /// Build one `SYN_REPORT` frame. Down order is modifiers then key; up order
@@ -865,6 +890,8 @@ fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
         0x36 => Some(KeyCode::KEY_COMMA),
         0x37 => Some(KeyCode::KEY_DOT),
         0x38 => Some(KeyCode::KEY_SLASH),
+        0x46 => Some(KeyCode::KEY_SYSRQ),
+        0x49 => Some(KeyCode::KEY_INSERT),
         0x4a => Some(KeyCode::KEY_HOME),
         0x4b => Some(KeyCode::KEY_PAGEUP),
         0x4c => Some(KeyCode::KEY_DELETE),
@@ -1171,16 +1198,16 @@ mod tests {
     use std::process::Command;
 
     use evdev::{KeyCode, RelativeAxisCode};
-    use openlogi_core::binding::{KeyCombo, NativeAction, Shortcut};
+    use openlogi_core::binding::{HeldKeys, KeyCombo, KeyboardUsage, NativeAction, Shortcut};
 
     use super::{
-        HELPER_PREFIXES, ScrollOutput, action_scroll, capture_region_mods, combo,
+        HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
         generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
         hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
         key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
-        scroll_events, syn, wait_with_retry,
+        scroll_events, syn, unheld_modifiers, wait_with_retry,
     };
-    use crate::inject::KeyPhase;
+    use crate::inject::{HeldOutput, KeyPhase};
 
     #[test]
     fn held_chord_edges_use_inverse_key_order() {
@@ -1202,6 +1229,32 @@ mod tests {
                 key_ev(KeyCode::KEY_LEFTCTRL, 0),
                 syn(),
             ]
+        );
+    }
+
+    /// A one-shot chord leaves out a modifier a held chord keeps down on the
+    /// shared device: its release would lift that modifier while the chord is
+    /// still held (#2413). Cmd shares Control's key, so a held Cmd chord
+    /// keeps the tapped chord's Ctrl out too.
+    #[test]
+    fn one_shot_chord_leaves_held_chord_modifiers_alone() {
+        let mods = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT];
+        assert_eq!(unheld_modifiers(&mods, &HeldOutput::default()), mods);
+
+        let mut output = HeldOutput::default();
+        let chord: KeyCombo = "Cmd+X".parse().expect("test chord must be valid");
+        let _ = output.transition(None, Some((&chord, HeldKeys::ModifiersOnly)));
+        assert_eq!(
+            unheld_modifiers(&mods, &output),
+            [KeyCode::KEY_LEFTSHIFT],
+            "the held chord's Ctrl must get neither edge"
+        );
+
+        let _ = output.transition(Some((&chord, HeldKeys::ModifiersOnly)), None);
+        assert_eq!(
+            unheld_modifiers(&mods, &output),
+            mods,
+            "a released chord no longer keeps its Ctrl out"
         );
     }
 
@@ -1252,7 +1305,27 @@ mod tests {
         assert_eq!(hid_usage_to_linux(0x50), Some(KeyCode::KEY_LEFT));
         assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
         assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
+        assert_eq!(hid_usage_to_linux(0x46), Some(KeyCode::KEY_SYSRQ));
+        assert_eq!(hid_usage_to_linux(0x49), Some(KeyCode::KEY_INSERT));
         assert_eq!(hid_usage_to_linux(0xff), None);
+    }
+
+    /// Every key a custom shortcut can name maps to an evdev code the uinput
+    /// device declares; the kernel drops a key event the device never
+    /// registered, so a gap in either table makes the binding a silent no-op.
+    #[test]
+    fn every_shortcut_usage_maps_to_a_registered_key() {
+        for code in 0..=u8::MAX {
+            if KeyboardUsage::try_new(code).is_err() {
+                continue;
+            }
+            let key = hid_usage_to_linux(code);
+            assert!(key.is_some(), "usage {code:#04x} has no evdev code");
+            assert!(
+                key.is_some_and(|key| KEY_CAPABILITIES.contains(&key)),
+                "usage {code:#04x} maps to {key:?}, which the uinput device does not register"
+            );
+        }
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
