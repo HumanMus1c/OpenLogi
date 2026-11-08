@@ -582,9 +582,18 @@ fn click_through_region(visible: bool, pinned: bool, rows: usize) -> Option<Boun
 ///
 /// Windows starts the overlay headless (#2339) and GPUI refuses a window in
 /// that mode, so this is the caller's cue to connect to the display before
-/// feeding the owner a command that may open the card.
-const fn card_needs_display(has_window: bool, dismissed: bool, row_count: usize) -> bool {
-    !has_window && !dismissed && row_count > 0
+/// feeding the owner a command that may open the card. A card with no
+/// observation yet also asks: the first observation carries the inventory
+/// that decides the rows, so waiting for them would make that first sync
+/// open nothing.
+const fn card_needs_display(
+    has_window: bool,
+    dismissed: bool,
+    enabled: bool,
+    row_count: usize,
+    observed: bool,
+) -> bool {
+    enabled && !has_window && !dismissed && (row_count > 0 || !observed)
 }
 
 /// The bottom-right corner of `area`, inside the screen margin.
@@ -2632,9 +2641,11 @@ impl FlowIndicator {
     /// true, or the card silently never opens there.
     pub(crate) fn needs_display(&self) -> bool {
         card_needs_display(
-            self.window.is_none(),
+            self.window.is_some(),
             self.dismissed.get(),
+            self.settings.enabled,
             self.rows().0.len(),
+            self.observed,
         )
     }
 
@@ -3919,10 +3930,15 @@ mod tests {
     /// draw on — it stays headless.
     #[test]
     fn the_card_asks_for_a_display_only_while_it_still_needs_a_window() {
-        assert!(card_needs_display(false, false, 2));
-        assert!(!card_needs_display(true, false, 2));
-        assert!(!card_needs_display(false, true, 2));
-        assert!(!card_needs_display(false, false, 0));
+        assert!(card_needs_display(false, false, true, 2, true));
+        assert!(
+            card_needs_display(false, false, true, 0, false),
+            "the first observation has not arrived yet and decides the rows"
+        );
+        assert!(!card_needs_display(true, false, true, 2, true));
+        assert!(!card_needs_display(false, true, true, 2, true));
+        assert!(!card_needs_display(false, false, false, 2, true));
+        assert!(!card_needs_display(false, false, true, 0, true));
     }
 
     #[test]
