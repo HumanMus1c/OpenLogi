@@ -725,7 +725,7 @@ docs commit that follows fills the hashes.
 
 ## 14. Linux tray session boundary (2026-11-08)
 
-- `pending` **fix(agent): retry the Linux tray when the session bus is not ready** — kept.
+- `0a1b4fc1` **fix(agent): retry the Linux tray when the session bus is not ready** — kept.
   Why: the tray is a graphical-session service, but the agent's systemd user
   unit can start outside the session's mount namespace. An xrdp/XFCE session
   keeps its D-Bus socket under a private `/tmp`, so ksni's connection failed
