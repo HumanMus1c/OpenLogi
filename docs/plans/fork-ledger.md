@@ -722,3 +722,21 @@ docs commit that follows fills the hashes.
   disconnect path has unit coverage only. Linux X11 input region and card
   startup were checked; the GNOME pointer re-pick and macOS remain unverified.
   Status: kept.
+
+## 14. Linux tray session boundary (2026-11-08)
+
+- `pending` **fix(agent): retry the Linux tray when the session bus is not ready** — kept.
+  Why: the tray is a graphical-session service, but the agent's systemd user
+  unit can start outside the session's mount namespace. An xrdp/XFCE session
+  keeps its D-Bus socket under a private `/tmp`, so ksni's connection failed
+  permanently and the panel's systray host never saw an item.
+  Fix: retry the SNI connection on a bounded 2 s / 5 s / 10 s backoff, log the
+  `DBUS_SESSION_BUS_ADDRESS` and attempt number on each failure, and on the
+  fourth failure give up with a message to start the agent inside the graphical
+  session. The existing wait for a late StatusNotifier host is unchanged.
+  Verified: Linux `cargo test -p openlogi-agent --bin openlogi-agent
+  tray_linux::tests` (10 tests, including the retry window and unset-bus hint);
+  Linux `cargo clippy -p openlogi-agent --all-targets -- -D warnings`; a runtime
+  run with `DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/nonexistent` logged three
+  retries and the final session-boundary message after four attempts.
+  Status: kept.

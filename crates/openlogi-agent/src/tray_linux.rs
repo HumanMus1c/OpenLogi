@@ -42,6 +42,18 @@ const WIDE_HEIGHTS: [u32; 2] = [22, 44];
 /// theme-aware icon, which is a separate follow-up.
 const LIGHT_PANEL: bool = false;
 
+/// Delays between attempts to reach the graphical session's D-Bus. The first
+/// attempt is immediate; after the last delay the tray gives up and the agent
+/// stays headless. A session bus (or its panel) can still be starting when the
+/// agent's user unit comes up; beyond this window the address is more likely
+/// wrong than late — for example an agent started outside an xrdp session's
+/// private `/tmp`.
+const TRAY_CONNECT_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+];
+
 /// A live settings or inventory change for the tray thread.
 #[derive(Clone, Debug)]
 enum TrayCommand {
@@ -379,6 +391,22 @@ impl Tray for OpenLogiTray {
     }
 }
 
+/// The delay before the next tray connection attempt, or `None` when the
+/// bounded retry window is spent.
+fn retry_delay(attempt: usize) -> Option<Duration> {
+    TRAY_CONNECT_RETRY_DELAYS.get(attempt).copied()
+}
+
+/// The session bus address for the failure log. An unset variable is itself a
+/// diagnostic: ksni has nowhere to connect.
+fn session_bus_or_unset(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "<unset>".to_owned())
+}
+
+fn configured_session_bus() -> String {
+    session_bus_or_unset(std::env::var("DBUS_SESSION_BUS_ADDRESS").ok())
+}
+
 /// Run the tray service for the process lifetime: register with the watcher,
 /// then fold inventory changes and config reloads into it.
 fn run(
@@ -392,18 +420,47 @@ fn run(
 ) {
     runtime.block_on(async move {
         let mut watch = observable.subscribe();
-        let tray = OpenLogiTray::new(observable, shutdown_tx, battery, badge_style, config);
+        let mut attempt = 0;
         // A desktop without an SNI host is a soft failure: keep the service
         // alive so it appears if the host starts later (a panel restart, or a
-        // GNOME session that loads its AppIndicator extension late).
-        let handle = match tray.assume_sni_available(true).spawn().await {
-            Ok(handle) => handle,
-            Err(error) => {
-                warn!(%error, "could not start the Linux tray");
-                return;
+        // GNOME session that loads its AppIndicator extension late). A bus
+        // that is not reachable yet is different: retry briefly, then name the
+        // address and the session boundary in the log.
+        let handle = loop {
+            let tray = OpenLogiTray::new(
+                Arc::clone(&observable),
+                shutdown_tx.clone(),
+                battery,
+                badge_style,
+                Arc::clone(&config),
+            );
+            match tray.assume_sni_available(true).spawn().await {
+                Ok(handle) => break handle,
+                Err(error) => {
+                    let Some(delay) = retry_delay(attempt) else {
+                        warn!(
+                            %error,
+                            bus = %configured_session_bus(),
+                            attempts = attempt + 1,
+                            "could not start the Linux tray; giving up — start the agent inside \
+                             the graphical session so it can reach the session D-Bus"
+                        );
+                        return;
+                    };
+                    warn!(
+                        %error,
+                        bus = %configured_session_bus(),
+                        attempt = attempt + 1,
+                        ?delay,
+                        "could not start the Linux tray; retrying until the session D-Bus is \
+                         reachable"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
             }
         };
-        info!("StatusNotifierItem tray installed");
+        info!(attempts = attempt + 1, "StatusNotifierItem tray installed");
 
         loop {
             tokio::select! {
@@ -630,6 +687,7 @@ fn is_gui_process(process: &sysinfo::Process) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use ksni::Tray as _;
     use openlogi_agent_core::observable::ObservableState;
@@ -641,7 +699,7 @@ mod tests {
 
     use super::{
         Face, ICON_SIZES, OpenLogiTray, TrayCommand, WIDE_HEIGHTS, argb_icon, badge_icon,
-        decode_png_icon,
+        decode_png_icon, retry_delay, session_bus_or_unset,
     };
     use crate::tray_readout::Badge;
     use openlogi_core::config::TrayBadgeStyle;
@@ -683,6 +741,23 @@ mod tests {
             TrayBadgeStyle::Circle,
             std::sync::Arc::new(openlogi_core::config::Config::default()),
         )
+    }
+
+    #[test]
+    fn the_tray_connect_retry_window_is_bounded() {
+        assert_eq!(retry_delay(0), Some(Duration::from_secs(2)));
+        assert_eq!(retry_delay(1), Some(Duration::from_secs(5)));
+        assert_eq!(retry_delay(2), Some(Duration::from_secs(10)));
+        assert_eq!(retry_delay(3), None);
+    }
+
+    #[test]
+    fn a_missing_session_bus_is_named_in_the_diagnostic() {
+        assert_eq!(session_bus_or_unset(None), "<unset>");
+        assert_eq!(
+            session_bus_or_unset(Some("unix:path=/tmp/dbus-test".to_owned())),
+            "unix:path=/tmp/dbus-test"
+        );
     }
 
     #[test]
