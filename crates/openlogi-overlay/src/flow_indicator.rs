@@ -578,6 +578,15 @@ fn click_through_region(visible: bool, pinned: bool, rows: usize) -> Option<Boun
     })
 }
 
+/// Whether the card still has to be shown and needs a window created for it.
+///
+/// Windows starts the overlay headless (#2339) and GPUI refuses a window in
+/// that mode, so this is the caller's cue to connect to the display before
+/// feeding the owner a command that may open the card.
+const fn card_needs_display(has_window: bool, dismissed: bool, row_count: usize) -> bool {
+    !has_window && !dismissed && row_count > 0
+}
+
 /// The bottom-right corner of `area`, inside the screen margin.
 #[cfg(not(target_os = "windows"))]
 fn bottom_right(area: Bounds<gpui::Pixels>, card: Size<gpui::Pixels>) -> Point<gpui::Pixels> {
@@ -2614,6 +2623,21 @@ impl FlowIndicator {
         }
     }
 
+    /// Whether handling the next command may have to open the card window:
+    /// the card is wanted and no window exists to show it through.
+    ///
+    /// Windows starts the overlay headless, and GPUI refuses a window while
+    /// headless (see [`crate::windowing::connect`]) — so a caller that feeds
+    /// [`Self::handle`] must connect to the display first when this answers
+    /// true, or the card silently never opens there.
+    pub(crate) fn needs_display(&self) -> bool {
+        card_needs_display(
+            self.window.is_none(),
+            self.dismissed.get(),
+            self.rows().0.len(),
+        )
+    }
+
     pub(crate) fn handle(&mut self, command: Command, cx: &mut App) {
         match command {
             Command::Observation(observation) => {
@@ -3884,10 +3908,22 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        SavedPosition, anchored_origin, area_for_point, card_input_bounds, card_size, clamp_origin,
-        click_through_region, pin_input_bounds, window_size,
+        SavedPosition, anchored_origin, area_for_point, card_input_bounds, card_needs_display,
+        card_size, clamp_origin, click_through_region, pin_input_bounds, window_size,
     };
     use gpui::{Bounds, point, px, size};
+
+    /// The card asks for a display exactly while it is wanted and has no
+    /// window to show it through: an already-open window proves the display
+    /// is connected, and a dismissed or empty card gives Windows nothing to
+    /// draw on — it stays headless.
+    #[test]
+    fn the_card_asks_for_a_display_only_while_it_still_needs_a_window() {
+        assert!(card_needs_display(false, false, 2));
+        assert!(!card_needs_display(true, false, 2));
+        assert!(!card_needs_display(false, true, 2));
+        assert!(!card_needs_display(false, false, 0));
+    }
 
     #[test]
     fn the_card_height_follows_the_row_count() {

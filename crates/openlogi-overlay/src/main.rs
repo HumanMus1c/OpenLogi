@@ -230,6 +230,15 @@ fn main() -> Result<()> {
                 flow_pin_reports,
             );
             while let Some(command) = flow_command_rx.recv().await {
+                // The card opens through GPUI, which refuses a window while
+                // the overlay is headless; Windows starts headless and only
+                // connects when something shows, so that connection belongs
+                // before the command that may open the card.
+                if indicator.needs_display()
+                    && let Err(error) = cx.update(windowing::connect).await
+                {
+                    warn!(%error, "could not connect to the display for the Flow Indicator card");
+                }
                 cx.update(|cx| indicator.handle(command, cx));
             }
         })

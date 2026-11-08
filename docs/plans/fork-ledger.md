@@ -801,3 +801,21 @@ docs commit that follows fills the hashes.
   `hidpp10` in the core battery tests, `DeviceSource` in the restored retry
   test, the `SliderRow` line-count exemption) and the reconciled
   `Cargo.lock`.
+
+## 17. Windows Flow Indicator headless regression (2026-11-09)
+
+- `pending` **fix(overlay): connect to the display before the Flow Indicator opens** — kept.
+  Why: upstream #2339 made the Windows overlay start headless and connect only
+  when something shows; every window path upstream kept awaits
+  `windowing::connect`, but this fork's card owner predates that module and
+  opened its window directly. On real hardware no notice or lock key arrives
+  to connect the display, so the card never opened — the mock's demo
+  low-battery notice had masked it by connecting the display at startup.
+  Fix: `FlowIndicator::needs_display` (backed by the pure `card_needs_display`
+  predicate) reports when the card is wanted with no window to show it
+  through; the command loop awaits `windowing::connect` before feeding the
+  owner, mirroring the notice/lock-key/ring paths.
+  Verified: Windows `cargo test -p openlogi-overlay` (115 passed, 4 ignored,
+  the new predicate test included) and `cargo clippy -p openlogi-overlay
+  --all-targets -- -D warnings`; the release reinstall runtime check follows.
+  Status: kept.
