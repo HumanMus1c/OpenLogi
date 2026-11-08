@@ -743,7 +743,7 @@ docs commit that follows fills the hashes.
 
 ## 15. GUI device-name stability (2026-11-08)
 
-- `pending` **fix(gui): keep the persisted product name while assets load** — kept.
+- `a48ebbcf` **fix(gui): keep the persisted product name while assets load** — kept.
   Why: the device list and identity persistence ran before the asset resolver
   had data, so `persist_identities` wrote the firmware codename (the demo
   fixture's `Synthetic ...` names) into the config `display_name`; the card and
