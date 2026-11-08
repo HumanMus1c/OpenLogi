@@ -765,7 +765,7 @@ docs commit that follows fills the hashes.
 
 ## 16. Upstream merge (2026-11-08)
 
-- `pending` **chore: merge upstream/master into feat/tray-light-menu** — kept.
+- `b7f1eec9` **chore: merge upstream/master into feat/tray-light-menu** — kept.
   Why: the fork needed the 225 upstream commits since `929fa4ec` (Flow, onboard
   memory, sidetone, Kit 0.8.1 on GPUI 0.3.10, #2296/#2297 tray re-add fixes)
   without losing the fork's tray, card, and battery work; 53 files conflicted.
@@ -782,6 +782,22 @@ docs commit that follows fills the hashes.
   kept the window-bounds memory and made upstream's `WindowFit` the fresh-frame
   default; unioned the 24 locale catalogs (991 keys each, parity checked) and
   the `flow_indicator` page between General and Updates (index 3 on Linux).
-  Verified: none recorded yet (build and runtime verification follow in the
-  Windows rebuild task); conflict-marker scan clean.
-  Status: kept.
+  Verified: Windows `cargo build -p openlogi-agent -p openlogi-desktop
+  -p openlogi-overlay -p openlogi`; `cargo test -p openlogi-ipc --test
+  wire_format` (35 passed); `cargo test -p openlogi-core` (512 passed);
+  `cargo test -p openlogi-agent` (107 passed); `cargo test -p openlogi-cli`
+  (195 passed); `cargo test -p openlogi-desktop` (816 passed, including the
+  restored tab-scroll and ValueSlot width tests); `cargo test
+  -p openlogi-overlay` (114 passed, 4 ignored); the `openlogi-ui` catalog
+  parity test; `cargo clippy -p openlogi-core -p openlogi-ui -p openlogi-overlay
+  -p openlogi-agent -p openlogi-desktop -p openlogi-cli -p openlogi-ipc
+  --all-targets -- -D warnings`; `cargo fmt --all -- --check`; and a `--mock`
+  deploy on Windows (desktop + agent + overlay running, the overlay's Flow
+  Indicator window present, and the tray tooltip reading
+  `OpenLogi · MX Master 3S 80%`). Real hardware, macOS, and Linux remain
+  unverified.
+  Status: kept. The follow-up `d4e6f1b1` restores the compile pieces this
+  resolution dropped (brightness accent import, quit's `notify_data`,
+  `hidpp10` in the core battery tests, `DeviceSource` in the restored retry
+  test, the `SliderRow` line-count exemption) and the reconciled
+  `Cargo.lock`.
