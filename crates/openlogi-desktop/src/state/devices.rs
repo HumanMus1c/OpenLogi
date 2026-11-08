@@ -248,14 +248,14 @@ pub(super) fn build_device_list(
                     .map(PhysicalDeviceKey::into_string);
             let route_key = stable_id.route_key();
 
-            let display_name = asset
-                .as_ref()
-                .map(|a| a.display_name.clone())
-                .or_else(|| paired.codename.as_deref().map(prettify_codename))
-                .unwrap_or_else(|| {
-                    tr!("device.receiver_slot_number", number => paired.slot.to_string())
-                        .to_string()
-                });
+            let display_name = paired_display_name(
+                asset.as_ref(),
+                config,
+                &config_key,
+                canonical_key.as_deref(),
+                paired.codename.as_deref(),
+                paired.slot,
+            );
             let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
@@ -311,6 +311,35 @@ pub(super) fn build_device_list(
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list
+}
+
+/// Resolve the name a paired device should show.
+///
+/// The asset catalog can lag the first inventory refresh. Until it answers,
+/// prefer the product name a previous pass persisted over the firmware
+/// codename, so the gallery, card, and tray never downgrade a known device.
+fn paired_display_name(
+    asset: Option<&ResolvedAsset>,
+    config: &Config,
+    config_key: &str,
+    canonical_key: Option<&str>,
+    codename: Option<&str>,
+    slot: u8,
+) -> String {
+    asset
+        .map(|asset| asset.display_name.clone())
+        .or_else(|| {
+            config
+                .device_identity(config_key)
+                .or_else(|| canonical_key.and_then(|key| config.device_identity(key)))
+                .map(|identity| identity.display_name.trim())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| codename.map(prettify_codename))
+        .unwrap_or_else(|| {
+            tr!("device.receiver_slot_number", number => slot.to_string()).to_string()
+        })
 }
 
 /// Fold the offline slots that pair one physical device to the same receiver

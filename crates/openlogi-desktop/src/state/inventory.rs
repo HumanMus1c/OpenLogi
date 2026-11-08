@@ -676,8 +676,28 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
         if record.light_capabilities.is_none() && record.capabilities.is_none() {
             continue;
         }
+        // This runs before the asset resolver has necessarily filled
+        // `record.asset`; `model_name` is then the firmware codename, not the
+        // product name. Keep the name a previous pass persisted so a slow or
+        // offline asset catalog cannot downgrade the device (and the card or
+        // tray that read the same config) back to that codename.
+        let persisted_name = config
+            .device_identity(config_key)
+            .or_else(|| {
+                record
+                    .canonical_key
+                    .as_deref()
+                    .and_then(|key| config.device_identity(key))
+            })
+            .map(|identity| identity.display_name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        let display_name = if record.asset.is_some() && !record.model_name.trim().is_empty() {
+            record.model_name.clone()
+        } else {
+            persisted_name.unwrap_or_else(|| record.model_name.clone())
+        };
         let identity = DeviceIdentity {
-            display_name: record.model_name.clone(),
+            display_name,
             kind: record.kind,
             capabilities,
             light_capabilities: record.light_capabilities,

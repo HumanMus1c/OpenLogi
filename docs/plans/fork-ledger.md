@@ -740,3 +740,25 @@ docs commit that follows fills the hashes.
   run with `DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/nonexistent` logged three
   retries and the final session-boundary message after four attempts.
   Status: kept.
+
+## 15. GUI device-name stability (2026-11-08)
+
+- `pending` **fix(gui): keep the persisted product name while assets load** — kept.
+  Why: the device list and identity persistence ran before the asset resolver
+  had data, so `persist_identities` wrote the firmware codename (the demo
+  fixture's `Synthetic ...` names) into the config `display_name`; the card and
+  tray read that config and downgraded from the product name until a later
+  asset sync rewrote it. A slow or offline catalog left the synthetic name in
+  place, and opening the panel waited for the full catalog sync before the name
+  changed.
+  Fix: keep the persisted display name when the record has no resolved asset
+  (checking both the resolved config key and the canonical key), let the GUI
+  device list fall back to that persisted name before the codename, and still
+  let a resolved asset update the name.
+  Verified: Windows `cargo test -p openlogi-desktop --bin openlogi-desktop`
+  (586 passed, including the new slow-asset test); `cargo clippy
+  -p openlogi-desktop --all-targets -- -D warnings`; `cargo fmt --check`; WSL
+  debug build and install, then the restarted X11 GUI logged `initial device
+  selected ... display=MX Vertical` and the dev config kept `MX Master 3S`,
+  `MX Keys`, and `MX Vertical`.
+  Status: kept.
