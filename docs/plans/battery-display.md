@@ -200,15 +200,18 @@ The first implementation uses a vigil-watt-style badge:
 - Bar: 6 px, rounded, track from the surface palette, fill in the tone colour.
 - Sort: discharging low first, charging/full last, no-reading last; stable
   tie-break by name.
-- Empty state: hide the window when no device has a battery reading. Do not leave
-  a permanent empty card on screen.
+- Empty state: hide the window only when `flow_indicator_show_offline` is off and
+  no online device has a reading, or when the inventory holds no paired device.
+  Do not leave a permanent card on screen with nothing to name.
 - Offline rows: show a last-known reading with a muted `Offline` marker. Use the
-  reading still present in the inventory when it is there; otherwise use a
-  session-scoped last-reading cache in the widget model, so a device that goes
-  offline while the overlay is running keeps its last value. A device the user
-  has never seen with a reading is hidden rather than shown as `0%`. This is a
-  deliberate difference from vigil-watt, which only shows online devices, and
-  matches OpenLogi's GUI "last known battery" language.
+  reading still present in the inventory when it is there; otherwise the
+  overlay's last-reading cache — persisted beside the card's placement
+  (`flow-indicator-last-known.toml`) so an agent restart keeps it. A paired
+  device the user has never seen with a reading still gets a row, with an empty
+  reading (`–`) rather than a fabricated `0%`, so a sleeping mouse does not
+  empty a pinned card. This is a deliberate difference from vigil-watt, which
+  only shows online devices, and matches OpenLogi's GUI "last known battery"
+  language.
 
 **Window**
 
@@ -823,6 +826,17 @@ instead of claiming Linux has no tray.
   renders the whole pinned card with the unified glow. Long localized tags
   remain unverified; the fixed-width card truncates the name further instead
   of the tag.
+- **A pinned card survives an agent restart (2026-11-09).** The agent's
+  last-known readings live in its process, so an install or reboot erased every
+  offline row; `flow_indicator_rows` also required a readout, so a paired but
+  sleeping device could hold no row, and the empty-state rule hid the pinned
+  card until a device woke. The overlay now persists the last usable reading
+  per paired device in `flow-indicator-last-known.toml` beside the card's
+  placement (atomic writes; an unchanged map is not rewritten), restores it
+  only for an offline device with no reading, and never overrides a live one.
+  Offline devices with no reading at all keep a row with an empty reading, so
+  `show_offline` keeps the card visible while the receiver still reports them.
+  Verified on Windows (see the §19 ledger entry for the exact reinstall run).
 - **GNOME tray icons live in a 16 px box.** The AppIndicator extension draws
   every item at `Panel.PANEL_ICON_SIZE` (16 px) unless its `icon-size` setting
   says otherwise (default 0 = 16). With Ubuntu's text scaling at 1.18 the

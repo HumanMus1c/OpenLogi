@@ -743,8 +743,11 @@ pub struct FlowIndicatorRows<'a> {
     pub hidden: usize,
 }
 
-/// Rows for the floating indicator: devices with something to show, offline
-/// ones only when `show_offline`, sorted low-first and capped at `limit`.
+/// Rows for the floating indicator: online devices with something to show and,
+/// when `show_offline`, every paired device the receiver still reports — a
+/// sleeping device with no reading left keeps its row (with an empty reading)
+/// instead of dropping the card to its empty state. Sorted low-first and capped
+/// at `limit`.
 ///
 /// Charging and full devices sort after healthy discharging ones, and readings
 /// with no value sort last. The tie-break is the display name, so a stable
@@ -758,7 +761,13 @@ pub fn flow_indicator_rows(
 ) -> FlowIndicatorRows<'_> {
     let mut rows: Vec<&BatteryDevice> = devices
         .iter()
-        .filter(|device| device.has_readout() && (device.online || show_offline))
+        .filter(|device| {
+            if device.online {
+                device.has_readout()
+            } else {
+                show_offline
+            }
+        })
         .collect();
     rows.sort_by_key(|device| indicator_sort_key(device));
     let hidden = rows.len().saturating_sub(limit);
@@ -1589,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn flow_indicator_rows_are_low_first_capped_and_filter_offline() {
+    fn flow_indicator_rows_are_low_first_capped_and_keep_offline_devices() {
         let devices = vec![
             display_device(
                 Some("Nearly Empty"),
@@ -1642,13 +1651,29 @@ mod tests {
             names(all.rows),
             ["Nearly Empty", "Offline Low", "Healthy", "Charging"]
         );
-        assert_eq!(all.hidden, 0);
+        assert_eq!(
+            all.hidden, 1,
+            "an offline device with no reading still claims a row"
+        );
+        let with_room = flow_indicator_rows(&devices, true, 8);
+        assert_eq!(
+            names(with_room.rows),
+            [
+                "Nearly Empty",
+                "Offline Low",
+                "Healthy",
+                "Charging",
+                "Offline Empty"
+            ],
+            "an online device with no battery stays out; an offline one keeps its row"
+        );
+        assert_eq!(with_room.hidden, 0);
         let online = flow_indicator_rows(&devices, false, 4);
         assert_eq!(names(online.rows), ["Nearly Empty", "Healthy", "Charging"]);
         assert_eq!(online.hidden, 0);
         let capped = flow_indicator_rows(&devices, true, 2);
         assert_eq!(names(capped.rows), ["Nearly Empty", "Offline Low"]);
-        assert_eq!(capped.hidden, 2);
+        assert_eq!(capped.hidden, 3);
     }
 
     #[test]

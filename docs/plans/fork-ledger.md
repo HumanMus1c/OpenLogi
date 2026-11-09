@@ -850,3 +850,34 @@ docs commit that follows fills the hashes.
   name's glow, while `dump_the_pinned_card` still renders. Localized long tags
   remain unverified (the card truncates the name instead).
   Status: kept.
+
+## 19. Flow Indicator restart persistence (2026-11-09)
+
+- `pending` **fix(overlay): keep a pinned card through an agent restart** — kept.
+  Why: the agent's last-known battery cache is process-local, so the 2026-11-09
+  reinstall erased every offline row; `flow_indicator_rows` also required a
+  readout, so a paired-but-sleeping device could hold no row at all, and the
+  card's empty-state rule hid the pinned window until a device woke and
+  reported. Both receivers were enumerated, both slots offline with
+  `battery: null`, and the pinned card stayed hidden.
+  Fix: persist the last usable reading per paired device in
+  `flow-indicator-last-known.toml` beside the card's placement (atomic writes;
+  an unchanged map is not rewritten), and restore it only for an offline
+  device with no reading — online devices and devices the agent still reads
+  keep their fresh value, and a charging cold start never replaces the saved
+  percentage. Offline devices with no reading at all render as rows with an
+  empty reading, so `show_offline` keeps the card visible while the receiver
+  still reports them; the online no-battery filter is unchanged.
+  Verified: Windows `cargo test -p openlogi-core` (512 passed, including the
+  updated `flow_indicator_rows` case), `cargo test -p openlogi-overlay` (119
+  passed, 4 ignored; three new last-known cases cover record/apply and the
+  file round-trip), `cargo clippy -p openlogi-core -p openlogi-overlay
+  --all-targets -- -D warnings`, and `cargo fmt --all -- --check`; a release
+  reinstall then opened the card window (`OpenLogi - Flow Indicator`,
+  1596,845–1944,1047) with both receiver slots as offline rows
+  (`G703 Lightspeed 离线 –`, `PRO Wireless 离线 –`). The restore half was
+  exercised live: a seeded file carrying the user's last real reading
+  (`PRO Wireless`, 59%) came back as `PRO Wireless 离线 59%` after an overlay
+  restart; the seed was then removed and the card returned to `–`. The write
+  half still needs a powered mouse, so recording rests on the unit tests.
+  Status: kept.
