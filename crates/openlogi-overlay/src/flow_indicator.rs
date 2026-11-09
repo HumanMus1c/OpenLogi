@@ -83,8 +83,9 @@ const ICON_LANE: f32 = 22.0;
 /// The gap between a row's cells. The name cell's truncation width is derived
 /// from the same value, so the painted text and its shadow stop together.
 const ROW_INNER_GAP: f32 = 8.0;
-const BOLT_SIZE: f32 = 12.0;
-const OFFLINE_TEXT_SIZE: f32 = 10.0;
+/// The charging bolt's box. It wears the row's text scale, so the status
+/// glyph does not shrink beside the word it stands in for.
+const BOLT_SIZE: f32 = 16.0;
 /// The pin toggle's lane above the rows: its hit area, and the gap to the
 /// first row. The lane's right end is the button the click-through keeps
 /// interactive on Windows and Linux; both derive its rectangle from these
@@ -586,6 +587,10 @@ fn click_through_region(visible: bool, pinned: bool, rows: usize) -> Option<Boun
 /// observation yet also asks: the first observation carries the inventory
 /// that decides the rows, so waiting for them would make that first sync
 /// open nothing.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "each flag is an independent view fact the caller already holds; the signature reads as its one-line predicate"
+)]
 const fn card_needs_display(
     has_window: bool,
     dismissed: bool,
@@ -855,6 +860,52 @@ fn ringed_text(
                 .top(px(dy / scale))
                 .whitespace_nowrap()
                 .text_size(px(size))
+                .text_color(ink)
+                .child(text.clone())
+        }));
+    }
+    label.child(text)
+}
+
+/// A row's status word (the offline tag) in the row's own type scale: the
+/// name's size, weight, contact kernel and hairline, so every glyph inside a
+/// row stands on one shadow language. Its ambient tail is baked into the
+/// card's shadow document ([`shadow_svg`]), exactly like the name's.
+fn status_text(
+    text: impl Into<SharedString>,
+    color: Hsla,
+    pinned: bool,
+    ink: Hsla,
+    scale: f32,
+) -> Div {
+    let text = text.into();
+    let mut label = div()
+        .relative()
+        .flex_none()
+        .whitespace_nowrap()
+        .text_size(px(NAME_TEXT_SIZE))
+        .font_weight(NAME_FONT_WEIGHT)
+        .text_color(color);
+    if pinned {
+        label = label.children(CONTACT_KERNEL.map(|(dx, dy, alpha)| {
+            div()
+                .absolute()
+                .left(px(dx / scale))
+                .top(px(dy / scale))
+                .whitespace_nowrap()
+                .text_size(px(NAME_TEXT_SIZE))
+                .font_weight(NAME_FONT_WEIGHT)
+                .text_color(contact_ink(alpha))
+                .child(text.clone())
+        }));
+        label = label.children(RING_DIRECTIONS.map(|(dx, dy)| {
+            div()
+                .absolute()
+                .left(px(dx / scale))
+                .top(px(dy / scale))
+                .whitespace_nowrap()
+                .text_size(px(NAME_TEXT_SIZE))
+                .font_weight(NAME_FONT_WEIGHT)
                 .text_color(ink)
                 .child(text.clone())
         }));
@@ -1200,8 +1251,8 @@ fn name_cell_width(text_system: &WindowTextSystem, row: &Row) -> f32 {
         extras += shaped_text_width(
             text_system,
             rust_i18n::t!("device.offline").as_ref(),
-            OFFLINE_TEXT_SIZE,
-            FontWeight::NORMAL,
+            NAME_TEXT_SIZE,
+            NAME_FONT_WEIGHT,
         );
         extra_cells += 1.0;
     }
@@ -1271,6 +1322,39 @@ fn line_baseline(text_system: &WindowTextSystem, text: &str, size: f32, weight: 
     (LINE_HEIGHT - ascent - descent) / 2.0 + ascent
 }
 
+/// The status glyphs one row paints beside its name, where their cells start:
+/// the offline word and/or the charging bolt. They are `flex_none` cells
+/// after the name, so their x is the name cell's right edge, and the name
+/// cell's width is [`name_cell_width`]'s budget.
+#[derive(Clone, Debug, PartialEq)]
+struct StatusGlyph {
+    /// The localized offline word; `None` for an online row.
+    word: Option<String>,
+    /// The word's left edge, in card coordinates.
+    word_x: f32,
+    /// [`line_baseline`]'s offset for the word, from the line box top.
+    word_baseline: f32,
+    /// The charging bolt's box left edge; `None` when the row paints no bolt.
+    bolt_x: Option<f32>,
+}
+
+/// Lay out `row`'s status glyphs where the row paints them. Both the painted
+/// decoration and the baked ambient read this one placement. `frozen` is the
+/// card's stale state, which hides the charging bolt even on an online row.
+fn status_glyph(text_system: &WindowTextSystem, row: &Row, frozen: bool) -> StatusGlyph {
+    let word = (!row.online).then(|| rust_i18n::t!("device.offline").to_string());
+    let word_x =
+        PADDING_X + ICON_LANE + ROW_INNER_GAP + name_cell_width(text_system, row) + ROW_INNER_GAP;
+    StatusGlyph {
+        word_baseline: word.as_deref().map_or(0.0, |word| {
+            line_baseline(text_system, word, NAME_TEXT_SIZE, NAME_FONT_WEIGHT)
+        }),
+        word,
+        word_x,
+        bolt_x: (row.online && row.charging && !frozen).then_some(word_x),
+    }
+}
+
 /// The text-bearing source of one reading's ambient shadow. It paints at
 /// [`VALUE_SHADOW_OPACITY`] because the near field is the view's
 /// [`CONTACT_KERNEL`] copies; the far radius is smaller than the names'
@@ -1330,22 +1414,30 @@ fn finish_value_bake(hash: u64, baked: String) {
 }
 
 /// The hash the card's shadow raster is cached under: the row set the
-/// document describes, with the names exactly as they will be painted.
-/// Baselines and the family are host constants, so they stay out of the key.
-fn shadow_rows_hash(names: &[String], rows: &[Row]) -> u64 {
+/// document describes, with the names and status words exactly as they will
+/// be painted, and the status cells' x — a wider reading lane moves them, so
+/// the x belongs in the key even when the words do not change. Baselines and
+/// the family are host constants, so they stay out of the key.
+fn shadow_rows_hash(names: &[String], rows: &[Row], statuses: &[StatusGlyph]) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
-    for (name, row) in names.iter().zip(rows) {
+    for ((name, row), status) in names.iter().zip(rows).zip(statuses) {
         hasher.write(name.as_bytes());
         hasher.write(kind_icon(row.kind).as_bytes());
         hasher.write(&[u8::from(row.charging), u8::from(row.online)]);
+        hasher.write(status.word.as_deref().unwrap_or_default().as_bytes());
+        if status.word.is_some() || status.bolt_x.is_some() {
+            hasher.write_u32((status.word_x * 8.0).round().to_bits());
+        }
+        hasher.write_u8(u8::from(status.bolt_x.is_some()));
     }
     hasher.finish()
 }
 
-/// Build the (text-bearing) ambient SVG for `rows`, with each name on the
-/// baseline GPUI paints it on (`baselines`, aligned with `rows`). The near
-/// field is not here: the card stamps [`CONTACT_KERNEL`] copies of its own
-/// glyphs, so this document only has to carry the faint Gaussian tail.
+/// Build the (text-bearing) ambient SVG for `rows`, with each name and status
+/// glyph on the baseline and x the card paints it at (`baselines` and
+/// `statuses`, aligned with `rows`). The near field is not here: the card
+/// stamps [`CONTACT_KERNEL`] copies of its own glyphs, so this document only
+/// has to carry the faint Gaussian tail.
 ///
 /// The progress bars are deliberately absent. They carry a GPUI box shadow on
 /// the track itself ([`BAR_SHADOW`]); a baked bar would be scaled with this
@@ -1355,7 +1447,13 @@ fn shadow_rows_hash(names: &[String], rows: &[Row]) -> u64 {
     clippy::cast_precision_loss,
     reason = "row counts are single digits; the conversion is exact"
 )]
-fn shadow_svg(rows: &[Row], names: &[String], baselines: &[f32], family: &str) -> String {
+fn shadow_svg(
+    rows: &[Row],
+    names: &[String],
+    baselines: &[f32],
+    statuses: &[StatusGlyph],
+    family: &str,
+) -> String {
     use std::fmt::Write as _;
 
     let mut texts = String::new();
@@ -1384,10 +1482,39 @@ fn shadow_svg(rows: &[Row], names: &[String], baselines: &[f32], family: &str) -
                 body
             );
         }
+        let status = &statuses[index];
+        // The offline word wears the name's face and baseline, so the two
+        // glyphs of one row cannot drift apart in the same blur.
+        if let Some(word) = &status.word {
+            let _ = write!(
+                texts,
+                r#"<text x="{}" y="{}" font-family="'{}', sans-serif" font-size="{}" font-weight="{}" xml:space="preserve">{}</text>"#,
+                status.word_x,
+                line_top + status.word_baseline,
+                escape_xml(family),
+                NAME_TEXT_SIZE,
+                shadow_weight(NAME_FONT_WEIGHT),
+                escape_xml(word)
+            );
+        }
+        // The bolt's file draws a 7..39 box on a 24 px canvas; mapping that
+        // box into BOLT_SIZE keeps the baked outline on the painted glyph.
+        if status.bolt_x.is_some()
+            && let Some(body) = icon_body(BOLT_ICON)
+        {
+            let _ = write!(
+                texts,
+                r#"<g transform="translate({} {}) scale({}) translate(-7 -7)" fill="black">{}</g>"#,
+                status.bolt_x.unwrap_or(0.0),
+                line_top + (LINE_HEIGHT - BOLT_SIZE) / 2.0,
+                BOLT_SIZE / 32.0,
+                body
+            );
+        }
     }
-    // One ambient mask for the names and kind glyphs. The filter region is
-    // user-space so a one-row card's short bounding box cannot cut the blur
-    // before the viewport does.
+    // One ambient mask for the row glyphs. The filter region is user-space so
+    // a one-row card's short bounding box cannot cut the blur before the
+    // viewport does.
     let height = f32::from(card_size(rows.len()).height);
     format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{half_width}" height="{half_height}" viewBox="0 0 {width} {height}"><defs><filter id="names" filterUnits="userSpaceOnUse" x="-48" y="-48" width="{names_width}" height="{names_height}"><feGaussianBlur stdDeviation="12"/><feComponentTransfer><feFuncA type="table" tableValues="{alpha}"/></feComponentTransfer></filter></defs><g filter="url(#names)" fill="{fill}" opacity="{names_opacity}">{names}</g></svg>"#,
@@ -1559,15 +1686,16 @@ impl FlowIndicatorView {
 
     /// Bake the pinned card's shadow for the current rows off the UI thread.
     ///
-    /// The generated SVG carries the names as `<text>`; GPUI's SVG renderer
-    /// would build the system font database on the UI thread the first time
-    /// it paints one, which is exactly the frame the pin click waits for.
-    /// The pinned card renders its other decorations immediately and picks
-    /// the shadow up when the bake lands.
+    /// The generated SVG carries the names and status glyphs as `<text>`;
+    /// GPUI's SVG renderer would build the system font database on the UI
+    /// thread the first time it paints one, which is exactly the frame the pin
+    /// click waits for. The pinned card renders its other decorations
+    /// immediately and picks the shadow up when the bake lands.
     ///
-    /// The family and each name's baseline are read from the window's own text
-    /// system before the bake leaves this thread: the document only carries
-    /// glyphs, but where it stands them has to be GPUI's answer.
+    /// The family, each name's baseline, and the status cells' placement are
+    /// read from the window's own text system before the bake leaves this
+    /// thread: the document only carries glyphs, but where it stands them has
+    /// to be GPUI's answer.
     fn refresh_shadow(&mut self, window: &Window, cx: &mut Context<Self>) {
         let painted = self
             .rows
@@ -1575,7 +1703,12 @@ impl FlowIndicatorView {
             .map(|row| painted_name(window.text_system(), row))
             .collect::<Vec<_>>();
         self.painted_names.clone_from(&painted);
-        let rows = shadow_rows_hash(&painted, &self.rows);
+        let statuses = self
+            .rows
+            .iter()
+            .map(|row| status_glyph(window.text_system(), row, self.stale))
+            .collect::<Vec<_>>();
+        let rows = shadow_rows_hash(&painted, &self.rows, &statuses);
         if !claim_shadow_bake(rows) {
             return;
         }
@@ -1584,7 +1717,7 @@ impl FlowIndicatorView {
             .iter()
             .map(|name| line_baseline(window.text_system(), name, NAME_TEXT_SIZE, NAME_FONT_WEIGHT))
             .collect::<Vec<_>>();
-        let raw = shadow_svg(&self.rows, &painted, &baselines, &family);
+        let raw = shadow_svg(&self.rows, &painted, &baselines, &statuses, &family);
         let bake = cx
             .background_executor()
             .spawn(async move { bake_shadow_svg(&raw) });
@@ -1794,9 +1927,8 @@ impl FlowIndicatorView {
                         )
                     })
                     .when(!row.online, |line| {
-                        line.child(ringed_text(
+                        line.child(status_text(
                             rust_i18n::t!("device.offline").to_string(),
-                            OFFLINE_TEXT_SIZE,
                             pal.muted,
                             pinned,
                             ink.ring,
@@ -3924,6 +4056,16 @@ mod tests {
     };
     use gpui::{Bounds, point, px, size};
 
+    /// A row with neither an offline word nor a charging bolt.
+    fn no_status() -> super::StatusGlyph {
+        super::StatusGlyph {
+            word: None,
+            word_x: 0.0,
+            word_baseline: 0.0,
+            bolt_x: None,
+        }
+    }
+
     /// The card asks for a display exactly while it is wanted and has no
     /// window to show it through: an already-open window proves the display
     /// is connected, and a dismissed or empty card gives Windows nothing to
@@ -4320,7 +4462,13 @@ mod tests {
             online: true,
             kind: DeviceKind::Mouse,
         };
-        let card = shadow_svg(&[row], &["MX Vertical".to_string()], &[19.0], "Segoe UI");
+        let card = shadow_svg(
+            &[row],
+            &["MX Vertical".to_string()],
+            &[19.0],
+            &[no_status()],
+            "Segoe UI",
+        );
         assert!(
             card.contains(&format!("opacity=\"{SHADOW_OPACITY_NAMES}\"")),
             "the names group lost its ambient opacity: {card}"
@@ -4401,7 +4549,13 @@ mod tests {
             online: true,
             kind: DeviceKind::Mouse,
         };
-        let svg = shadow_svg(&[row], &["MX Vertical".to_string()], &[19.0], "Segoe UI");
+        let svg = shadow_svg(
+            &[row],
+            &["MX Vertical".to_string()],
+            &[19.0],
+            &[no_status()],
+            "Segoe UI",
+        );
         #[cfg(target_os = "windows")]
         assert!(svg.contains(r#"font-weight="600""#), "{svg}");
         #[cfg(not(target_os = "windows"))]
@@ -4429,6 +4583,7 @@ mod tests {
             &[row],
             &["A Very Long Device…".to_string()],
             &[19.0],
+            &[no_status()],
             "Segoe UI",
         );
         assert!(svg.contains("A Very Long Device…"), "{svg}");
@@ -4482,6 +4637,92 @@ mod tests {
                 shaped_text_width(text_system, &painted, NAME_TEXT_SIZE, NAME_FONT_WEIGHT)
                     <= name_cell_width(text_system, &long) + 0.5,
                 "the painted name must fit its cell: {painted}"
+            );
+        });
+    }
+
+    /// The offline word and the charging bolt wear the row's own scale and
+    /// join the card's ambient document, so every glyph inside a row stands
+    /// on one shadow language.
+    #[gpui::test]
+    fn the_status_glyphs_join_the_row_shadow(cx: &mut gpui::TestAppContext) {
+        use super::{
+            BOLT_SIZE, FlowIndicatorView, NAME_FONT_WEIGHT, NAME_TEXT_SIZE, Row, shadow_svg,
+            shadow_weight, status_glyph,
+        };
+        use openlogi_core::device::{BatteryColor, DeviceKind};
+
+        let row = |online, charging| Row {
+            name: "MX Master 3S".into(),
+            value: "15%".into(),
+            fill: Some(15),
+            color: BatteryColor::Red,
+            charging,
+            online,
+            kind: DeviceKind::Mouse,
+        };
+        let pinned = Rc::new(Cell::new(false));
+        let (_view, cx) = cx.add_window_view(|_, _| {
+            FlowIndicatorView::new(
+                vec![row(true, false)],
+                0,
+                Arc::new(crate::appearance::Appearance::new()),
+                Rc::clone(&pinned),
+            )
+        });
+        cx.update(|window, _| {
+            let text_system = window.text_system();
+            let word = rust_i18n::t!("device.offline").to_string();
+
+            let offline = row(false, false);
+            let status = status_glyph(text_system, &offline, false);
+            assert_eq!(status.word.as_deref(), Some(word.as_str()));
+            assert!(status.bolt_x.is_none());
+            let svg = shadow_svg(
+                &[offline],
+                &["MX Master 3S".to_string()],
+                &[19.0],
+                &[status],
+                "Segoe UI",
+            );
+            assert!(
+                svg.contains(&word),
+                "the offline word must join the ambient: {svg}"
+            );
+            assert_eq!(
+                svg.matches(&format!(r#"font-size="{NAME_TEXT_SIZE}""#))
+                    .count(),
+                2,
+                "the name and the offline word share one type scale: {svg}"
+            );
+            assert!(
+                svg.contains(&format!(
+                    r#"font-weight="{}""#,
+                    shadow_weight(NAME_FONT_WEIGHT)
+                )),
+                "the offline word must wear the painted face: {svg}"
+            );
+
+            let status = status_glyph(text_system, &row(true, true), false);
+            assert!(status.bolt_x.is_some());
+            let svg = shadow_svg(
+                &[row(true, true)],
+                &["MX Master 3S".to_string()],
+                &[19.0],
+                &[status],
+                "Segoe UI",
+            );
+            assert!(
+                svg.contains(&format!("scale({})", BOLT_SIZE / 32.0)),
+                "the bolt must join the ambient at its own box: {svg}"
+            );
+
+            // A stale card hides the bolt on an online row; the ambient has
+            // to follow the paint.
+            assert!(
+                status_glyph(text_system, &row(true, true), true)
+                    .bolt_x
+                    .is_none()
             );
         });
     }
@@ -4952,6 +5193,42 @@ mod tests {
         }
     }
 
+    /// Bake the pinned card's ambient exactly as `refresh_shadow` does, so a
+    /// capture renders the document the card would.
+    #[cfg(target_os = "windows")]
+    fn bake_card_shadow_for_test(text_system: &super::WindowTextSystem, rows: &[super::Row]) {
+        let family = super::shadow_font_family(text_system);
+        let names = rows
+            .iter()
+            .map(|row| row.name.to_string())
+            .collect::<Vec<_>>();
+        let baselines = names
+            .iter()
+            .map(|name| {
+                super::line_baseline(
+                    text_system,
+                    name,
+                    super::NAME_TEXT_SIZE,
+                    super::NAME_FONT_WEIGHT,
+                )
+            })
+            .collect::<Vec<_>>();
+        let statuses = rows
+            .iter()
+            .map(|row| super::status_glyph(text_system, row, false))
+            .collect::<Vec<_>>();
+        let hash = super::shadow_rows_hash(&names, rows, &statuses);
+        assert!(
+            super::claim_shadow_bake(hash),
+            "the card shadow was already baked"
+        );
+        let baked = super::bake_shadow_svg(&super::shadow_svg(
+            rows, &names, &baselines, &statuses, &family,
+        ))
+        .expect("bake the card shadow");
+        super::finish_shadow_bake(hash, baked);
+    }
+
     /// The real row tree with the card's chrome removed, so a frame's cost is
     /// the rows' own. Only the reading's glow differs between windows.
     #[cfg(target_os = "windows")]
@@ -5135,19 +5412,20 @@ mod tests {
             });
     }
 
-    /// Renders the pinned rows' charging and offline states through the real
-    /// Windows renderer and writes a PNG. The rows are the production tree;
-    /// only the card chrome is omitted.
+    /// Renders the pinned card's charging and offline states — the ambient
+    /// SVG, the contact copies and the hairline — through the real Windows
+    /// renderer and writes a PNG. The rows are the production tree.
     ///
     /// `cargo test -p openlogi-overlay dump_the_pinned_status_rows -- --ignored --nocapture`
     #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "visual capture: writes pinned-status.png to the temp directory"]
     fn dump_the_pinned_status_rows() {
-        use super::{Row, card_size, window_options};
+        use super::{FlowIndicatorView, Row, window_options, window_size};
         use gpui::AppContext as _;
         use openlogi_core::config::FlowIndicatorDisplayMode;
         use openlogi_core::device::{BatteryColor, DeviceKind};
+        use std::time::Duration;
 
         let rows = vec![
             Row {
@@ -5178,37 +5456,55 @@ mod tests {
                 kind: DeviceKind::Mouse,
             },
         ];
-        let card = card_size(rows.len());
+        let window_box = window_size(rows.len());
         let out = std::env::temp_dir().join("pinned-status.png");
+        let pinned = Rc::new(Cell::new(true));
 
         gpui_platform::application()
             .with_assets(crate::OverlayAssets)
             .run(move |cx| {
                 let text_system = gpui::WindowTextSystem::new(cx.text_system().clone());
                 bake_readings_for_test(&text_system, &rows);
+                bake_card_shadow_for_test(&text_system, &rows);
                 let mut options = window_options(
                     FlowIndicatorDisplayMode::Topmost,
-                    Bounds::new(point(px(0.0), px(0.0)), card),
+                    Bounds::new(point(px(0.0), px(0.0)), window_box),
                     None,
                 );
                 options.show = false;
-                let handle = cx
+                let handle: gpui::AnyWindowHandle = cx
                     .open_window(options, |_, cx| {
-                        cx.new(|_| ShadowBench {
-                            rows: rows.clone(),
-                            value_shadow: true,
+                        cx.new(|_| {
+                            FlowIndicatorView::new(
+                                rows.clone(),
+                                0,
+                                Arc::new(crate::appearance::Appearance::new()),
+                                pinned.clone(),
+                            )
                         })
                     })
-                    .expect("open the status window");
-                cx.update_window(handle.into(), |_, window, cx| {
-                    window.resize(card);
+                    .expect("open the status card window")
+                    .into();
+                cx.update_window(handle, |_, window, cx| {
+                    window.resize(window_box);
                     window.draw(cx).clear(cx);
-                    let image = window.render_to_image().expect("render the status rows");
-                    image.save(&out).expect("write the status capture");
-                    println!("capture: {} ({:?})", out.display(), image.dimensions());
                 })
-                .expect("the status window is live");
-                cx.quit();
+                .expect("the status card window is live");
+                let out = out.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(2_000))
+                        .await;
+                    cx.update_window(handle, |_, window, cx| {
+                        window.draw(cx).clear(cx);
+                        let image = window.render_to_image().expect("render the status rows");
+                        image.save(&out).expect("write the status capture");
+                        println!("capture: {} ({:?})", out.display(), image.dimensions());
+                    })
+                    .expect("the status card window is live");
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
             });
     }
 
@@ -5221,16 +5517,8 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "visual capture: writes pinned-card.png to the temp directory"]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one visual capture reads from setup to save as a single recipe"
-    )]
     fn dump_the_pinned_card() {
-        use super::{
-            FlowIndicatorView, NAME_FONT_WEIGHT, NAME_TEXT_SIZE, Row, bake_shadow_svg,
-            claim_shadow_bake, finish_shadow_bake, line_baseline, shadow_font_family,
-            shadow_rows_hash, shadow_svg, window_options, window_size,
-        };
+        use super::{FlowIndicatorView, Row, window_options, window_size};
         use gpui::AppContext as _;
         use openlogi_core::config::FlowIndicatorDisplayMode;
         use openlogi_core::device::{BatteryColor, DeviceKind};
@@ -5276,20 +5564,7 @@ mod tests {
             .run(move |cx| {
                 let text_system = gpui::WindowTextSystem::new(cx.text_system().clone());
                 bake_readings_for_test(&text_system, &rows);
-                let family = shadow_font_family(&text_system);
-                let names = rows
-                    .iter()
-                    .map(|row| row.name.to_string())
-                    .collect::<Vec<_>>();
-                let baselines = names
-                    .iter()
-                    .map(|name| line_baseline(&text_system, name, NAME_TEXT_SIZE, NAME_FONT_WEIGHT))
-                    .collect::<Vec<_>>();
-                let hash = shadow_rows_hash(&names, &rows);
-                assert!(claim_shadow_bake(hash), "the card shadow was already baked");
-                let baked = bake_shadow_svg(&shadow_svg(&rows, &names, &baselines, &family))
-                    .expect("bake the card shadow");
-                finish_shadow_bake(hash, baked);
+                bake_card_shadow_for_test(&text_system, &rows);
 
                 let mut options = window_options(
                     FlowIndicatorDisplayMode::Topmost,

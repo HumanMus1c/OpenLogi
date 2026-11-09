@@ -825,3 +825,28 @@ docs commit that follows fills the hashes.
   observation (whose snapshot carries the inventory), so the card opens
   without one failed attempt; debug run: card opened 2.4 s after launch with no
   headless warning.
+
+## 18. Flow Indicator status-glyph typography (2026-11-09)
+
+- `pending` **fix(overlay): put the offline tag and the charging bolt on the row's type scale** — kept.
+  Why: the offline word was 10 px / weight 400 while the name and reading were
+  16 px / 500–600, and it carried only the eight-copy hairline. The pinned card
+  is a transparent glyph HUD, so the tag was the only row text without the
+  contact kernel and the baked ambient; 10 px CJK strokes sit at about one
+  pixel, which the 1 px ring fattens into a smudge between two glowing glyphs.
+  The 10 px value was vigil-watt's source-tag size, left behind when the name
+  was raised to 16 px to match the reading; the charging bolt had the same gap
+  (12 px, contact and ring only, no ambient).
+  Fix: the offline word uses `NAME_TEXT_SIZE`/`NAME_FONT_WEIGHT` through
+  `status_text`; the charging bolt is 16 px; `status_glyph` lays both out in
+  the row, and `shadow_svg` bakes them into the same 12σ ambient pass as the
+  names and kind glyphs. The raster hash now covers the offline word, the
+  status x (a wider reading lane moves it), and a stale card's hidden bolt;
+  `name_cell_width` budgets the tag at its new size.
+  Verified: Windows `cargo test -p openlogi-overlay` (116 passed, 4 ignored)
+  and `cargo clippy -p openlogi-overlay --all-targets -- -D warnings`, plus
+  `cargo fmt --all -- --check`; `dump_the_pinned_status_rows` now renders the
+  whole pinned card and the capture shows the 16 px tag and bolt sharing the
+  name's glow, while `dump_the_pinned_card` still renders. Localized long tags
+  remain unverified (the card truncates the name instead).
+  Status: kept.

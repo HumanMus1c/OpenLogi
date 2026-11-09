@@ -810,6 +810,19 @@ instead of claiming Linux has no tray.
   send its startup reload, the label cleared on the same agent.
 - **The card's device name matches its value.** The name was 13 px beside a
   16 px percentage; it now renders at 16 px too, so a row reads as one line.
+- **The row's status glyphs follow the row's type scale (2026-11-09).** The
+  offline word had stayed at vigil-watt's 10 px source-tag size after the name
+  moved to 16 px, and the pinned card stamped only the eight hairline copies on
+  it while every other row glyph carried the contact kernel and the baked
+  Gaussian tail; the 12 px charging bolt likewise missed the ambient. The
+  offline word now wears the name's size and weight, the bolt its 16 px box,
+  and `status_glyph` feeds both into the same 12σ ambient document as the
+  names and kind glyphs (the word and the status x join the raster hash, and a
+  stale card's hidden bolt does too). Verified on Windows: 116 overlay tests,
+  Clippy `-D warnings`, and the `dump_the_pinned_status_rows` capture now
+  renders the whole pinned card with the unified glow. Long localized tags
+  remain unverified; the fixed-width card truncates the name further instead
+  of the tag.
 - **GNOME tray icons live in a 16 px box.** The AppIndicator extension draws
   every item at `Panel.PANEL_ICON_SIZE` (16 px) unless its `icon-size` setting
   says otherwise (default 0 = 16). With Ubuntu's text scaling at 1.18 the
