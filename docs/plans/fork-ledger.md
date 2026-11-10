@@ -884,7 +884,7 @@ docs commit that follows fills the hashes.
 
 ## 20. Upstream guard convergence (2026-11-10)
 
-- `pending` **fix(overlay): adopt the shared neutral and keyboard-family owners** — kept.
+- `9406f4a0` **fix(overlay): adopt the shared neutral and keyboard-family owners** — kept.
   Why: upstream's `ui-neutral-owner` and `core-keyboard-family-owner` guards
   reject the card's bare `hsla` greys and its `Keyboard | Numpad` match.
   Fix: route the surface greys through `openlogi_ui::color::neutral` and the
@@ -894,7 +894,7 @@ docs commit that follows fills the hashes.
   openlogi-overlay --all-targets -- -D warnings`.
   Status: kept.
 
-- `pending` **fix(gui): open the saved main window through WindowFit** — kept.
+- `871e6816` **fix(gui): open the saved main window through WindowFit** — kept.
   Why: upstream's `gui-window-fit-owner` guard rejects a direct
   `WindowBounds::Windowed` construction in `main_window.rs`.
   Fix: move the remembered-frame options into `WindowFit::with_saved_frame`,
