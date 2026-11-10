@@ -12,6 +12,8 @@ use openlogi_core::config::Config;
 pub(crate) fn apply_tray_settings(config: &Config) {
     let settings = &config.app_settings;
     openlogi_core::locale::activate(settings.language.as_deref());
+    #[cfg(any(target_os = "windows", target_os = "linux", test))]
+    crate::tray_setting::apply_config(config);
     #[cfg(target_os = "macos")]
     {
         use std::sync::Arc;

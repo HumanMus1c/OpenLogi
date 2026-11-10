@@ -86,6 +86,7 @@ const WM_TRAY_UPDATE: u32 = WM_APP + 2;
 const ID_SHOW: usize = 1;
 const ID_QUIT: usize = 2;
 const ID_FLOW_PIN: usize = 3;
+const ID_FLOW_INDICATOR: usize = 4;
 
 /// The tooltip prefix and the fallback when no device has a readout.
 const BRAND_TIP: &str = "OpenLogi";
@@ -737,6 +738,13 @@ unsafe fn show_menu(hwnd: HWND) {
             ID_FLOW_PIN,
             wide(&rust_i18n::t!("flow_indicator.pin_card")).as_ptr(),
         );
+        let indicator = crate::tray_setting::flow_indicator_enabled();
+        AppendMenuW(
+            menu,
+            MF_STRING | if indicator { MF_CHECKED } else { 0 },
+            ID_FLOW_INDICATOR,
+            wide(&rust_i18n::t!("flow_indicator.floating_indicator")).as_ptr(),
+        );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         let rows: Vec<String> = if TRAY_BATTERY.load(Ordering::Relaxed) {
             let config = current_config();
@@ -789,6 +797,9 @@ unsafe fn show_menu(hwnd: HWND) {
             ID_SHOW => show_openlogi(),
             ID_FLOW_PIN => {
                 let _ = openlogi_agent::flow_pin::flow_pin().toggle();
+            }
+            ID_FLOW_INDICATOR => {
+                let _ = crate::tray_setting::toggle_flow_indicator();
             }
             ID_QUIT => quit(hwnd),
             _ => {}

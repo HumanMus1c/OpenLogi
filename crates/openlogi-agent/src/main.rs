@@ -35,6 +35,8 @@ mod reload;
 mod resume_linux;
 #[cfg(target_os = "windows")]
 mod resume_windows;
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+mod tray_setting;
 // The shared locale catalogs live in `openlogi-ui`; the negotiation that picks
 // one is `openlogi_core::locale`. `t!` resolves against a backend each binary
 // generates itself, hence the relative path — see

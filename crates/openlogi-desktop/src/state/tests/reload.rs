@@ -40,6 +40,36 @@ fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
 }
 
 #[test]
+fn an_external_config_save_is_adopted_and_reloaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::UserFile(file),
+        ..Sources::in_memory(config.clone(), &resolver, commands)
+    });
+    while receiver.try_recv().is_ok() {}
+
+    let mut external = config;
+    external.app_settings.flow_indicator = false;
+    external.save_to_path(&path).unwrap();
+
+    let _ = state.adopt_external_config();
+    assert!(!state.app_settings().flow_indicator);
+
+    let mut saw_reload = false;
+    while let Ok(command) = receiver.try_recv() {
+        saw_reload |= matches!(command, crate::services::ipc::Command::ReloadConfig(_));
+    }
+    assert!(
+        saw_reload,
+        "adopting an external save asks the agent to reload"
+    );
+}
+
+#[test]
 fn desktop_switch_animation_persists_and_reloads_only_when_changed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);

@@ -37,6 +37,11 @@ const CAMERA_SCAN_PERIOD: Duration = Duration::from_secs(2);
 /// loses nothing visible and long enough to stay out of the render path.
 const WINDOW_STATE_PERIOD: Duration = Duration::from_secs(1);
 
+/// How often the GUI checks whether another writer saved `config.toml`. The
+/// tray toggles `[app_settings].flow_indicator`; adopting the new revision
+/// keeps the settings page and the agent on the same file.
+const CONFIG_CHECK_PERIOD: Duration = Duration::from_secs(1);
+
 /// Deliver a saved-reload verdict only to the transaction that requested it.
 fn apply_saved_config_reload(
     context: ipc::ConfigReloadContext,
@@ -155,6 +160,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         let mut rt = Runtime::new(cams, sync_tx, swr, resolver);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
         let mut window_state = Box::pin(cx.background_executor().timer(WINDOW_STATE_PERIOD));
+        let mut config_check = Box::pin(cx.background_executor().timer(CONFIG_CHECK_PERIOD));
         // Cleared when the IPC update channel closes (the client thread died),
         // so the select stops polling a closed receiver.
         let mut ipc_open = true;
@@ -193,6 +199,10 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 () = &mut window_state => {
                     window_state.set(cx.background_executor().timer(WINDOW_STATE_PERIOD));
                     cx.update(windows::main_window::persist_bounds);
+                }
+                () = &mut config_check => {
+                    config_check.set(cx.background_executor().timer(CONFIG_CHECK_PERIOD));
+                    cx.update(|cx| AppState::apply(cx, AppState::adopt_external_config));
                 }
                 Some(cmd) = asset_commands.recv() => rt.on_asset_command(cmd, cx),
                 // Unguarded: we hold a live `sync_tx`, so this arm simply pends

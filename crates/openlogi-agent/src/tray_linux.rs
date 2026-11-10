@@ -373,6 +373,17 @@ impl Tray for OpenLogiTray {
             }
             .into(),
         );
+        items.push(
+            CheckmarkItem {
+                label: rust_i18n::t!("flow_indicator.floating_indicator").to_string(),
+                checked: crate::tray_setting::flow_indicator_enabled(),
+                activate: Box::new(|_| {
+                    let _ = crate::tray_setting::toggle_flow_indicator();
+                }),
+                ..CheckmarkItem::default()
+            }
+            .into(),
+        );
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
@@ -690,6 +701,7 @@ mod tests {
     use std::time::Duration;
 
     use ksni::Tray as _;
+    use ksni::menu::MenuItem;
     use openlogi_agent_core::observable::ObservableState;
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind, PairedDevice,
@@ -906,5 +918,24 @@ mod tests {
                 usize::try_from(icon.width * icon.height * 4).expect("bounded icon")
             );
         }
+    }
+
+    #[test]
+    fn the_floating_indicator_toggle_sits_under_the_pin() {
+        let menu = tray(true).menu();
+        let labels: Vec<String> = menu
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Checkmark(item) => Some(item.label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                rust_i18n::t!("flow_indicator.pin_card").to_string(),
+                rust_i18n::t!("flow_indicator.floating_indicator").to_string(),
+            ]
+        );
     }
 }

@@ -442,6 +442,16 @@ impl AppState {
         })
     }
 
+    /// Adopt a `config.toml` another writer saved (the tray's floating
+    /// indicator toggle), then ask the agent to reload that exact revision.
+    /// The existing reconciliation path also refreshes derived projections.
+    pub(crate) fn adopt_external_config(&mut self) -> StateEvents {
+        if !self.config.external_revision_changed() {
+            return StateEvents::none();
+        }
+        self.reconcile_saved_config()
+    }
+
     /// Current config failure, shown as a fail-closed whole-window notice.
     #[must_use]
     pub fn config_issue(&self) -> Option<&str> {

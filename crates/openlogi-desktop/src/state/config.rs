@@ -82,6 +82,18 @@ impl ConfigState {
         }
     }
 
+    /// Whether `config.toml` changed since this handle loaded or last saved
+    /// it. The tray can save `[app_settings]` while the GUI runs.
+    pub(super) fn external_revision_changed(&self) -> bool {
+        let ConfigPersistence::UserFile(file) = &self.persistence else {
+            return false;
+        };
+        match file.reload() {
+            Ok((_, fresh)) => fresh.revision() != file.revision(),
+            Err(_) => false,
+        }
+    }
+
     pub(super) fn is_writable(&self) -> bool {
         !matches!(self.persistence, ConfigPersistence::ReadOnly(_))
     }
@@ -182,5 +194,27 @@ impl Deref for ConfigState {
 
     fn deref(&self) -> &Self::Target {
         &self.current
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_external_save_is_detected_and_refreshed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+        let (config, mut file) = ConfigFile::load_from_path(&path).unwrap();
+        file.save(&config).unwrap();
+
+        let state = ConfigState::new(config.clone(), ConfigPersistence::UserFile(file));
+        assert!(!state.external_revision_changed());
+
+        let mut external = config;
+        external.app_settings.flow_indicator = false;
+        external.save_to_path(&path).unwrap();
+
+        assert!(state.external_revision_changed());
     }
 }

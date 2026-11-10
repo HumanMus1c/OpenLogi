@@ -904,3 +904,23 @@ docs commit that follows fills the hashes.
   openlogi-desktop --all-targets -- -D warnings`; ast-grep no longer reports
   the guard.
   Status: kept.
+
+## 21. Tray floating-indicator toggle (2026-11-10)
+
+- `pending` **feat(agent): toggle the floating indicator from the tray** — kept.
+  Why: the tray exposed the card's pin but not its own on/off switch, so
+  turning the card off meant opening the settings app.
+  Fix: a checkmark item directly below Pin on Windows and Linux (the Linux SNI
+  menu is the same on X11 and Wayland). It writes
+  `[app_settings].flow_indicator` through `ConfigFile`, retrying when the GUI
+  wins the file, and updates the tray's cached state. The overlay's existing
+  config poll opens or closes the card; the GUI's new one-second config check
+  adopts an external revision through `reconcile_saved_config` and asks the
+  agent to reload it.
+  Verified: Windows `cargo test --workspace`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --all -- --check`, rustdoc, and
+  `cargo xtask ci ast-grep typos`; Linux WSL `cargo check -p openlogi-agent
+  --bin openlogi-agent` and `cargo test -p openlogi-agent --bin
+  openlogi-agent tray_linux::tests` (11 passed, including the new menu-order
+  test). A live tray click was not recorded.
+  Status: kept.
