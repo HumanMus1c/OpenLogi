@@ -893,3 +893,14 @@ docs commit that follows fills the hashes.
   -p openlogi-overlay` (119 passed, 4 ignored); `cargo clippy -p
   openlogi-overlay --all-targets -- -D warnings`.
   Status: kept.
+
+- `pending` **fix(gui): open the saved main window through WindowFit** — kept.
+  Why: upstream's `gui-window-fit-owner` guard rejects a direct
+  `WindowBounds::Windowed` construction in `main_window.rs`.
+  Fix: move the remembered-frame options into `WindowFit::with_saved_frame`,
+  which owns the bounds construction in `windows.rs`; `restored_bounds` still
+  clamps the saved frame first.
+  Verified: `cargo test -p openlogi-desktop` (845 passed); `cargo clippy -p
+  openlogi-desktop --all-targets -- -D warnings`; ast-grep no longer reports
+  the guard.
+  Status: kept.

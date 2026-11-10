@@ -8,9 +8,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{
-    App, AppContext as _, Bounds, Pixels, Point, Size, Styled as _, WindowBounds, WindowOptions, px,
-};
+use gpui::{App, AppContext as _, Bounds, Pixels, Point, Size, Styled as _, WindowOptions, px};
 use gpui_kit::component::{ActiveTheme as _, Root};
 use openlogi_core::brand::APP_ID;
 use serde::{Deserialize, Serialize};
@@ -198,10 +196,10 @@ fn window_options(cx: &mut App) -> WindowOptions {
     } else {
         None
     };
-    let mut options = WindowOptions::from(fit);
-    if let Some(bounds) = saved {
-        options.window_bounds = Some(WindowBounds::Windowed(restored_bounds(bounds)));
-    }
+    let options = match saved {
+        Some(bounds) => fit.with_saved_frame(restored_bounds(bounds)),
+        None => WindowOptions::from(fit),
+    };
     WindowOptions {
         // Advertise a Wayland xdg-toplevel app_id (and X11 WM_CLASS). Without it
         // the window ships no app_id, so GNOME's `get_wm_class()` returns empty
