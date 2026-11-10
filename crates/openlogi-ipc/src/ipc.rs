@@ -186,6 +186,7 @@ pub use succession::Identity;
 ///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
 ///      profile and M1–M3/MR. `Capabilities::change_host` appended after
 ///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
+///      `Action::HoldModifier` appended for bare-modifier holds.
 ///      `Agent::request_shutdown` appended after those — a client asks the
 ///      running agent to leave through its lifecycle (firmware diversion
 ///      released, the input hook dropped) when the suite switches between
