@@ -71,6 +71,10 @@ gpui-tcc = { git = "https://github.com/AprilNEA/gpui-tcc", tag = "v0.1.1" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
+windows-sys = { workspace = true, features = [
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints]
 workspace = true
