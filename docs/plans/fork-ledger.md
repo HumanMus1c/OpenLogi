@@ -907,7 +907,7 @@ docs commit that follows fills the hashes.
 
 ## 21. Tray floating-indicator toggle (2026-11-10)
 
-- `pending` **feat(agent): toggle the floating indicator from the tray** — kept.
+- `6d254060` **feat(agent): toggle the floating indicator from the tray** — kept.
   Why: the tray exposed the card's pin but not its own on/off switch, so
   turning the card off meant opening the settings app.
   Fix: a checkmark item directly below Pin on Windows and Linux (the Linux SNI
