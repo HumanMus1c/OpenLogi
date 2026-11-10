@@ -93,6 +93,16 @@ impl WindowFit {
     }
 }
 
+impl WindowFit {
+    /// Build a window's options with its remembered frame. The caller has
+    /// already clamped and corrected `saved` for the platform.
+    pub fn with_saved_frame(self, saved: Bounds<Pixels>) -> WindowOptions {
+        let mut options = WindowOptions::from(self);
+        options.window_bounds = Some(WindowBounds::Windowed(saved));
+        options
+    }
+}
+
 impl From<WindowFit> for WindowOptions {
     fn from(fit: WindowFit) -> Self {
         Self {

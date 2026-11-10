@@ -15,6 +15,12 @@ animation ends, especially near screen edges ([#1210](https://github.com/AprilNE
 Other windows retain their normal animation policy; disabling the extension
 restores GNOME's original policy. The global animation setting is never changed.
 
+The extension also remembers where the user leaves the OpenLogi settings
+window and restores it after the window opens. GNOME does not let a Wayland
+client place its own toplevel, so without this the window reopens wherever the
+compositor chooses. Transient OSD surfaces stay out of the window-attention
+notifications and the task list.
+
 No titles, window contents, or input are read, and the extension adds no UI.
 
 ## D-Bus surface
@@ -30,7 +36,7 @@ No titles, window contents, or input are read, and the extension adds no UI.
 UUID=openlogi-frontmost@openlogi.dev
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 mkdir -p "$DEST"
-cp metadata.json extension.js ringAnimation.js "$DEST"/
+cp metadata.json extension.js ringAnimation.js windowState.js windowStatePolicy.js "$DEST"/
 ```
 
 On Wayland the shell cannot be reloaded in place, so **log out and back in** to
