@@ -29,7 +29,7 @@ use gpui::{
     Render, Role, SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription,
     TextRun, Toggled, TruncateFrom, Window, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControlArea, WindowHandle, WindowKind, WindowOptions, WindowTextSystem,
-    div, font, hsla, img, point, px, rgb, size, svg, transparent_black,
+    div, font, img, point, px, rgb, size, svg, transparent_black,
 };
 #[cfg(target_os = "linux")]
 use gpui::{MouseButton, MouseDownEvent, MouseUpEvent};
@@ -42,6 +42,7 @@ use openlogi_core::device::{
 };
 use openlogi_ipc::Observation;
 use openlogi_ui::action_icons::{PIN_ICON, icon_body};
+use openlogi_ui::color::neutral;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -155,7 +156,7 @@ struct Ink {
 
 fn shadow_ink() -> Ink {
     Ink {
-        ring: hsla(0.0, 0.0, 0.0, 0.4),
+        ring: neutral(0.0, 0.4),
     }
 }
 
@@ -913,7 +914,7 @@ fn kind_icon(kind: DeviceKind) -> &'static str {
         DeviceKind::Mouse | DeviceKind::Trackball | DeviceKind::Touchpad | DeviceKind::Tablet => {
             MOUSE_ICON
         }
-        DeviceKind::Keyboard | DeviceKind::Numpad => KEYBOARD_ICON,
+        kind if kind.is_keyboard_family() => KEYBOARD_ICON,
         DeviceKind::Headset => HEADSET_ICON,
         DeviceKind::Gamepad | DeviceKind::Joystick => GAMEPAD_ICON,
         DeviceKind::Camera => CAMERA_ICON,
@@ -926,7 +927,7 @@ fn kind_icon(kind: DeviceKind) -> &'static str {
 /// pinned card has no white surface around the track, so the lighter value
 /// reads as pure white against its shadow. It is opaque so the blurred shadow
 /// behind the transparent card cannot show through the empty track.
-const PINNED_TRACK: Hsla = hsla(0.0, 0.0, 0.882_352_94, 1.0);
+const PINNED_TRACK: Hsla = neutral(0.882_352_94, 1.0);
 
 struct Palette {
     card: Hsla,
@@ -943,19 +944,19 @@ impl Palette {
     fn for_dark(dark: bool) -> Self {
         if dark {
             Self {
-                card: hsla(0.0, 0.0, 0.10, 0.94),
+                card: neutral(0.10, 0.94),
                 text: rgb(0xD6_D6_DA).into(),
                 muted: rgb(0x9A_9A_9E).into(),
-                track: hsla(0.0, 0.0, 1.0, 0.12),
-                border: hsla(0.0, 0.0, 1.0, 0.10),
+                track: neutral(1.0, 0.12),
+                border: neutral(1.0, 0.10),
             }
         } else {
             Self {
-                card: hsla(0.0, 0.0, 1.0, 0.96),
+                card: neutral(1.0, 0.96),
                 text: rgb(0x1D_1D_1F).into(),
                 muted: rgb(0x6E_6E_73).into(),
-                track: hsla(0.0, 0.0, 0.0, 0.08),
-                border: hsla(0.0, 0.0, 0.0, 0.12),
+                track: neutral(0.0, 0.08),
+                border: neutral(0.0, 0.12),
             }
         }
     }
@@ -969,12 +970,7 @@ impl Palette {
     fn pin_chip(&self, pinned: bool, pressed: bool) -> Hsla {
         let glyph = if pinned { self.text } else { self.muted };
         let amount = if pressed { 0.62 } else { 0.50 };
-        hsla(
-            0.0,
-            0.0,
-            self.card.l + (glyph.l - self.card.l) * amount,
-            1.0,
-        )
+        neutral(self.card.l + (glyph.l - self.card.l) * amount, 1.0)
     }
 }
 

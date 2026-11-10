@@ -881,3 +881,15 @@ docs commit that follows fills the hashes.
   restart; the seed was then removed and the card returned to `–`. The write
   half still needs a powered mouse, so recording rests on the unit tests.
   Status: kept.
+
+## 20. Upstream guard convergence (2026-11-10)
+
+- `pending` **fix(overlay): adopt the shared neutral and keyboard-family owners** — kept.
+  Why: upstream's `ui-neutral-owner` and `core-keyboard-family-owner` guards
+  reject the card's bare `hsla` greys and its `Keyboard | Numpad` match.
+  Fix: route the surface greys through `openlogi_ui::color::neutral` and the
+  icon match through `DeviceKind::is_keyboard_family`.
+  Verified: ast-grep no longer reports either guard; `cargo test
+  -p openlogi-overlay` (119 passed, 4 ignored); `cargo clippy -p
+  openlogi-overlay --all-targets -- -D warnings`.
+  Status: kept.
