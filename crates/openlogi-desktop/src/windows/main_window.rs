@@ -36,8 +36,7 @@ pub(super) const MIN_SIZE: Size<Pixels> = Size {
     height: px(680.),
 };
 
-/// The main window's last frame, beside the config file. The Flow Indicator
-/// owns its own `flow-indicator.toml`; this is the settings window only.
+/// The main window's last frame, beside the config file.
 const STATE_FILE: &str = "window-state.json";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

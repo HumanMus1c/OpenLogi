@@ -32,9 +32,9 @@ use crate::{app, windows};
 /// one thing here that still has to be asked on a timer.
 const CAMERA_SCAN_PERIOD: Duration = Duration::from_secs(2);
 
-/// How often the main window's frame is written back. The Flow Indicator does
-/// the same for its own card; a second is short enough that a move-then-quit
-/// loses nothing visible and long enough to stay out of the render path.
+/// How often the main window's frame is written back. A second is short enough
+/// that a move-then-quit loses nothing visible and long enough to stay out of
+/// the render path.
 const WINDOW_STATE_PERIOD: Duration = Duration::from_secs(1);
 
 /// Deliver a saved-reload verdict only to the transaction that requested it.
