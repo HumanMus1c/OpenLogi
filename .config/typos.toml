@@ -13,6 +13,8 @@ extend-exclude = [
   "crates/openlogi-ui/locales/*.toml",
   "!crates/openlogi-ui/locales/en.toml",
   "docs/README.*.md",
+  # The fork ledger quotes commit hashes, which typos reads as words.
+  "docs/plans/fork-ledger.md",
   ".github/scripts/i18n/merge_crowdin_download.py",
 ]
 

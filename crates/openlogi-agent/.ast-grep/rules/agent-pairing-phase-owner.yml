@@ -15,6 +15,10 @@ note: |
 files:
   - crates/openlogi-agent/**/*.rs
   - crates/openlogi-agent-core/**/*.rs
+# The scripted demo inventory is not a live session: it publishes the phase
+# its mock holds and has no SessionOwner to transition.
+ignores:
+  - crates/openlogi-agent/src/demo.rs
 rule:
   any:
     - all:
