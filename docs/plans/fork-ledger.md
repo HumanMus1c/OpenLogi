@@ -924,3 +924,33 @@ docs commit that follows fills the hashes.
   openlogi-agent tray_linux::tests` (11 passed, including the new menu-order
   test). A live tray click was not recorded.
   Status: kept.
+
+## 22. Tray offline rows read the last-known cache (2026-11-11)
+
+- `pending` **fix(agent): publish the last-known battery reading to every surface** — kept.
+  Why: after the 2026-11-10 reinstall the Windows tray menu listed
+  `G703 Lightspeed  – · 离线` and `PRO Wireless  – · 离线`, while the Flow
+  Indicator still showed 95% and 51%. The cache was the overlay's private
+  `flow-indicator-last-known.toml`, so the tray — a different process — never
+  saw it, and the settings app's offline cards had the same gap.
+  Fix: `openlogi-core::last_known` owns the cache (record, restore, atomic
+  save, unchanged maps not rewritten); `ObservableState::set_inventory`
+  records each usable reading and restores it into the published snapshot for
+  an offline device with no reading, so the tray menu, the card, and the GUI
+  read one value. A restored device stays offline and never overrides a live
+  reading. The hardware launch loads `battery-last-known.toml` with a one-time
+  fallback to the overlay's old file; the demo launch and tests keep the cache
+  in memory, so synthetic readings never reach the user's file. The overlay's
+  private cache, its writes, and its three tests are removed, and the
+  `core-last-known-owner` ast-grep guard rejects a second copy.
+  Verified: Windows `cargo test -p openlogi-core` (526 passed),
+  `cargo test -p openlogi-agent-core` (878 passed), `cargo test -p
+  openlogi-agent` (43 + 113 passed), `cargo test -p openlogi-overlay` (116
+  passed, 4 ignored); `cargo clippy -p openlogi-core -p openlogi-agent-core
+  -p openlogi-agent -p openlogi-overlay --all-targets -- -D warnings`;
+  `cargo fmt --all -- --check`; `ast-grep scan` clean, and the new guard was
+  proved by a temporary violating struct in the overlay (reported, then
+  removed). A live tray menu with the restored rows was not recorded; the
+  restore path is covered by the core file test, the agent publication test,
+  and the tray's existing offline-row test.
+  Status: kept.

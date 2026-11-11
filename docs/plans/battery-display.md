@@ -106,7 +106,7 @@ thresholds. The GUI's existing meanings are authoritative:
 | Level only, no percentage | `Good` / `Low` / `Full` | level tone | level word | `–` |
 | No reading | no reading | normal | `—` | `–` |
 | Error status | no reading | Error | `Battery error` | red badge |
-| Offline with last known | last reading, marked offline | muted | last value + `Offline` | tooltip/menu `Offline` |
+| Offline with last known | last reading, marked offline | muted | last value + `Offline` | menu: last value + `Offline`; tooltip/badge: online devices only |
 
 The bar fill for a level-only reading is a coarse representation (`Critical 10`,
 `Low 25`, `Good 70`, `Full 100`), not a charge estimate. A no-reading row keeps an
@@ -205,8 +205,11 @@ The first implementation uses a vigil-watt-style badge:
   Do not leave a permanent card on screen with nothing to name.
 - Offline rows: show a last-known reading with a muted `Offline` marker. Use the
   reading still present in the inventory when it is there; otherwise the
-  overlay's last-reading cache — persisted beside the card's placement
-  (`flow-indicator-last-known.toml`) so an agent restart keeps it. A paired
+  agent's last-known cache (`openlogi-core::last_known`, persisted at
+  `battery-last-known.toml` under the config directory) so an agent restart
+  keeps it. The agent records each usable reading and restores it into the
+  inventory snapshot before publishing, so the tray, the card, and the settings
+  app all read the same value; a restored device stays offline. A paired
   device the user has never seen with a reading still gets a row, with an empty
   reading (`–`) rather than a fabricated `0%`, so a sleeping mouse does not
   empty a pinned card. This is a deliberate difference from vigil-watt, which
@@ -837,6 +840,20 @@ instead of claiming Linux has no tray.
   Offline devices with no reading at all keep a row with an empty reading, so
   `show_offline` keeps the card visible while the receiver still reports them.
   Verified on Windows (see the §19 ledger entry for the exact reinstall run).
+- **The last-known reading belongs to the agent, not the card (2026-11-11).**
+  A Windows tray right-click after an agent reinstall listed
+  `G703 Lightspeed – · 离线` / `PRO Wireless – · 离线`, while the Flow
+  Indicator still showed the last percentages. The cache was the overlay's
+  private `flow-indicator-last-known.toml`, so the tray — a different process —
+  never read it, and the GUI's offline cards lost the reading too. The store
+  moved to `openlogi-core::last_known`; `ObservableState::set_inventory`
+  records every usable reading and restores it into the published snapshot for
+  an offline device with no reading, so the tray menu, the card, and the
+  settings app share one value. The hardware launch loads
+  `battery-last-known.toml` (the overlay's old file is read once for
+  continuity); the demo launch and tests stay in memory, so synthetic readings
+  never reach the user's file. The overlay's private copy and its writes are
+  removed, and `core-last-known-owner` rejects a second cache.
 - **GNOME tray icons live in a 16 px box.** The AppIndicator extension draws
   every item at `Panel.PANEL_ICON_SIZE` (16 px) unless its `icon-size` setting
   says otherwise (default 0 = 16). With Ubuntu's text scaling at 1.18 the

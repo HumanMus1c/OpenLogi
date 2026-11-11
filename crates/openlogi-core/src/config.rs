@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 mod button_map;
 mod device;
 #[cfg(feature = "fs")]
-mod file;
+pub(crate) mod file;
 mod flow;
 mod function_key;
 mod gestures;

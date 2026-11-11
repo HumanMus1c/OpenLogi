@@ -1,0 +1,28 @@
+# Owner: openlogi_core::last_known::LastKnown — the one cache of the last
+# usable battery reading each paired device reported. The agent restores it for
+# an offline device that has no reading of its own before it publishes the
+# inventory snapshot, so the tray, the Flow Indicator card, and the settings app
+# all show the same value after an agent restart.
+id: core-last-known-owner
+language: rust
+severity: error
+message: Use openlogi_core::last_known::LastKnown instead of keeping a second last-known battery cache.
+note: |
+  The Flow Indicator owned a private copy, persisted at
+  `flow-indicator-last-known.toml`, until the tray needed the same readings;
+  the agent now records and restores them in the shared snapshot. A second copy
+  would let the tray and the card disagree after an agent restart, and a demo
+  run could write synthetic readings into the user's file.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/last_known.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - kind: struct_item
+      regex: 'struct\s+\w*LastKnown\b'
+    - kind: string_literal
+      regex: '-last-known\.toml'

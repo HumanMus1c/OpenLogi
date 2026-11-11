@@ -66,6 +66,7 @@ use std::sync::Arc;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::config::Config;
 use openlogi_core::device_source::DeviceSource;
+use openlogi_core::last_known::LastKnown;
 use openlogi_core::single_instance::InstanceGuard;
 #[cfg(not(target_os = "macos"))]
 use openlogi_hid::DeviceIoSignal;
@@ -114,8 +115,14 @@ fn main() -> ExitCode {
     openlogi_core::locale::activate(config.app_settings.language.as_deref());
 
     // The tray and the IPC server read the same cell; construct it before the
-    // tray thread starts so the first tooltip already has a live handle.
-    let observable = Arc::new(ObservableState::new(agent_version(demo)));
+    // tray thread starts so the first tooltip already has a live handle. The
+    // demo's scripted inventory is not the user's hardware, so only a hardware
+    // launch loads the persisted last-known readings.
+    let observable = Arc::new(if demo {
+        ObservableState::new(agent_version(demo))
+    } else {
+        ObservableState::with_last_known(agent_version(demo), LastKnown::load())
+    });
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

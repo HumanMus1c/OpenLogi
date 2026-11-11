@@ -37,8 +37,8 @@ use openlogi_core::config::{
     AppSettings, Config, ConfigFile, FlowIndicatorDisplayMode, battery_devices_named,
 };
 use openlogi_core::device::{
-    BatteryColor, BatteryDevice, BatteryInfo, BatteryReading, BatteryTone, BatteryValue,
-    DeviceInventory, DeviceKind, battery_devices, flow_indicator_rows,
+    BatteryColor, BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceInventory,
+    DeviceKind, battery_devices, flow_indicator_rows,
 };
 use openlogi_ipc::Observation;
 use openlogi_ui::action_icons::{PIN_ICON, icon_body};
@@ -448,160 +448,6 @@ fn write_saved(saved: &SavedPosition) {
         });
     if let Err(error) = written {
         warn!(%error, "Flow Indicator: could not save its position");
-    }
-}
-
-/// The last battery each paired device reported, saved beside the card's
-/// placement.
-///
-/// The agent's own last-known cache lives in the agent process, so an agent
-/// restart (an install, a crash, a reboot) would empty a pinned card until
-/// every device woke and reported again. This file carries the readings across
-/// that boundary. A restored row is offline and muted, never presented as
-/// live, and a fresh reading always replaces it.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct LastKnownFile {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    devices: Vec<LastKnownEntry>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct LastKnownEntry {
-    /// The display name the row paints; the key together with `kind`.
-    name: String,
-    kind: DeviceKind,
-    battery: BatteryInfo,
-}
-
-#[derive(Debug, Default)]
-struct LastKnown {
-    entries: Vec<LastKnownEntry>,
-    /// The body last read or written, so an unchanged map does not rewrite
-    /// the file on every observation.
-    saved: String,
-}
-
-fn last_known_path() -> Option<PathBuf> {
-    openlogi_core::paths::config_dir()
-        .ok()
-        .map(|dir| dir.join("flow-indicator-last-known.toml"))
-}
-
-impl LastKnown {
-    fn load() -> Self {
-        let Some(path) = last_known_path() else {
-            return Self::default();
-        };
-        let Ok(body) = std::fs::read_to_string(&path) else {
-            return Self::default();
-        };
-        match toml::from_str::<LastKnownFile>(&body) {
-            Ok(file) => Self {
-                entries: file.devices,
-                saved: body,
-            },
-            Err(error) => {
-                warn!(%error, "Flow Indicator: ignoring an unreadable last-known file");
-                Self::default()
-            }
-        }
-    }
-
-    /// Fold one observation into the cache. A device with no usable reading
-    /// keeps its previous entry: a charging cold start or a missed poll must
-    /// not erase the last percentage.
-    fn observe(&mut self, devices: &[BatteryDevice]) {
-        if self.record(devices) {
-            self.save();
-        }
-    }
-
-    /// Update the entries from one observation; answers whether anything
-    /// changed. Split from [`Self::observe`] so the merge can be tested
-    /// without touching the config directory.
-    fn record(&mut self, devices: &[BatteryDevice]) -> bool {
-        let mut changed = false;
-        for device in devices {
-            let Some(name) = device.name.as_deref().filter(|name| !name.is_empty()) else {
-                continue;
-            };
-            let Some(battery) = &device.battery else {
-                continue;
-            };
-            if battery.reading() == BatteryReading::NoReading {
-                continue;
-            }
-            match self
-                .entries
-                .iter_mut()
-                .find(|entry| entry.name == name && entry.kind == device.kind)
-            {
-                Some(entry) if entry.battery == *battery => {}
-                Some(entry) => {
-                    entry.battery = battery.clone();
-                    changed = true;
-                }
-                None => {
-                    self.entries.push(LastKnownEntry {
-                        name: name.to_owned(),
-                        kind: device.kind,
-                        battery: battery.clone(),
-                    });
-                    changed = true;
-                }
-            }
-        }
-        changed
-    }
-
-    /// Give an offline device with no reading its last known battery. A device
-    /// the agent still reads, or an online one, keeps the fresh value.
-    fn apply(&self, devices: &mut [BatteryDevice]) {
-        for device in devices {
-            if device.online || device.has_readout() {
-                continue;
-            }
-            let Some(name) = device.name.as_deref() else {
-                continue;
-            };
-            if let Some(entry) = self
-                .entries
-                .iter()
-                .find(|entry| entry.name == name && entry.kind == device.kind)
-            {
-                device.battery = Some(entry.battery.clone());
-            }
-        }
-    }
-
-    fn save(&mut self) {
-        let Some(path) = last_known_path() else {
-            return;
-        };
-        let Ok(body) = toml::to_string(&LastKnownFile {
-            devices: self.entries.clone(),
-        }) else {
-            return;
-        };
-        if body == self.saved {
-            return;
-        }
-        if let Some(parent) = path.parent()
-            && let Err(error) = std::fs::create_dir_all(parent)
-        {
-            warn!(%error, "Flow Indicator: could not create its config directory");
-            return;
-        }
-        let written = atomic_write_file::AtomicWriteFile::options()
-            .open(&path)
-            .and_then(|mut file| {
-                std::io::Write::write_all(&mut file, body.as_bytes())?;
-                file.commit()
-            });
-        match written {
-            Ok(()) => self.saved = body,
-            Err(error) => warn!(%error, "Flow Indicator: could not save the last-known readings"),
-        }
     }
 }
 
@@ -2763,9 +2609,6 @@ pub(crate) struct FlowIndicator {
     /// The config that names the rows; `None` until the first successful read.
     config: Option<Config>,
     inventory: Vec<DeviceInventory>,
-    /// The readings that survived the last agent session, so a pinned card
-    /// restores its offline rows instead of vanishing on a restart.
-    last_known: LastKnown,
     /// The desktop's light/dark mode, shared with the view that paints it.
     appearance: Arc<Appearance>,
     /// The appearance revision the open card last painted.
@@ -2879,7 +2722,6 @@ impl FlowIndicator {
             settings,
             config,
             inventory: Vec::new(),
-            last_known: LastKnown::load(),
             appearance,
             appearance_revision,
             hidden: false,
@@ -2941,8 +2783,6 @@ impl FlowIndicator {
                 match observation {
                     Some(observation) => {
                         self.inventory.clone_from(&observation.snapshot.inventory);
-                        let devices = self.devices();
-                        self.last_known.observe(&devices);
                         if !self.observed {
                             self.observed = true;
                             info!("Flow Indicator received its first observation");
@@ -3489,8 +3329,7 @@ impl FlowIndicator {
         if !self.settings.enabled {
             return (Vec::new(), 0);
         }
-        let mut devices = self.devices();
-        self.last_known.apply(&mut devices);
+        let devices = self.devices();
         let selected = flow_indicator_rows(
             &devices,
             self.settings.show_offline,
@@ -4886,137 +4725,6 @@ mod tests {
                     .is_none()
             );
         });
-    }
-
-    fn last_known_device(
-        name: &str,
-        online: bool,
-        percentage: Option<u8>,
-        status: openlogi_core::device::BatteryStatus,
-    ) -> openlogi_core::device::BatteryDevice {
-        use openlogi_core::device::{BatteryDevice, BatteryInfo, BatteryLevel, DeviceKind};
-
-        BatteryDevice {
-            name: Some(name.to_owned()),
-            kind: DeviceKind::Mouse,
-            online,
-            battery: percentage.map(|percentage| BatteryInfo {
-                percentage: Some(percentage),
-                level: BatteryLevel::Good,
-                status,
-            }),
-        }
-    }
-
-    /// A reading recorded while a device was reachable restores its row after
-    /// an agent restart — as an offline row, and never over a fresh reading.
-    #[test]
-    fn the_last_known_reading_restores_an_offline_row() {
-        use super::LastKnown;
-        use openlogi_core::device::BatteryStatus;
-
-        let mut cache = LastKnown::default();
-        assert!(cache.record(&[last_known_device(
-            "G Pro",
-            true,
-            Some(59),
-            BatteryStatus::Discharging
-        )]));
-
-        let mut devices = vec![last_known_device(
-            "G Pro",
-            false,
-            None,
-            BatteryStatus::Unknown,
-        )];
-        cache.apply(&mut devices);
-        assert_eq!(
-            devices[0]
-                .battery
-                .as_ref()
-                .and_then(|battery| battery.percentage),
-            Some(59)
-        );
-        assert!(!devices[0].online, "the restored row stays an offline row");
-
-        let mut live = vec![last_known_device(
-            "G Pro",
-            true,
-            Some(80),
-            BatteryStatus::Discharging,
-        )];
-        cache.apply(&mut live);
-        assert_eq!(
-            live[0]
-                .battery
-                .as_ref()
-                .and_then(|battery| battery.percentage),
-            Some(80),
-            "a live reading is never replaced by the cache"
-        );
-    }
-
-    /// A charging cold start has no percentage and must not erase the last
-    /// one; a device the card never read has nothing to restore.
-    #[test]
-    fn the_last_known_cache_survives_a_cold_start() {
-        use super::LastKnown;
-        use openlogi_core::device::{
-            BatteryDevice, BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind,
-        };
-
-        let mut cache = LastKnown::default();
-        cache.record(&[last_known_device(
-            "G Pro",
-            false,
-            Some(42),
-            BatteryStatus::Discharging,
-        )]);
-        let charging = BatteryDevice {
-            name: Some("G Pro".to_owned()),
-            kind: DeviceKind::Mouse,
-            online: false,
-            battery: Some(BatteryInfo {
-                percentage: None,
-                level: BatteryLevel::Unknown,
-                status: BatteryStatus::Charging,
-            }),
-        };
-        assert!(!cache.record(&[charging]));
-        assert_eq!(cache.entries[0].battery.percentage, Some(42));
-
-        let mut unseen = vec![last_known_device(
-            "Never Seen",
-            false,
-            None,
-            BatteryStatus::Unknown,
-        )];
-        cache.apply(&mut unseen);
-        assert!(unseen[0].battery.is_none());
-    }
-
-    /// The saved document round-trips, and a device's kind stays part of its
-    /// key.
-    #[test]
-    fn the_last_known_file_round_trips() {
-        use super::{LastKnownEntry, LastKnownFile};
-        use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
-
-        let entry = LastKnownEntry {
-            name: "MX Keys".to_owned(),
-            kind: DeviceKind::Keyboard,
-            battery: BatteryInfo {
-                percentage: Some(64),
-                level: BatteryLevel::Good,
-                status: BatteryStatus::Discharging,
-            },
-        };
-        let body = toml::to_string(&LastKnownFile {
-            devices: vec![entry.clone()],
-        })
-        .expect("write the last-known document");
-        let parsed: LastKnownFile = toml::from_str(&body).expect("read it back");
-        assert_eq!(parsed.devices, vec![entry]);
     }
 
     /// The regular card follows the settings app's preference; only `System`
