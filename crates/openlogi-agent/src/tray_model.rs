@@ -13,8 +13,8 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::{DeeplinkCommand, DeviceLink};
 use openlogi_core::config::{Config, canonical_device_key};
 use openlogi_core::device::{
-    BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceKind,
-    LightCapabilities, StandaloneDevice, prettify_codename,
+    BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus, BatteryValue, Capabilities,
+    DeviceKind, LightCapabilities, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_core::diagnostics::ConnectionKind;
@@ -356,26 +356,15 @@ impl BatteryFill {
     }
 }
 
-/// Whether `battery` is taking a charge, which its glyph shows with a bolt.
-#[must_use]
-pub const fn is_charging(battery: &BatteryInfo) -> bool {
-    matches!(
-        battery.status,
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow
-    )
-}
-
 /// A battery reading in a few characters: "62%", or the coarse level when the
 /// device reports no percentage.
 #[must_use]
 pub fn battery_text(battery: &BatteryInfo) -> String {
-    match (battery.percentage, battery.level) {
-        (Some(percent), _) => t!("tray.percent", percent => percent).into_owned(),
-        (None, BatteryLevel::Full) => t!("device.full").into_owned(),
-        (None, BatteryLevel::Good) => t!("device.battery_good").into_owned(),
-        (None, BatteryLevel::Low | BatteryLevel::Critical) => t!("device.low_battery").into_owned(),
-        (None, BatteryLevel::Unknown) if is_charging(battery) => t!("device.charging").into_owned(),
-        (None, BatteryLevel::Unknown) => "—".to_owned(),
+    match battery.value() {
+        BatteryValue::Percent(percent) => t!("tray.percent", percent => percent).into_owned(),
+        value => value
+            .translation_key()
+            .map_or_else(|| "—".to_owned(), |key| t!(key).into_owned()),
     }
 }
 

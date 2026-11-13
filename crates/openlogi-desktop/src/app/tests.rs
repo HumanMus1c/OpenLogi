@@ -2,7 +2,6 @@ use super::home::{ConnectionGlyph, connection_glyph, ordered_device_indices};
 use super::{DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
 use crate::state::{Link, Presence};
-use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceModelInfo, DeviceTransports,
     LightCapabilities, LightValueRange, LightValueUnit,
@@ -400,32 +399,20 @@ fn charging_without_reading_suppresses_percentage() {
         level: BatteryLevel::Good,
         status,
     };
-    assert!(battery_charging_no_reading(&b(
-        Some(0),
-        BatteryStatus::Charging
-    )));
-    assert!(battery_charging_no_reading(&b(
-        Some(0),
-        BatteryStatus::ChargingSlow
-    )));
-    assert!(!battery_charging_no_reading(&b(
-        Some(40),
-        BatteryStatus::Charging
-    )));
-    assert!(!battery_charging_no_reading(&b(
-        Some(0),
-        BatteryStatus::Discharging
-    )));
+    assert!(b(Some(0), BatteryStatus::Charging).charging_without_reading());
+    assert!(b(Some(0), BatteryStatus::ChargingSlow).charging_without_reading());
+    assert!(!b(Some(40), BatteryStatus::Charging).charging_without_reading());
+    assert!(!b(Some(0), BatteryStatus::Discharging).charging_without_reading());
     // A level-only device that is charging still has its level to show.
-    assert!(!battery_charging_no_reading(&b(
-        None,
-        BatteryStatus::Charging
-    )));
-    assert!(battery_charging_no_reading(&BatteryInfo {
-        percentage: None,
-        level: BatteryLevel::Unknown,
-        status: BatteryStatus::Charging,
-    }));
+    assert!(!b(None, BatteryStatus::Charging).charging_without_reading());
+    assert!(
+        BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Unknown,
+            status: BatteryStatus::Charging,
+        }
+        .charging_without_reading()
+    );
 }
 
 /// Builds a [`DeviceModelInfo`] with `transports` and the packed per-transport
