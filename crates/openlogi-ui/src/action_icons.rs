@@ -58,10 +58,12 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/dot.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/dot.svg"))),
     ("action-icons/file.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/file.svg"))),
     ("action-icons/folder.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/folder.svg"))),
+    ("action-icons/gamepad-2.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/gamepad-2.svg"))),
     ("action-icons/gauge.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/gauge.svg"))),
     ("action-icons/globe.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/globe.svg"))),
     ("action-icons/grid-3x3.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/grid-3x3.svg"))),
     ("action-icons/heart.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/heart.svg"))),
+    ("action-icons/headset.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/headset.svg"))),
     ("action-icons/keyboard.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/keyboard.svg"))),
     ("action-icons/layers.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/layers.svg"))),
     ("action-icons/layout-grid.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/layout-grid.svg"))),
@@ -76,6 +78,7 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/move.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/move.svg"))),
     ("action-icons/palette.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/palette.svg"))),
     ("action-icons/pencil.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/pencil.svg"))),
+    ("action-icons/pin.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/pin.svg"))),
     ("action-icons/play.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/play.svg"))),
     ("action-icons/redo-2.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/redo-2.svg"))),
     ("action-icons/refresh-cw.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/refresh-cw.svg"))),
@@ -119,6 +122,9 @@ pub const LOW_BATTERY_ICON: &str = "action-icons/battery-low.svg";
 /// The glyph on the overlay's lock-key indicator.
 pub const LOCK_KEY_ICON: &str = "action-icons/keyboard.svg";
 
+/// The glyph on the Flow Indicator's pin toggle.
+pub const PIN_ICON: &str = "action-icons/pin.svg";
+
 /// The embedded SVG for an `action-icons/…` asset path — the same path
 /// `ActionRingIcon::asset_path` names — or `None` for any other path.
 #[must_use]
@@ -127,6 +133,21 @@ pub fn embedded_icon(path: &str) -> Option<&'static [u8]> {
         .iter()
         .find(|(candidate, _)| *candidate == path)
         .map(|(_, bytes)| *bytes)
+}
+
+/// The inner content of a vendored glyph, for callers that must compose it
+/// into a larger SVG (the Flow Indicator's generated shadow). The wrapper
+/// carries the stock stroke attributes; inner elements inherit them.
+#[must_use]
+pub fn icon_body(path: &str) -> Option<&'static str> {
+    let bytes = ACTION_ICONS
+        .iter()
+        .find(|(candidate, _)| *candidate == path)?
+        .1;
+    let text = std::str::from_utf8(bytes).ok()?;
+    let start = text.find('>')? + 1;
+    let end = text.rfind("</svg>")?;
+    text.get(start..end)
 }
 
 /// GPUI asset source for the embedded ring glyphs, and nothing else.

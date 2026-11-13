@@ -310,7 +310,9 @@ impl State {
     }
 
     /// Take in every online device's battery as the agent's watch does, and
-    /// answer the notices now due.
+    /// answer the notices now due. Names follow the settings app's precedence
+    /// (custom name, persisted product name, then codename), read fresh from
+    /// the config so a rename reaches the next notice.
     fn low_battery_notices(&mut self, settings: &AppSettings) -> Vec<NoticeKind> {
         let mut due = Vec::new();
         for target in self.targets() {
@@ -321,8 +323,13 @@ impl State {
                 .low_battery
                 .take_reading(settings, &target.route.to_string(), &battery)
             {
+                let name = self
+                    .names
+                    .get(&target.route.to_string())
+                    .cloned()
+                    .or(target.name);
                 due.push(NoticeKind::LowBattery {
-                    name: target.name,
+                    name,
                     kind: target.kind,
                     battery,
                 });
@@ -365,12 +372,13 @@ fn listing(targets: &[Target]) -> String {
 }
 
 /// Read console commands from stdin and apply them in order, replying on
-/// stdout. Call it inside the Tokio runtime.
+/// stdout. Call it inside the Tokio runtime. Re-exported by the parent as
+/// `mock::spawn_console` for the agent binary's demo mode.
 ///
 /// The read runs on a thread of its own: a blocking stdin read cannot be
 /// cancelled, so on the runtime's blocking pool it would hold up shutdown.
 /// When stdin closes, the console stops and the mock keeps serving.
-pub(super) fn spawn_console(agent: MockAgent) {
+pub fn spawn_console(agent: MockAgent) {
     let (sender, mut lines) = mpsc::unbounded_channel::<String>();
     let reader = std::thread::Builder::new()
         .name("mock-console".to_owned())

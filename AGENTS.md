@@ -128,6 +128,31 @@ That file owns tier selection, commands, and the CI job map. Run the applicable
 gate on the final tree; do not push a known-red tree or bypass the hooks.
 A skipped job is **not** a pass. These procedures do not authorize a push.
 
+### Device source: runtime `--mock`, one build
+
+The launch decides the device source, not the build tree. A `--mock` launch of
+`openlogi-agent` (or of the GUI, which passes it on) serves the scripted demo
+inventory — the canonical synthetic devices — with no HID I/O and no input
+hook; without it the agent drives real hardware, in release and debug builds
+alike. The agent's version carries `-mock`, `--fixture <profile.json>` loads a
+semantic profile, and the demo's stdin console still drives it.
+`OPENLOGI_MOCK_DEVICES=1/0` is the scriptable form of the same switch. A WSL
+guest defaults to the demo when neither selects a source (it exposes no HID
+devices); every other host defaults to hardware.
+
+A GUI launched for one source aligns the running agent to it: an agent serving
+the other source is asked to leave over IPC (`request_shutdown`, protocol v43)
+and the requested source is started. The config file, singleton locks, and IPC
+endpoint are shared, so the two sources never run at once and never split the
+user's settings. Device inventories are not shared: the demo never probes HID,
+writes no probe cache, and its synthetic config keys cannot collide with a real
+device's.
+
+**Every feature must behave and operate identically on Linux and Windows.**
+Develop and test with `--mock` on both OSes — same demo devices, same IPC
+contract — then verify the release build against real hardware. A feature
+verified on one OS is not done.
+
 ### Running the app
 
 - Dev-run with `cargo run -p openlogi-desktop` — a cargo runner wraps the build into
@@ -142,10 +167,15 @@ A skipped job is **not** a pass. These procedures do not authorize a push.
   and a surviving agent relaunches itself ~20 s later — then starts the freshly
   built agent and waits for its socket, so the GUI's first IPC connect succeeds
   instead of exercising the production spawn-on-unreachable fallback.
-  `OPENLOGI_DEV_AGENT=0` opts out of all of it.
-- No hardware attached? `cargo run -p openlogi-agent --bin openlogi-agent-mock` serves
-  a scripted inventory over the dev IPC socket, so the GUI runs unmodified and the
-  production app stays untouched.
+  `OPENLOGI_DEV_AGENT=0` opts out of all of it. The dev bundle starts both the
+  agent and the GUI in demo mode; `OPENLOGI_DEV_REAL=1` runs both against real
+  hardware instead.
+- No hardware attached? Run the demo suite with
+  `cargo run -p openlogi-desktop -- --mock` (WSL needs no flag; it defaults to
+  the demo). The installed release build takes the same `--mock` flag.
+  `cargo run -p openlogi-agent --bin openlogi-agent-mock` remains as the
+  standalone dev tool for `--fixture` runs and explicit profile choice; launch
+  its GUI with `--mock` so both sides pick the same source.
 - Mechanics, dev profiles, and the mock's scope: `docs/DEVELOPMENT.md`.
 
 ## Rust standards
@@ -168,6 +198,13 @@ loaded for any Rust or `Cargo.toml` edit.
   worktree so parallel work doesn't collide; trivial fixes may go straight to master.
 - Commits are small and focused — split unrelated concerns into separate commits; never
   one giant unreviewable diff.
+- Every commit that changes behaviour or ownership adds or updates its entry in
+  [docs/plans/fork-ledger.md](docs/plans/fork-ledger.md) in the same commit: the
+  change, its root cause, the verification evidence (or that none was recorded), and
+  whether it was kept, superseded, or reverted. Start the entry with a `pending`
+  hash; the next docs commit fills it in, since a commit cannot name its own hash.
+  `chore`, `style`, `test`, `build`, `ci`, and docs-only commits are exempt. The
+  ledger is a commit history; design decisions still live in the owning plan.
 - Before rebasing, managing issues, or preparing/adopting/reviewing/merging a PR, read the
   [GitHub workflow](docs/DEVELOPMENT.md#github-workflow). It owns fresh-base checks,
   PR format, contributor authorship, merge policy, and current-head CI handling.

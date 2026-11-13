@@ -2,10 +2,9 @@ use super::home::{ConnectionGlyph, connection_glyph, ordered_device_indices};
 use super::{DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
 use crate::state::{Link, Presence};
-use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, LightValueRange, LightValueUnit,
+    Capabilities, DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange,
+    LightValueUnit,
 };
 use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
@@ -387,45 +386,6 @@ fn a_long_profile_strip_keeps_the_buttons_inspector_in_the_window(cx: &mut gpui:
         inspector.right() <= window_w,
         "the inspector {inspector:?} must end inside the {window_w:?} window"
     );
-}
-
-/// "Charging" replaces the bogus percentage only when charging *and* the
-/// reading is still 0% or absent with no level (cold start, no cached
-/// pre-charge value). A non-zero charge, a real 0% while discharging, or a
-/// level-only reading keeps something to show.
-#[test]
-fn charging_without_reading_suppresses_percentage() {
-    let b = |percentage, status| BatteryInfo {
-        percentage,
-        level: BatteryLevel::Good,
-        status,
-    };
-    assert!(battery_charging_no_reading(&b(
-        Some(0),
-        BatteryStatus::Charging
-    )));
-    assert!(battery_charging_no_reading(&b(
-        Some(0),
-        BatteryStatus::ChargingSlow
-    )));
-    assert!(!battery_charging_no_reading(&b(
-        Some(40),
-        BatteryStatus::Charging
-    )));
-    assert!(!battery_charging_no_reading(&b(
-        Some(0),
-        BatteryStatus::Discharging
-    )));
-    // A level-only device that is charging still has its level to show.
-    assert!(!battery_charging_no_reading(&b(
-        None,
-        BatteryStatus::Charging
-    )));
-    assert!(battery_charging_no_reading(&BatteryInfo {
-        percentage: None,
-        level: BatteryLevel::Unknown,
-        status: BatteryStatus::Charging,
-    }));
 }
 
 /// Builds a [`DeviceModelInfo`] with `transports` and the packed per-transport

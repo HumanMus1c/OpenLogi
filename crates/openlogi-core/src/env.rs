@@ -25,3 +25,10 @@ pub const ASSETS: &str = "OPENLOGI_ASSETS";
 /// Pins the GUI's device renders to one depot regardless of what is attached
 /// — a development convenience read in two places.
 pub const FORCE_DEPOT: &str = "OPENLOGI_FORCE_DEPOT";
+
+/// Selects the device source at runtime: `1/true/yes/on` serves the scripted
+/// demo inventory, `0/false/no/off` drives real HID++ hardware. Unset, a WSL
+/// guest serves the demo (it exposes no HID devices) and every other host
+/// drives hardware. The agent's and GUI's `--mock` launch flags are the
+/// user-facing form of `1` and win over this variable.
+pub const MOCK_DEVICES: &str = "OPENLOGI_MOCK_DEVICES";

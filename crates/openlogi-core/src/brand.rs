@@ -40,6 +40,13 @@ pub const AGENT_ID: &str = "org.openlogi.agent";
 /// The Actions Ring overlay's bundle identifier, the second nested login item.
 pub const OVERLAY_ID: &str = "org.openlogi.overlay";
 
+/// The Flow Indicator card's OS window title.
+///
+/// An identity, not a caption: the Windows tray looks the card up by it when
+/// raising the OpenLogi windows together, and the Linux task list shows it.
+/// Deliberately not localized for the same reason.
+pub const FLOW_INDICATOR_TITLE: &str = "OpenLogi - Flow Indicator";
+
 /// The agent's macOS launchd service label: the `Label` in the app bundle's
 /// embedded `Contents/Library/LaunchAgents/<label>.plist`, what `SMAppService`
 /// registers, and the name `launchctl` addresses (`gui/<uid>/<label>`). Dev

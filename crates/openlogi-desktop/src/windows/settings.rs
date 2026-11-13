@@ -56,6 +56,7 @@ mod assets;
 // that surfaces it is macOS-only.
 #[cfg(target_os = "macos")]
 mod diagnostics;
+mod flow_indicator;
 mod general;
 mod language;
 // Windows needs no privacy grants — the WH_MOUSE_LL hook and raw HID access
@@ -83,16 +84,17 @@ impl SettingsPage {
     fn index(self) -> usize {
         match self {
             Self::General => 0,
-            Self::Updates => 1,
+            // The Flow Indicator page sits between General and Updates.
+            Self::Updates => 2,
             #[cfg(target_os = "linux")]
-            Self::Permissions => 2,
+            Self::Permissions => 3,
             // One lower on Windows: the Permissions page isn't registered
             // there (see the `mod permissions` cfg).
             Self::About => {
                 if cfg!(any(target_os = "macos", target_os = "linux")) {
-                    5
+                    6
                 } else {
-                    4
+                    5
                 }
             }
         }
@@ -470,6 +472,7 @@ impl Render for SettingsView {
                 self.momentum_panel.clone(),
                 self.registration_status,
             ))
+            .page(flow_indicator::flow_indicator_page())
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.

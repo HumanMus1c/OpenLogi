@@ -16,7 +16,7 @@ mod device;
 #[cfg(feature = "fs")]
 mod edit;
 #[cfg(feature = "fs")]
-mod file;
+pub(crate) mod file;
 mod flow;
 mod function_key;
 mod gestures;
@@ -49,16 +49,17 @@ pub use flow::{
     FlowPeer, FlowPeerName, FlowPublicKey, SELF_CHANNEL,
 };
 pub use function_key::FunctionKey;
-pub use identity::canonical_device_key;
+pub use identity::{battery_devices_named, canonical_device_key};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, CameraStreamMode,
-    DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, Lighting, MomentumParams,
-    MomentumScrolling, MouseProfileTarget, OnboardMemory, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
-    VerticalScrollSensitivity, WheelMode,
+    DeviceViewMode, FLOW_INDICATOR_MAX_DEVICES_DEFAULT, FLOW_INDICATOR_MAX_DEVICES_MAX,
+    FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode, GKeyOwner, GamingKeyMode, GlideShape,
+    Lighting, MomentumParams, MomentumScrolling, MouseProfileTarget, OnboardMemory,
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity, TrayBadgeStyle, UiScale, VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::app::AppAliases;

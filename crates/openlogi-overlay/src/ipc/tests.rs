@@ -293,7 +293,8 @@ async fn losing_the_agent_clears_the_notices_it_was_showing() {
     };
     let mut hang_up = Some(hang_up);
     let mut shown = Vec::new();
-    let observing = observe(connect, NOTICES, |observed: NoticeObservation| {
+    let observing = observe(connect, NOTICES, |observed: Option<NoticeObservation>| {
+        let observed = observed.expect("the notices cell keeps a lost value");
         shown.push(observed.notices.len());
         // The agent goes away once its notice is on screen.
         if let Some(hang_up) = hang_up.take() {
@@ -351,17 +352,75 @@ async fn losing_the_agent_hides_the_lock_key_indicator() {
     };
     let mut hang_up = Some(hang_up);
     let mut shown = Vec::new();
-    let observing = observe(connect, LOCK_KEYS, |observed: LockKeyObservation| {
-        shown.push(observed.shown);
-        // The agent goes away once its indicator is on screen.
-        if let Some(hang_up) = hang_up.take() {
-            let _ = hang_up.send(());
-        }
-        observed.shown.is_some()
-    });
+    let observing = observe(
+        connect,
+        LOCK_KEYS,
+        |observed: Option<LockKeyObservation>| {
+            let observed = observed.expect("the lock-key cell keeps a lost value");
+            shown.push(observed.shown);
+            // The agent goes away once its indicator is on screen.
+            if let Some(hang_up) = hang_up.take() {
+                let _ = hang_up.send(());
+            }
+            observed.shown.is_some()
+        },
+    );
 
     tokio::time::timeout(Duration::from_secs(5), observing)
         .await
         .expect("a lost agent's indicator is hidden");
     assert_eq!(shown, [Some(caps_lock_on), None]);
+}
+
+/// A cell with no lost value of its own (the Flow Indicator's snapshot) must
+/// hear about the disconnection itself: that is what lets the card mark its
+/// last readings stale instead of presenting them as live.
+#[tokio::test(start_paused = true)]
+async fn a_cell_without_a_lost_value_hands_over_the_disconnection() {
+    let (hang_up, agent_gone) = tokio::sync::oneshot::channel::<()>();
+    let agent = in_memory_agent(
+        move |request| {
+            Box::pin(async move {
+                let AgentRequest::ObserveActionRing { since } = request else {
+                    panic!("the ring loop sent an unexpected request: {request:?}");
+                };
+                if since != 0 {
+                    // Hold the poll open, as a quiet agent does.
+                    return std::future::pending().await;
+                }
+                Ok(AgentResponse::ObserveActionRing(RingObservation {
+                    generation: 1,
+                    invocation: None,
+                }))
+            })
+        },
+        async move {
+            let _ = agent_gone.await;
+        },
+    );
+    // The first attempt reaches the agent; no replacement ever answers.
+    let mut agents = Some(agent);
+    let connect = move || {
+        let agent = agents.take();
+        async move {
+            match agent {
+                Some(agent) => Some(agent),
+                None => std::future::pending().await,
+            }
+        }
+    };
+    let mut hang_up = Some(hang_up);
+    let mut delivered = Vec::new();
+    let observing = observe(connect, RING, |ring: Option<RingObservation>| {
+        delivered.push(ring.map(|ring| ring.invocation.is_some()));
+        if let Some(hang_up) = hang_up.take() {
+            let _ = hang_up.send(());
+        }
+        delivered.len() == 1
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), observing)
+        .await
+        .expect("a lost connection reaches the snapshot cell");
+    assert_eq!(delivered, [Some(false), None]);
 }

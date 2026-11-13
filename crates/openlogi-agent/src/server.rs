@@ -32,9 +32,9 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
-    FlowPairingCommandError, Generation, Identity, LockKeyObservation, MonitorEvent,
-    NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    FlowPairingCommandError, FlowPinnedObservation, Generation, Identity, LockKeyObservation,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -66,6 +66,9 @@ pub struct AgentServer {
     /// Forwards each connection's [`ClientKind`] declaration to the
     /// dormancy gate.
     pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
+    /// Asks the lifecycle to leave through [`Agent::request_shutdown`], with
+    /// the same teardown the tray's Quit uses.
+    shutdown: crate::shutdown::ShutdownRequestSender,
 }
 
 impl AgentServer {
@@ -84,6 +87,7 @@ impl AgentServer {
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
         backlight_overlay: BacklightOverlayManager,
+        shutdown: crate::shutdown::ShutdownRequestSender,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
@@ -99,6 +103,7 @@ impl AgentServer {
                 ring_haptics,
                 backlight_overlay,
                 demand,
+                shutdown,
             },
             declarations,
         )
@@ -116,15 +121,9 @@ impl AgentServer {
             Ok((config, file)) => {
                 let revision = file.revision();
                 let launch_at_login = config.app_settings.launch_at_login;
-                #[cfg(target_os = "macos")]
-                let app_icon = config.app_settings.app_icon;
-                #[cfg(target_os = "macos")]
-                let show_in_menu_bar = config.app_settings.show_in_menu_bar;
-                let language = config.app_settings.language.clone();
-                // The menu reads the config on the main thread, from its own
-                // copy.
-                #[cfg(target_os = "macos")]
-                crate::tray::set_config(Arc::new(config.clone()));
+                // The tray names its rows from the persisted device names, so
+                // it receives the reloaded config after the core accepts it.
+                let reloaded = std::sync::Arc::new(config.clone());
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
                     Some(saved) => self
@@ -138,18 +137,10 @@ impl AgentServer {
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::autostart::reconcile(launch_at_login);
-                // So does the app icon, and the menu-bar item is ours to
-                // restyle — the GUI can only reach the Dock and the bundle.
-                #[cfg(target_os = "macos")]
-                crate::tray::set_icon(app_icon);
-                // The "Show in menu bar" toggle too: install or remove the
-                // item now rather than at the next agent launch.
-                #[cfg(target_os = "macos")]
-                crate::tray::set_visible(show_in_menu_bar, app_icon);
-                // And the interface language: re-resolve the process locale.
-                // Both tray menus rebuild each time they open and pick it up
-                // alone.
-                openlogi_core::locale::activate(language.as_deref());
+                // The tray's readout, badge style, names, menu-bar visibility,
+                // and language are live settings; the demo tree applies the
+                // same function.
+                crate::reload::apply_tray_settings(&reloaded);
                 Ok(revision)
             }
             Err(error) => {
@@ -181,6 +172,24 @@ fn saved_config_verdict(saved: &SavedConfig, revision: ConfigRevision) -> SavedC
 impl Agent for AgentServer {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
+    }
+
+    async fn request_shutdown(self, _: Context) {
+        if self
+            .shutdown
+            .send(crate::shutdown::ShutdownRequest::Quit)
+            .is_err()
+        {
+            warn!("shutdown requested over IPC, but the lifecycle channel is closed");
+        }
+    }
+
+    async fn observe_flow_pinned(self, _: Context, since: Generation) -> FlowPinnedObservation {
+        openlogi_agent::flow_pin::flow_pin().observe(since).await
+    }
+
+    async fn report_flow_pinned(self, _: Context, pinned: bool) {
+        openlogi_agent::flow_pin::flow_pin().set(pinned);
     }
 
     async fn observe_backlight(self, _: Context, since: Generation) -> BacklightObservation {

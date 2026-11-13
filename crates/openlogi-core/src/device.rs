@@ -403,6 +403,126 @@ pub struct BatteryInfo {
     pub status: BatteryStatus,
 }
 
+/// What a battery reading can show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryReading {
+    /// A measured state of charge.
+    Percent(u8),
+    /// Only the firmware's coarse level: the device has no state-of-charge
+    /// gauge, so there is no percentage to show.
+    Level(BatteryLevel),
+    /// Neither a percentage nor a level is usable yet.
+    NoReading,
+}
+
+/// What a battery surface shows as the value: the percentage, a coarse level
+/// word, "Charging", or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryValue {
+    /// A measured state of charge.
+    Percent(u8),
+    /// A level-only reading, localized by the surface.
+    Level(BatteryLevel),
+    /// A charging cold start with no reading yet.
+    Charging,
+    /// Nothing usable to show.
+    None,
+}
+
+impl BatteryValue {
+    /// The shared catalog key for the value's localized word, when it has one.
+    ///
+    /// Percentages format themselves and [`BatteryValue::None`] is a dash, so
+    /// only the level words and "Charging" resolve through the catalogs.
+    #[must_use]
+    pub const fn translation_key(self) -> Option<&'static str> {
+        match self {
+            Self::Level(BatteryLevel::Full) => Some("device.full"),
+            Self::Level(BatteryLevel::Good) => Some("device.battery_good"),
+            Self::Level(BatteryLevel::Low | BatteryLevel::Critical) => Some("device.low_battery"),
+            Self::Percent(_) | Self::Level(BatteryLevel::Unknown) | Self::None => None,
+            Self::Charging => Some("device.charging"),
+        }
+    }
+}
+
+/// The semantic colour role a battery reading maps to.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray, and the floating widget on the same tone for the
+/// same device state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryTone {
+    /// A healthy discharging reading.
+    Normal,
+    /// Charging at either rate.
+    Charging,
+    /// Charge complete.
+    Full,
+    /// Low, by [`BatteryInfo::needs_attention`].
+    Low,
+    /// The firmware's most urgent bucket.
+    Critical,
+    /// The device reported a charging fault.
+    Error,
+}
+
+/// The three-stage colour band a measured percentage maps to.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray, and the floating widget on the same band for the
+/// same percentage: 70% and above is healthy, 40% up to 70% is mid, and
+/// anything below 40% is low. Level-only readings have no percentage to
+/// band — [`BatteryInfo::color`] falls back to the firmware level for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryStage {
+    /// 70% and above.
+    Healthy,
+    /// 40% up to, but not including, 70%.
+    Mid,
+    /// Below 40%.
+    Low,
+}
+
+/// The percentage at or above which a reading is healthy.
+const HEALTHY_PERCENT: u8 = 70;
+/// The percentage at or above which a reading is in the middle band.
+const MID_PERCENT: u8 = 40;
+
+impl BatteryStage {
+    /// The band `percentage` falls in.
+    #[must_use]
+    pub const fn for_percentage(percentage: u8) -> Self {
+        if percentage >= HEALTHY_PERCENT {
+            Self::Healthy
+        } else if percentage >= MID_PERCENT {
+            Self::Mid
+        } else {
+            Self::Low
+        }
+    }
+}
+
+/// The colour role a battery surface paints a reading with.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray badge, and the floating widget on one colour for
+/// one reading. Status roles win over the percentage band: charging and
+/// charge complete paint green, a fault paints red, and only a discharging
+/// percentage takes its [`BatteryStage`]. A level-only reading keeps its
+/// firmware meaning, or stays neutral when the firmware reports nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryColor {
+    /// Charging, charge complete, or a healthy percentage.
+    Green,
+    /// A percentage in the middle band, or a firmware low level.
+    Amber,
+    /// A charging fault, a critical firmware level, or a low percentage.
+    Red,
+    /// Neither a percentage nor an urgent firmware level.
+    Neutral,
+}
+
 /// The charge at or below which a discharging battery needs attention.
 const LOW_BATTERY_PERCENT: u8 = 20;
 
@@ -420,10 +540,125 @@ pub enum BatteryAttention {
 }
 
 impl BatteryInfo {
-    /// How urgently this reading needs the user's attention, or `None` when it
-    /// does not: a discharging battery at 20% or less is low and at 10% or
-    /// less critical. On a device that reports no percentage, the firmware's
-    /// low and critical levels stand in.
+    /// What this reading can show: a measured percentage, the firmware's
+    /// coarse level, or nothing usable yet.
+    ///
+    /// Some devices cannot gauge charge while under load. On a cold start they
+    /// report 0% until a later poll, which must not be presented as an empty
+    /// or critically depleted battery.
+    #[must_use]
+    pub fn reading(&self) -> BatteryReading {
+        match self.percentage {
+            Some(0) if self.is_charging() => BatteryReading::NoReading,
+            Some(percentage) => BatteryReading::Percent(percentage),
+            None if matches!(self.level, BatteryLevel::Unknown) => BatteryReading::NoReading,
+            None => BatteryReading::Level(self.level),
+        }
+    }
+
+    /// What a surface shows as this reading's value.
+    #[must_use]
+    pub fn value(&self) -> BatteryValue {
+        match self.reading() {
+            BatteryReading::Percent(percentage) => BatteryValue::Percent(percentage),
+            BatteryReading::Level(level) => BatteryValue::Level(level),
+            BatteryReading::NoReading if self.charging_without_reading() => BatteryValue::Charging,
+            BatteryReading::NoReading => BatteryValue::None,
+        }
+    }
+
+    /// The colour role this reading maps to.
+    ///
+    /// Status decides first: charging, full, and error readings never carry a
+    /// low-battery tone. A discharging reading takes its tone from
+    /// [`Self::attention`], the one low/critical rule.
+    #[must_use]
+    pub fn tone(&self) -> BatteryTone {
+        match self.status {
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow => BatteryTone::Charging,
+            BatteryStatus::Error => BatteryTone::Error,
+            BatteryStatus::Full => BatteryTone::Full,
+            BatteryStatus::Discharging | BatteryStatus::Unknown => match self.attention() {
+                Some(BatteryAttention::Critical) => BatteryTone::Critical,
+                Some(BatteryAttention::Low) => BatteryTone::Low,
+                None => BatteryTone::Normal,
+            },
+        }
+    }
+
+    /// The three-stage colour band this reading's percentage falls in.
+    ///
+    /// `None` for a level-only or missing reading: there is no percentage to
+    /// band, so a surface asks [`Self::color`] instead, which falls back to
+    /// the firmware level.
+    #[must_use]
+    pub fn stage(&self) -> Option<BatteryStage> {
+        match self.reading() {
+            BatteryReading::Percent(percentage) => Some(BatteryStage::for_percentage(percentage)),
+            BatteryReading::Level(_) | BatteryReading::NoReading => None,
+        }
+    }
+
+    /// The colour role a surface paints this reading with.
+    ///
+    /// Precedence is status first, then the percentage band, then the
+    /// firmware level: a charging 45% device paints green (the bolt explains
+    /// why) rather than the band's amber, and a fault paints red even while
+    /// the firmware still reports a healthy percentage.
+    #[must_use]
+    pub fn color(&self) -> BatteryColor {
+        match self.status {
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full => {
+                BatteryColor::Green
+            }
+            BatteryStatus::Error => BatteryColor::Red,
+            BatteryStatus::Discharging | BatteryStatus::Unknown => match self.stage() {
+                Some(BatteryStage::Healthy) => BatteryColor::Green,
+                Some(BatteryStage::Mid) => BatteryColor::Amber,
+                Some(BatteryStage::Low) => BatteryColor::Red,
+                None => match self.level {
+                    BatteryLevel::Critical => BatteryColor::Red,
+                    BatteryLevel::Low => BatteryColor::Amber,
+                    BatteryLevel::Full => BatteryColor::Green,
+                    BatteryLevel::Good | BatteryLevel::Unknown => BatteryColor::Neutral,
+                },
+            },
+        }
+    }
+
+    /// How full a bar should draw this reading, in percent.
+    ///
+    /// A level-only reading fills to a fixed point inside its band — a coarse
+    /// representation, not a charge estimate. `None` means no usable reading:
+    /// the bar keeps an empty track and must never show `0%`.
+    #[must_use]
+    pub fn bar_percentage(&self) -> Option<u8> {
+        match self.reading() {
+            BatteryReading::Percent(percentage) => Some(percentage),
+            BatteryReading::Level(BatteryLevel::Critical) => Some(10),
+            BatteryReading::Level(BatteryLevel::Low) => Some(25),
+            BatteryReading::Level(BatteryLevel::Good) => Some(70),
+            BatteryReading::Level(BatteryLevel::Full) => Some(100),
+            BatteryReading::Level(BatteryLevel::Unknown) | BatteryReading::NoReading => None,
+        }
+    }
+
+    /// Whether the device is charging with neither a percentage nor a level
+    /// to show, so "Charging" is all there is to say.
+    #[must_use]
+    pub fn charging_without_reading(&self) -> bool {
+        self.is_charging() && matches!(self.reading(), BatteryReading::NoReading)
+    }
+
+    /// Charging at either rate; [`BatteryStatus::Full`] is charge complete,
+    /// not charging.
+    fn is_charging(&self) -> bool {
+        matches!(
+            self.status,
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow
+        )
+    }
+
     ///
     /// Every battery cue asks this one rule: the settings app's warning tone
     /// and caption, the agent's low-battery notice, and the menu bar.
@@ -454,6 +689,132 @@ impl BatteryInfo {
     pub fn needs_attention(&self) -> bool {
         self.attention().is_some()
     }
+}
+
+/// A device as a battery surface sees it: the identity a row needs, plus the
+/// reading the agent last observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatteryDevice {
+    /// Firmware codename tidied for display. `None` when the device reported
+    /// no usable name; the surface falls back to its kind's localized name.
+    pub name: Option<String>,
+    /// Best-guess classification; surfaces use it for the row glyph.
+    pub kind: DeviceKind,
+    /// Whether the device was reachable at the last enumeration.
+    pub online: bool,
+    /// Last battery reading, `None` when the device reports no battery.
+    pub battery: Option<BatteryInfo>,
+}
+
+impl BatteryDevice {
+    /// Project one paired device onto the facts a battery surface needs.
+    #[must_use]
+    pub fn from_paired(device: &PairedDevice) -> Self {
+        let name = device
+            .codename
+            .as_deref()
+            .map(prettify_codename)
+            .filter(|name| !name.is_empty());
+        Self {
+            name,
+            kind: device.kind,
+            online: device.online,
+            battery: device.battery.clone(),
+        }
+    }
+
+    /// Whether this device can contribute a visible readout. A charging cold
+    /// start shows "Charging" and an error has a word even without a
+    /// percentage; a reading with neither stays out.
+    #[must_use]
+    pub fn has_readout(&self) -> bool {
+        self.battery.as_ref().is_some_and(|battery| {
+            battery.reading() != BatteryReading::NoReading
+                || battery.charging_without_reading()
+                || battery.tone() == BatteryTone::Error
+        })
+    }
+}
+
+/// Every paired device in an inventory snapshot, in inventory order.
+#[must_use]
+pub fn battery_devices(inventory: &[DeviceInventory]) -> Vec<BatteryDevice> {
+    inventory
+        .iter()
+        .flat_map(|inventory| inventory.paired.iter())
+        .map(BatteryDevice::from_paired)
+        .collect()
+}
+
+/// The first online device with something to show, for a single-device readout
+/// such as the tray tooltip.
+#[must_use]
+pub fn first_battery_readout(devices: &[BatteryDevice]) -> Option<&BatteryDevice> {
+    devices
+        .iter()
+        .find(|device| device.online && device.has_readout())
+}
+
+/// The rows a floating indicator can show, and how many matching devices its
+/// row limit hid.
+pub struct FlowIndicatorRows<'a> {
+    /// The rows the card shows, low-first and capped at the limit.
+    pub rows: Vec<&'a BatteryDevice>,
+    /// Matching devices the limit hid.
+    pub hidden: usize,
+}
+
+/// Rows for the floating indicator: online devices with something to show and,
+/// when `show_offline`, every paired device the receiver still reports — a
+/// sleeping device with no reading left keeps its row (with an empty reading)
+/// instead of dropping the card to its empty state. Sorted low-first and capped
+/// at `limit`.
+///
+/// Charging and full devices sort after healthy discharging ones, and readings
+/// with no value sort last. The tie-break is the display name, so a stable
+/// inventory does not reorder equal rows between polls. `hidden` tells a
+/// surface how many matching devices did not fit.
+#[must_use]
+pub fn flow_indicator_rows(
+    devices: &[BatteryDevice],
+    show_offline: bool,
+    limit: usize,
+) -> FlowIndicatorRows<'_> {
+    let mut rows: Vec<&BatteryDevice> = devices
+        .iter()
+        .filter(|device| {
+            if device.online {
+                device.has_readout()
+            } else {
+                show_offline
+            }
+        })
+        .collect();
+    rows.sort_by_key(|device| indicator_sort_key(device));
+    let hidden = rows.len().saturating_sub(limit);
+    rows.truncate(limit);
+    FlowIndicatorRows { rows, hidden }
+}
+
+fn indicator_sort_key(device: &BatteryDevice) -> (u8, u8, bool, String) {
+    let tone = device.battery.as_ref().map(BatteryInfo::tone);
+    let rank = match tone {
+        Some(BatteryTone::Critical | BatteryTone::Low | BatteryTone::Error) => 0,
+        Some(BatteryTone::Normal) => 1,
+        Some(BatteryTone::Charging | BatteryTone::Full) => 2,
+        None => 3,
+    };
+    let fill = device
+        .battery
+        .as_ref()
+        .and_then(BatteryInfo::bar_percentage)
+        .unwrap_or(u8::MAX);
+    (
+        rank,
+        fill,
+        !device.online,
+        device.name.clone().unwrap_or_default(),
+    )
 }
 
 /// Tidy a device name reported over HID++ for display.
@@ -783,9 +1144,11 @@ pub struct DeviceInventory {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory,
+        BatteryAttention, BatteryColor, BatteryDevice, BatteryInfo, BatteryLevel, BatteryReading,
+        BatteryStage, BatteryStatus, BatteryTone, BatteryValue, Capabilities, DeviceInventory,
         DeviceKind, DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
-        ModelTransport, PairedDevice, ReceiverInfo, prettify_codename,
+        ModelTransport, PairedDevice, ReceiverInfo, battery_devices, first_battery_readout,
+        flow_indicator_rows, prettify_codename,
     };
 
     #[test]
@@ -819,6 +1182,562 @@ mod tests {
             );
             assert!(!battery(None, BatteryLevel::Critical, powered).needs_attention());
         }
+    }
+
+    fn reading_battery(
+        percentage: Option<u8>,
+        level: BatteryLevel,
+        status: BatteryStatus,
+    ) -> BatteryInfo {
+        BatteryInfo {
+            percentage,
+            level,
+            status,
+        }
+    }
+
+    #[test]
+    fn battery_reading_prefers_a_percentage_and_ignores_a_charging_cold_start() {
+        use BatteryReading::{Level, NoReading, Percent};
+
+        let cases = [
+            (
+                Some(0),
+                BatteryLevel::Good,
+                BatteryStatus::Charging,
+                NoReading,
+            ),
+            (
+                Some(0),
+                BatteryLevel::Critical,
+                BatteryStatus::ChargingSlow,
+                NoReading,
+            ),
+            (
+                Some(0),
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+                Percent(0),
+            ),
+            (Some(0), BatteryLevel::Good, BatteryStatus::Full, Percent(0)),
+            (
+                Some(64),
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+                Percent(64),
+            ),
+            (
+                Some(100),
+                BatteryLevel::Good,
+                BatteryStatus::Unknown,
+                Percent(100),
+            ),
+            // A charging fault does not erase a percentage the firmware
+            // still reports; the error is the tone's job, not the reading's.
+            (
+                Some(80),
+                BatteryLevel::Good,
+                BatteryStatus::Error,
+                Percent(80),
+            ),
+            (
+                None,
+                BatteryLevel::Full,
+                BatteryStatus::Full,
+                Level(BatteryLevel::Full),
+            ),
+            (
+                None,
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+                Level(BatteryLevel::Good),
+            ),
+            (
+                None,
+                BatteryLevel::Low,
+                BatteryStatus::Charging,
+                Level(BatteryLevel::Low),
+            ),
+            (
+                None,
+                BatteryLevel::Critical,
+                BatteryStatus::Error,
+                Level(BatteryLevel::Critical),
+            ),
+            (
+                None,
+                BatteryLevel::Unknown,
+                BatteryStatus::Charging,
+                NoReading,
+            ),
+            (
+                None,
+                BatteryLevel::Unknown,
+                BatteryStatus::Unknown,
+                NoReading,
+            ),
+        ];
+        for (percentage, level, status, expected) in cases {
+            let battery = reading_battery(percentage, level, status);
+            assert_eq!(battery.reading(), expected, "{battery:?}");
+        }
+    }
+
+    #[test]
+    fn battery_value_names_the_word_a_surface_should_show() {
+        use BatteryValue::{Charging, Level, None as NoValue, Percent};
+
+        let good = BatteryLevel::Good;
+        assert_eq!(
+            reading_battery(Some(64), good, BatteryStatus::Discharging).value(),
+            Percent(64)
+        );
+        assert_eq!(
+            reading_battery(None, BatteryLevel::Low, BatteryStatus::Discharging).value(),
+            Level(BatteryLevel::Low)
+        );
+        assert_eq!(
+            reading_battery(None, good, BatteryStatus::Charging).value(),
+            Level(BatteryLevel::Good)
+        );
+        assert_eq!(
+            reading_battery(Some(0), good, BatteryStatus::Charging).value(),
+            Charging
+        );
+        assert_eq!(
+            reading_battery(None, BatteryLevel::Unknown, BatteryStatus::Unknown).value(),
+            NoValue
+        );
+        assert_eq!(
+            BatteryValue::Level(BatteryLevel::Critical).translation_key(),
+            Some("device.low_battery")
+        );
+        assert_eq!(
+            BatteryValue::Charging.translation_key(),
+            Some("device.charging")
+        );
+        assert_eq!(BatteryValue::Percent(50).translation_key(), None);
+    }
+
+    #[test]
+    fn battery_tone_is_decided_by_status_then_charge() {
+        use BatteryTone::{Charging, Critical, Error, Full, Low, Normal};
+
+        let cases = [
+            (
+                Some(5),
+                BatteryLevel::Critical,
+                BatteryStatus::Charging,
+                Charging,
+            ),
+            (
+                Some(0),
+                BatteryLevel::Good,
+                BatteryStatus::Charging,
+                Charging,
+            ),
+            (
+                Some(80),
+                BatteryLevel::Good,
+                BatteryStatus::ChargingSlow,
+                Charging,
+            ),
+            (Some(80), BatteryLevel::Good, BatteryStatus::Full, Full),
+            (Some(5), BatteryLevel::Critical, BatteryStatus::Full, Full),
+            (Some(80), BatteryLevel::Good, BatteryStatus::Error, Error),
+            (None, BatteryLevel::Unknown, BatteryStatus::Error, Error),
+            (
+                Some(8),
+                BatteryLevel::Critical,
+                BatteryStatus::Discharging,
+                Critical,
+            ),
+            (
+                None,
+                BatteryLevel::Critical,
+                BatteryStatus::Discharging,
+                Critical,
+            ),
+            (
+                Some(5),
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+                Critical,
+            ),
+            (Some(20), BatteryLevel::Low, BatteryStatus::Discharging, Low),
+            (
+                Some(21),
+                BatteryLevel::Low,
+                BatteryStatus::Discharging,
+                Normal,
+            ),
+            (None, BatteryLevel::Low, BatteryStatus::Discharging, Low),
+            (None, BatteryLevel::Good, BatteryStatus::Discharging, Normal),
+            (
+                None,
+                BatteryLevel::Unknown,
+                BatteryStatus::Discharging,
+                Normal,
+            ),
+            (
+                Some(10),
+                BatteryLevel::Good,
+                BatteryStatus::Unknown,
+                Critical,
+            ),
+            (Some(21), BatteryLevel::Good, BatteryStatus::Unknown, Normal),
+        ];
+        for (percentage, level, status, expected) in cases {
+            let battery = reading_battery(percentage, level, status);
+            assert_eq!(battery.tone(), expected, "{battery:?}");
+        }
+    }
+
+    #[test]
+    fn a_percentage_bands_at_seventy_and_forty() {
+        use BatteryStage::{Healthy, Low, Mid};
+
+        for (percentage, expected) in [
+            (100, Healthy),
+            (70, Healthy),
+            (69, Mid),
+            (40, Mid),
+            (39, Low),
+            (1, Low),
+            (0, Low),
+        ] {
+            assert_eq!(
+                BatteryStage::for_percentage(percentage),
+                expected,
+                "{percentage}%"
+            );
+        }
+
+        // The band reads the measured percentage only: a level-only reading,
+        // and a charging cold start the percentage can't describe, have none.
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+        assert_eq!(
+            reading_battery(Some(69), good, discharging).stage(),
+            Some(Mid)
+        );
+        assert_eq!(
+            reading_battery(None, BatteryLevel::Low, discharging).stage(),
+            None
+        );
+        assert_eq!(
+            reading_battery(Some(0), good, BatteryStatus::Charging).stage(),
+            None
+        );
+    }
+
+    #[test]
+    fn colours_follow_status_first_and_then_the_percentage_band() {
+        use BatteryColor::{Amber, Green, Neutral, Red};
+
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+        let color = |percentage, level, status| reading_battery(percentage, level, status).color();
+
+        // A discharging percentage takes its band.
+        assert_eq!(color(Some(87), good, discharging), Green);
+        assert_eq!(color(Some(70), good, discharging), Green);
+        assert_eq!(color(Some(69), good, discharging), Amber);
+        assert_eq!(color(Some(40), good, discharging), Amber);
+        assert_eq!(color(Some(39), good, discharging), Red);
+        assert_eq!(color(Some(1), good, discharging), Red);
+        // Charging wins over the band: the bolt already explains the colour.
+        assert_eq!(color(Some(45), good, BatteryStatus::Charging), Green);
+        assert_eq!(color(Some(5), good, BatteryStatus::ChargingSlow), Green);
+        assert_eq!(color(Some(100), good, BatteryStatus::Full), Green);
+        // A fault paints red even while the firmware still reports a value.
+        assert_eq!(color(Some(80), good, BatteryStatus::Error), Red);
+        assert_eq!(
+            color(None, BatteryLevel::Unknown, BatteryStatus::Error),
+            Red
+        );
+        // Level-only readings keep the firmware's own meaning.
+        assert_eq!(color(None, good, discharging), Neutral);
+        assert_eq!(color(None, BatteryLevel::Low, discharging), Amber);
+        assert_eq!(color(None, BatteryLevel::Critical, discharging), Red);
+        assert_eq!(color(None, BatteryLevel::Full, discharging), Green);
+        assert_eq!(
+            color(None, BatteryLevel::Unknown, BatteryStatus::Unknown),
+            Neutral
+        );
+    }
+
+    #[test]
+    fn battery_bar_percentage_fills_a_level_inside_its_band() {
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+        let bar =
+            |percentage, level| reading_battery(percentage, level, discharging).bar_percentage();
+
+        assert_eq!(bar(Some(42), good), Some(42));
+        assert_eq!(bar(Some(0), good), Some(0));
+        assert_eq!(bar(None, BatteryLevel::Critical), Some(10));
+        assert_eq!(bar(None, BatteryLevel::Low), Some(25));
+        assert_eq!(bar(None, BatteryLevel::Good), Some(70));
+        assert_eq!(bar(None, BatteryLevel::Full), Some(100));
+        assert_eq!(bar(None, BatteryLevel::Unknown), None);
+        assert_eq!(
+            reading_battery(Some(0), good, BatteryStatus::Charging).bar_percentage(),
+            None,
+            "a cold-start 0% is not an empty bar"
+        );
+    }
+
+    #[test]
+    fn battery_charging_without_reading_only_describes_a_cold_start() {
+        let good = BatteryLevel::Good;
+
+        assert!(reading_battery(Some(0), good, BatteryStatus::Charging).charging_without_reading());
+        assert!(
+            reading_battery(Some(0), good, BatteryStatus::ChargingSlow).charging_without_reading()
+        );
+        assert!(
+            reading_battery(None, BatteryLevel::Unknown, BatteryStatus::Charging)
+                .charging_without_reading()
+        );
+        assert!(
+            !reading_battery(Some(40), good, BatteryStatus::Charging).charging_without_reading()
+        );
+        assert!(
+            !reading_battery(Some(0), good, BatteryStatus::Discharging).charging_without_reading()
+        );
+        // A level-only device keeps its level to show.
+        assert!(!reading_battery(None, good, BatteryStatus::Charging).charging_without_reading());
+        // Full is charge complete, not a charging cold start.
+        assert!(
+            !reading_battery(None, BatteryLevel::Unknown, BatteryStatus::Full)
+                .charging_without_reading()
+        );
+    }
+
+    fn display_device(
+        name: Option<&str>,
+        online: bool,
+        battery: Option<BatteryInfo>,
+    ) -> BatteryDevice {
+        BatteryDevice {
+            name: name.map(str::to_owned),
+            kind: DeviceKind::Mouse,
+            online,
+            battery,
+        }
+    }
+
+    #[test]
+    fn battery_devices_flatten_in_inventory_order_and_prettify_names() {
+        let inventory = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".to_string(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: None,
+            },
+            paired: vec![
+                PairedDevice {
+                    slot: 1,
+                    codename: Some("MX MASTER 3S".to_string()),
+                    wpid: None,
+                    kind: DeviceKind::Mouse,
+                    online: true,
+                    battery: None,
+                    model_info: None,
+                    capabilities: None,
+                    settings_revision: 0,
+                    hidpp10: false,
+                },
+                PairedDevice {
+                    slot: 2,
+                    codename: None,
+                    wpid: None,
+                    kind: DeviceKind::Keyboard,
+                    online: false,
+                    battery: None,
+                    model_info: None,
+                    capabilities: None,
+                    settings_revision: 0,
+                    hidpp10: false,
+                },
+            ],
+        };
+
+        let devices = battery_devices(&[inventory]);
+        assert_eq!(devices[0].name.as_deref(), Some("MX Master 3S"));
+        assert_eq!(devices[1].name, None);
+        assert_eq!(devices[1].kind, DeviceKind::Keyboard);
+    }
+
+    #[test]
+    fn the_first_battery_readout_is_the_first_online_device_with_something_to_show() {
+        let devices = vec![
+            display_device(
+                Some("Offline"),
+                false,
+                Some(reading_battery(
+                    Some(90),
+                    BatteryLevel::Good,
+                    BatteryStatus::Discharging,
+                )),
+            ),
+            display_device(Some("No Battery"), true, None),
+            display_device(
+                Some("Unread"),
+                true,
+                Some(reading_battery(
+                    None,
+                    BatteryLevel::Unknown,
+                    BatteryStatus::Unknown,
+                )),
+            ),
+            display_device(
+                Some("Chosen"),
+                true,
+                Some(reading_battery(
+                    Some(64),
+                    BatteryLevel::Good,
+                    BatteryStatus::Discharging,
+                )),
+            ),
+        ];
+
+        assert_eq!(
+            first_battery_readout(&devices).and_then(|device| device.name.as_deref()),
+            Some("Chosen")
+        );
+    }
+
+    #[test]
+    fn a_charging_cold_start_is_a_battery_readout() {
+        let devices = [display_device(
+            Some("Charging"),
+            true,
+            Some(reading_battery(
+                Some(0),
+                BatteryLevel::Good,
+                BatteryStatus::Charging,
+            )),
+        )];
+
+        assert_eq!(
+            first_battery_readout(&devices).and_then(|device| device.name.as_deref()),
+            Some("Charging")
+        );
+    }
+
+    #[test]
+    fn flow_indicator_rows_are_low_first_capped_and_keep_offline_devices() {
+        let devices = vec![
+            display_device(
+                Some("Nearly Empty"),
+                true,
+                Some(reading_battery(
+                    Some(5),
+                    BatteryLevel::Critical,
+                    BatteryStatus::Discharging,
+                )),
+            ),
+            display_device(
+                Some("Offline Low"),
+                false,
+                Some(reading_battery(
+                    Some(15),
+                    BatteryLevel::Low,
+                    BatteryStatus::Discharging,
+                )),
+            ),
+            display_device(
+                Some("Healthy"),
+                true,
+                Some(reading_battery(
+                    Some(87),
+                    BatteryLevel::Good,
+                    BatteryStatus::Discharging,
+                )),
+            ),
+            display_device(
+                Some("Charging"),
+                true,
+                Some(reading_battery(
+                    Some(50),
+                    BatteryLevel::Good,
+                    BatteryStatus::Charging,
+                )),
+            ),
+            display_device(Some("No Battery"), true, None),
+            display_device(Some("Offline Empty"), false, None),
+        ];
+
+        let names = |rows: Vec<&BatteryDevice>| {
+            rows.into_iter()
+                .filter_map(|device| device.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let all = flow_indicator_rows(&devices, true, 4);
+        assert_eq!(
+            names(all.rows),
+            ["Nearly Empty", "Offline Low", "Healthy", "Charging"]
+        );
+        assert_eq!(
+            all.hidden, 1,
+            "an offline device with no reading still claims a row"
+        );
+        let with_room = flow_indicator_rows(&devices, true, 8);
+        assert_eq!(
+            names(with_room.rows),
+            [
+                "Nearly Empty",
+                "Offline Low",
+                "Healthy",
+                "Charging",
+                "Offline Empty"
+            ],
+            "an online device with no battery stays out; an offline one keeps its row"
+        );
+        assert_eq!(with_room.hidden, 0);
+        let online = flow_indicator_rows(&devices, false, 4);
+        assert_eq!(names(online.rows), ["Nearly Empty", "Healthy", "Charging"]);
+        assert_eq!(online.hidden, 0);
+        let capped = flow_indicator_rows(&devices, true, 2);
+        assert_eq!(names(capped.rows), ["Nearly Empty", "Offline Low"]);
+        assert_eq!(capped.hidden, 3);
+    }
+
+    #[test]
+    fn flow_indicator_rows_break_ties_by_name() {
+        let devices = vec![
+            display_device(
+                Some("Zeta"),
+                true,
+                Some(reading_battery(
+                    Some(10),
+                    BatteryLevel::Low,
+                    BatteryStatus::Discharging,
+                )),
+            ),
+            display_device(
+                Some("Alpha"),
+                true,
+                Some(reading_battery(
+                    Some(10),
+                    BatteryLevel::Low,
+                    BatteryStatus::Discharging,
+                )),
+            ),
+        ];
+
+        assert_eq!(
+            flow_indicator_rows(&devices, true, 5)
+                .rows
+                .into_iter()
+                .filter_map(|device| device.name.as_deref())
+                .collect::<Vec<_>>(),
+            ["Alpha", "Zeta"]
+        );
     }
 
     #[test]

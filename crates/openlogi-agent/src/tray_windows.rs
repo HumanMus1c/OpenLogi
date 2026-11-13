@@ -8,11 +8,13 @@
 //! The menu is smaller than macOS's: Settings / About / Check-for-Updates go
 //! through `openlogi://` deeplinks there, and Windows has no scheme
 //! registration yet — so just "Show Main Window" (also the left-click action)
-//! and "Quit OpenLogi". Show focuses the running GUI if there is one (a
-//! second launch would exit on the `openlogi.lock` singleton) or spawns the
-//! sibling `OpenLogi.exe` / `openlogi-desktop.exe`. Quit terminates the GUI
-//! first — a surviving GUI's IPC retry loop would immediately respawn the
-//! agent we are quitting — then exits.
+//! and "Quit OpenLogi". Show raises the GUI's windows and the Flow Indicator
+//! card together, keeping the stacking order they already had, and focuses the
+//! topmost GUI window; with no GUI running (a second launch would exit on the
+//! `openlogi.lock` singleton) it spawns the sibling `OpenLogi.exe` /
+//! `openlogi-desktop.exe`. Quit terminates the GUI first — a surviving GUI's
+//! IPC retry loop would immediately respawn the agent we are quitting — then
+//! exits.
 //!
 //! Everything runs on one dedicated thread: the hidden window, its message
 //! pump, and the menu. The icon is re-added when a `TaskbarCreated`
@@ -25,8 +27,11 @@
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
+use openlogi_agent_core::observable::ObservableState;
+use openlogi_core::config::{Config, TrayBadgeStyle};
 use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
@@ -37,56 +42,206 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
-    GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
-    LoadIconW, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPED,
+    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GWL_EXSTYLE, GetCursorPos,
+    GetMessageW, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, HICON, HWND_NOTOPMOST,
+    HWND_TOPMOST, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR, LoadIconW,
+    MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
+    RegisterWindowMessageW, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetForegroundWindow, SetWindowPos, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL,
+    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_EX_TOPMOST, WS_OVERLAPPED,
 };
 
 use crate::shutdown::{self, ShutdownRequestSender};
+use crate::tray_readout::{Badge, TrayReadout, create_icon, destroy_icon, render_badge};
+
+/// What the installed icon represents. The theme flag and badge style are
+/// part of the key so a taskbar theme change or a style reload rebuilds the
+/// brand glyph or the badge's contrast ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IconKey {
+    Brand {
+        light: bool,
+    },
+    Badge {
+        badge: Badge,
+        size: u32,
+        light: bool,
+        style: TrayBadgeStyle,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct OwnedIcon {
+    handle: HICON,
+    owned: bool,
+    key: IconKey,
+}
 
 /// Tray callback message the icon posts to the hidden window.
 const WM_TRAY: u32 = WM_APP + 1;
+/// A state change woke the tray; re-read the observable and refresh the tip.
+const WM_TRAY_UPDATE: u32 = WM_APP + 2;
 /// Menu command ids returned by `TrackPopupMenu`.
 const ID_SHOW: usize = 1;
 const ID_QUIT: usize = 2;
+const ID_FLOW_PIN: usize = 3;
+const ID_FLOW_INDICATOR: usize = 4;
+
+/// The tooltip prefix and the fallback when no device has a readout.
+const BRAND_TIP: &str = "OpenLogi";
+/// `NOTIFYICONDATAW::szTip`, including its terminating NUL.
+const TIP_UNITS: usize = 128;
 
 /// The `TaskbarCreated` broadcast id, resolved once the window exists. Zero
 /// until then; real ids are never zero (`RegisterWindowMessageW` starts at
 /// 0xC000).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+/// The tray window, for a config reload to wake. Zero until created.
+static TRAY_HWND: AtomicUsize = AtomicUsize::new(0);
+/// Whether the battery readout is enabled. Set from the config at install and
+/// again on every config reload.
+static TRAY_BATTERY: AtomicBool = AtomicBool::new(true);
+/// The badge shape, encoded as the discriminant the core setting serializes:
+/// `0` = circle, `1` = rounded square. Owned here because the tray thread
+/// reads it on every refresh while the IPC server writes it on reload.
+static TRAY_BADGE_STYLE: AtomicU8 = AtomicU8::new(0);
+/// One refresh message at a time: an inventory burst coalesces into a single
+/// re-read.
+static UPDATE_PENDING: AtomicBool = AtomicBool::new(false);
+/// The config the rows name devices from, replaced on every reload. The
+/// tray thread reads it while the IPC server writes it, so it is behind a
+/// lock rather than an atomic.
+static CONFIG: std::sync::RwLock<Option<Arc<Config>>> = std::sync::RwLock::new(None);
+/// Whether this agent serves the demo inventory. A GUI launched from the
+/// tray must start in the same source, or it would retire the demo agent the
+/// user just clicked.
+static MOCK_AGENT: AtomicBool = AtomicBool::new(false);
+
+/// The current badge shape, for the icon key and the renderer.
+fn badge_style() -> TrayBadgeStyle {
+    match TRAY_BADGE_STYLE.load(Ordering::Relaxed) {
+        1 => TrayBadgeStyle::RoundedSquare,
+        _ => TrayBadgeStyle::Circle,
+    }
+}
 
 thread_local! {
     /// Where the win32 tray callback hands process termination to the async
     /// lifecycle. The callback and message pump share this one tray thread.
     static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
+    /// The state the tooltip and menu read. Same thread as the menu and the
+    /// pump, so a plain `RefCell` is enough.
+    static OBSERVABLE: RefCell<Option<Arc<ObservableState>>> = const { RefCell::new(None) };
+    /// The tip currently installed, to skip no-op `NIM_MODIFY`s.
+    static LAST_TIP: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The icon the shell currently shows, and whether we must destroy it.
+    static CURRENT_ICON: RefCell<Option<OwnedIcon>> = const { RefCell::new(None) };
+    /// The last badge whose renderer/HICON creation failed, so a repeated
+    /// refresh logs the fallback once instead of once per update.
+    static LAST_BADGE_FAILURE: RefCell<Option<Badge>> = const { RefCell::new(None) };
 }
 
 /// Host the tray icon on its own thread. No-op when the user disabled the
 /// menu-bar/tray preference (same `show_in_menu_bar` setting macOS honors;
 /// takes effect on the agent's next launch, as there).
 ///
+/// `tray_battery` controls the tooltip and menu readout, and `observable` is
+/// the inventory it reads; the icon itself is unchanged by this setting.
 /// Failures are logged, never fatal — the agent's real work (hook, HID++,
 /// IPC) must not die because a shell icon couldn't be installed.
-pub fn spawn(show_in_tray: bool, shutdown_tx: ShutdownRequestSender) {
+pub fn spawn(
+    show_in_tray: bool,
+    tray_battery: bool,
+    badge_style: TrayBadgeStyle,
+    config: Arc<Config>,
+    observable: Arc<ObservableState>,
+    shutdown_tx: ShutdownRequestSender,
+    mock: bool,
+) {
+    TRAY_BATTERY.store(tray_battery, Ordering::Relaxed);
+    MOCK_AGENT.store(mock, Ordering::Relaxed);
+    set_config(config);
+    TRAY_BADGE_STYLE.store(
+        match badge_style {
+            // The wide face is Linux-only; the notification area squares
+            // every icon, so Windows keeps the circle badge for it.
+            TrayBadgeStyle::Circle | TrayBadgeStyle::Wide => 0,
+            TrayBadgeStyle::RoundedSquare => 1,
+        },
+        Ordering::Relaxed,
+    );
     if !show_in_tray {
         info!("tray icon disabled by preference — agent stays invisible");
         return;
     }
     if let Err(e) = std::thread::Builder::new()
         .name("openlogi-tray".into())
-        .spawn(move || run_tray_loop(shutdown_tx))
+        .spawn(move || run_tray_loop(observable, shutdown_tx))
     {
         warn!(error = %e, "could not spawn the tray thread");
     }
 }
 
+/// Apply a config reload's `tray_battery` choice. Wakes the tray thread when
+/// one is running; before the window exists (or after it is gone) this only
+/// stores the value the next read will use.
+pub fn set_battery_readout(enabled: bool) {
+    TRAY_BATTERY.store(enabled, Ordering::Relaxed);
+    wake();
+}
+
+/// Replace the config the menu rows resolve device names from. Wakes the tray
+/// thread so a renamed device shows up without waiting for the next inventory
+/// change.
+pub fn set_config(config: Arc<Config>) {
+    if let Ok(mut current) = CONFIG.write() {
+        *current = Some(config);
+    }
+    wake();
+}
+
+/// Apply a config reload's `tray_badge_style` choice. Same seam as
+/// [`set_battery_readout`]: store, then wake the tray thread so the icon key
+/// differs and the badge re-renders.
+pub fn set_badge_style(style: TrayBadgeStyle) {
+    TRAY_BADGE_STYLE.store(
+        match style {
+            TrayBadgeStyle::Circle | TrayBadgeStyle::Wide => 0,
+            TrayBadgeStyle::RoundedSquare => 1,
+        },
+        Ordering::Relaxed,
+    );
+    wake();
+}
+
+/// Ask the tray thread to re-read the snapshot, when its window exists.
+fn wake() {
+    let hwnd = TRAY_HWND.load(Ordering::Relaxed) as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: PostMessageW is safe from any thread, and the handle is the
+    // window this process created; zero — the not-yet-created and already-
+    // ended cases — is checked above.
+    unsafe { PostMessageW(hwnd, WM_TRAY_UPDATE, 0, 0) };
+}
+
 /// Create the hidden window, install the icon, and pump messages for the
 /// agent's lifetime.
-fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
+fn run_tray_loop(observable: Arc<ObservableState>, shutdown_tx: ShutdownRequestSender) {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
+    OBSERVABLE.with_borrow_mut(|slot| *slot = Some(observable.clone()));
+    // The agent process is DPI-unaware (no manifest), so without this the
+    // hidden window virtualizes to 96 DPI and the badge renders at the 100%
+    // 16 px while the 125%+ taskbar slot is 20 px — the shell upscales the
+    // bitmap and the badge reads soft and small next to DPI-aware icons.
+    // Per-monitor-v2 on this thread makes `GetDpiForWindow` report the real
+    // DPI (and delivers WM_DPICHANGED, which the handler already refreshes
+    // on). Everything else this thread does is coordinate-free or
+    // self-consistent: the menu pairs `GetCursorPos` with `TrackPopupMenu`,
+    // both physical on an aware thread.
+    set_per_monitor_dpi_awareness();
     let class_name = wide("OpenLogiAgentTray");
     // SAFETY: plain win32 registration/creation calls with pointers that
     // outlive the calls; the class name buffer lives until thread exit.
@@ -129,21 +284,44 @@ fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
             warn!("tray window creation failed — no tray icon");
             return;
         }
+        TRAY_HWND.store(hwnd as usize, Ordering::Release);
         TASKBAR_CREATED.store(
             RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             Ordering::Relaxed,
         );
-        if add_tray_icon(hwnd) {
-            info!("tray icon installed");
-        } else {
-            warn!("Shell_NotifyIconW(NIM_ADD) failed — no tray icon");
-        }
+        apply_tray(hwnd, true);
+        spawn_state_watcher(hwnd, observable);
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&raw const msg);
             DispatchMessageW(&raw const msg);
         }
+        destroy_current_icon();
+        TRAY_HWND.store(0, Ordering::Release);
+    }
+}
+
+/// Wake the tray thread whenever the observable's inventory changes. The
+/// watcher only posts; the handler reads the current state, so a burst of
+/// inventory updates collapses into at most one pending refresh.
+fn spawn_state_watcher(hwnd: HWND, observable: Arc<ObservableState>) {
+    let hwnd = hwnd as usize;
+    if let Err(e) = std::thread::Builder::new()
+        .name("openlogi-tray-state".into())
+        .spawn(move || {
+            let mut state = observable.subscribe();
+            while futures::executor::block_on(state.changed()).is_ok() {
+                if !UPDATE_PENDING.swap(true, Ordering::AcqRel) {
+                    // SAFETY: PostMessageW is safe from any thread; the
+                    // handle is the tray window created above and lives until
+                    // the message pump ends.
+                    unsafe { PostMessageW(hwnd as HWND, WM_TRAY_UPDATE, 0, 0) };
+                }
+            }
+        })
+    {
+        warn!(error = %e, "could not spawn the tray state watcher");
     }
 }
 
@@ -161,7 +339,7 @@ unsafe extern "system" fn wnd_proc(
     match msg {
         WM_TRAY => {
             match lparam as u32 {
-                WM_LBUTTONUP => open_or_focus_gui(),
+                WM_LBUTTONUP => show_openlogi(),
                 // SAFETY: win32 dispatches this callback on the tray thread —
                 // the one that created `hwnd` and pumps its messages — so the
                 // handle is live for the whole call, and `TrackPopupMenu` gets
@@ -169,6 +347,16 @@ unsafe extern "system" fn wnd_proc(
                 WM_RBUTTONUP | WM_CONTEXTMENU => unsafe { show_menu(hwnd) },
                 _ => {}
             }
+            0
+        }
+        WM_TRAY_UPDATE => {
+            refresh_tray(hwnd);
+            0
+        }
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_DPICHANGED => {
+            // The taskbar theme or the window DPI changed: the badge's ring
+            // and size, and the brand glyph's colour, are part of the icon key.
+            refresh_tray(hwnd);
             0
         }
         m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
@@ -188,6 +376,75 @@ unsafe extern "system" fn wnd_proc(
         // exactly what the default handler expects.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+/// Re-read the observable and apply the badge/tooltip. The update message
+/// coalesces a burst of inventory changes into one refresh.
+fn refresh_tray(hwnd: HWND) {
+    UPDATE_PENDING.store(false, Ordering::Release);
+    apply_tray(hwnd, false);
+}
+
+/// Install the icon, or refresh both the icon and the tip in place.
+///
+/// The badge/tip are recomputed from the same snapshot, and the icon is rebuilt
+/// only when the badge, taskbar theme, or icon size changed. Answers whether
+/// the shell holds the icon afterwards, so the `TaskbarCreated` re-add can
+/// tell a present icon from a lost one.
+fn apply_tray(hwnd: HWND, add: bool) -> bool {
+    let summary = current_summary();
+    let tip = tip_for(summary.as_ref());
+    let key = desired_key(hwnd, summary.as_ref());
+    let current = CURRENT_ICON.with_borrow(|slot| *slot);
+
+    if !add
+        && current.is_some_and(|icon| icon.key == key)
+        && LAST_TIP.with_borrow(|last| last == &tip)
+    {
+        return true;
+    }
+
+    let reuse = current.filter(|icon| icon.key == key);
+    let icon = match reuse {
+        Some(icon) => icon,
+        None => match build_icon(key) {
+            Some(icon) if !icon.handle.is_null() => icon,
+            Some(_) => {
+                warn!("tray icon creation failed — keeping the current icon");
+                return false;
+            }
+            None => return false,
+        },
+    };
+    let built_new = reuse.is_none();
+
+    if !notify_icon(hwnd, add, icon.handle, &tip) {
+        warn!(
+            add,
+            "Shell_NotifyIconW failed — tray icon and tooltip stay as they were"
+        );
+        if built_new && icon.owned {
+            destroy_icon(icon.handle);
+        }
+        return false;
+    }
+
+    let previous = CURRENT_ICON.with_borrow_mut(|slot| slot.replace(icon));
+    if let Some(previous) = previous
+        && previous.owned
+        && previous.handle != icon.handle
+    {
+        destroy_icon(previous.handle);
+    }
+    LAST_TIP.with_borrow_mut(|last| *last = tip);
+    if add {
+        info!(?key, "tray icon installed");
+    } else if built_new {
+        info!(?key, "tray icon updated");
+    } else {
+        debug!(?key, "tray tooltip updated");
+    }
+    true
 }
 
 /// What a `TaskbarCreated` broadcast found when it came to re-add the icon.
@@ -234,21 +491,21 @@ struct Shell {
 
 impl NotifyArea for Shell {
     fn modify(&mut self) -> bool {
-        // SAFETY: `self.hwnd` is the window whose procedure built this
-        // `Shell`. It is live while that procedure runs, on the thread that
-        // created it.
-        unsafe { modify_tray_icon(self.hwnd) }
+        // Force a real `NIM_MODIFY`: `apply_tray`'s unchanged shortcut would
+        // answer "present" without asking the shell, which may have dropped
+        // the icon in an Explorer restart. The tip is never empty, so the
+        // cleared cache cannot match it.
+        LAST_TIP.with_borrow_mut(String::clear);
+        apply_tray(self.hwnd, false)
     }
 
     fn add(&mut self) -> bool {
-        // SAFETY: as in `modify`; the same conditions under which
-        // `run_tray_loop` first added the icon.
-        unsafe { add_tray_icon(self.hwnd) }
+        apply_tray(self.hwnd, true)
     }
 }
 
-/// Our icon as the shell identifies it (`hWnd` + `uID`), with the tooltip
-/// set (`NIF_TIP`). Each `Shell_NotifyIconW` call starts from this.
+/// Our icon as the shell identifies it (`hWnd` + `uID`), for the one call
+/// that names the icon without adding or refreshing it (`NIM_DELETE` on quit).
 #[expect(
     clippy::cast_possible_truncation,
     reason = "NOTIFYICONDATAW is a few hundred bytes"
@@ -260,49 +517,147 @@ fn notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uID = 1;
-    nid.uFlags = NIF_TIP;
-    let tip = wide("OpenLogi");
-    nid.szTip[..tip.len()].copy_from_slice(&tip);
     nid
 }
 
-/// Add the icon (`NIM_ADD`). False when the shell refused it, which includes
-/// an icon that already exists: the re-add path checks first
-/// ([`NotifyArea::readd`]).
-unsafe fn add_tray_icon(hwnd: HWND) -> bool {
-    let mut nid = notify_data(hwnd);
-    nid.uFlags |= NIF_MESSAGE | NIF_ICON;
-    nid.uCallbackMessage = WM_TRAY;
-    // SAFETY: `tray_icon` only reads the embedded PNG; `nid` is fully
-    // initialized and outlives the call.
+/// Add or modify the shell icon with a bounded tooltip.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
+)]
+fn notify_icon(hwnd: HWND, add: bool, icon: HICON, tip: &str) -> bool {
+    let wide_tip = wide_truncated(tip, TIP_UNITS - 1);
+    // SAFETY: `nid` is fully initialized below; the tip buffer is bounded and
+    // copied into the fixed-size array.
     unsafe {
-        nid.hIcon = tray_icon();
-        Shell_NotifyIconW(NIM_ADD, &raw const nid) != 0
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_ICON | NIF_TIP | if add { NIF_MESSAGE } else { 0 };
+        nid.uCallbackMessage = WM_TRAY;
+        nid.hIcon = icon;
+        nid.szTip[..wide_tip.len()].copy_from_slice(&wide_tip);
+        Shell_NotifyIconW(if add { NIM_ADD } else { NIM_MODIFY }, &raw const nid) != 0
     }
 }
 
-/// Re-send the tooltip (`NIM_MODIFY`). True only while the shell has the
-/// icon. It carries no icon handle, so a check that finds the icon in place
-/// creates no `HICON`.
-unsafe fn modify_tray_icon(hwnd: HWND) -> bool {
-    let nid = notify_data(hwnd);
-    // SAFETY: `nid` is fully initialized and outlives the call.
-    unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw const nid) != 0 }
+/// The config the rows resolve names from, when one has been installed.
+fn current_config() -> Option<Arc<Config>> {
+    CONFIG.read().ok().and_then(|config| config.clone())
 }
 
-/// The tray glyph: the brand mark in black on a light taskbar, white on a
-/// dark one (`SystemUsesLightTheme`, default dark). Both variants are the
-/// macOS status-item asset; `CreateIconFromResourceEx` accepts raw PNG
-/// buffers (the same PNG-compressed form .ico files carry since Vista).
-/// Falls back to the stock application icon rather than showing nothing.
+/// The tooltip and badge read one snapshot so they cannot disagree.
+fn current_summary() -> Option<TrayReadout> {
+    let config = current_config();
+    OBSERVABLE.with_borrow(|observable| {
+        observable.as_ref().map(|observable| {
+            observable.read(|snapshot| {
+                TrayReadout::from_parts(
+                    &snapshot.inventory,
+                    &snapshot.standalone,
+                    &snapshot.lights,
+                    config.as_deref(),
+                )
+            })
+        })
+    })
+}
+
+fn tip_for(summary: Option<&TrayReadout>) -> String {
+    if !TRAY_BATTERY.load(Ordering::Relaxed) {
+        return BRAND_TIP.to_owned();
+    }
+    summary
+        .and_then(TrayReadout::tooltip)
+        .unwrap_or_else(|| BRAND_TIP.to_owned())
+}
+
+fn desired_key(hwnd: HWND, summary: Option<&TrayReadout>) -> IconKey {
+    let light = taskbar_is_light();
+    if !TRAY_BATTERY.load(Ordering::Relaxed) {
+        return IconKey::Brand { light };
+    }
+    IconKey::Badge {
+        badge: summary.map_or_else(Badge::none, TrayReadout::badge),
+        size: small_icon_size(hwnd),
+        light,
+        style: badge_style(),
+    }
+}
+
+/// Switch this thread to per-monitor-v2 DPI awareness. Fails closed: if the
+/// context cannot be set (pre-1607 Windows), the thread stays unaware and the
+/// badge just renders at the 100% size as before.
+fn set_per_monitor_dpi_awareness() {
+    use windows_sys::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+    };
+    // SAFETY: the call only changes this thread's DPI virtualization mode;
+    // passing a documented constant context and checking the previous one is
+    // the documented pattern.
+    unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+/// The shell's small-icon size for this window's DPI (16/20/24 at 100/125/150%).
+fn small_icon_size(hwnd: HWND) -> u32 {
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSMICON;
+
+    // SAFETY: read-only metric queries on our own window.
+    let size = unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        let dpi = if dpi == 0 { 96 } else { dpi };
+        GetSystemMetricsForDpi(SM_CXSMICON, dpi)
+    };
+    u32::try_from(size).unwrap_or(16).clamp(16, 64)
+}
+
+fn build_icon(key: IconKey) -> Option<OwnedIcon> {
+    match key {
+        IconKey::Brand { light } => brand_icon(light),
+        IconKey::Badge {
+            badge,
+            size,
+            light,
+            style,
+        } => {
+            let rgba = render_badge(badge, size, light, style);
+            if let Some(handle) = create_icon(&rgba, size) {
+                return Some(OwnedIcon {
+                    handle,
+                    owned: true,
+                    key,
+                });
+            }
+            LAST_BADGE_FAILURE.with_borrow_mut(|last| {
+                if last.as_ref() != Some(&badge) {
+                    *last = Some(badge);
+                    warn!(?badge, "badge icon creation failed — using the brand glyph");
+                }
+            });
+            // Keep the badge key so the same failed badge does not retry on
+            // every refresh; a new reading or a theme change tries again.
+            brand_icon(light).map(|brand| OwnedIcon { key, ..brand })
+        }
+    }
+}
+
+/// The brand mark in black on a light taskbar, white on a dark one. Both
+/// variants are the macOS status-item asset; `CreateIconFromResourceEx`
+/// accepts raw PNG buffers (the same PNG-compressed form .ico files carry
+/// since Vista). Falls back to the stock application icon rather than
+/// showing nothing.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the PNG is embedded at build time and is a few kilobytes"
 )]
-unsafe fn tray_icon() -> HICON {
+fn brand_icon(light: bool) -> Option<OwnedIcon> {
     const BLACK: &[u8] = include_bytes!("../assets/tray-icon@2x.png");
     const WHITE: &[u8] = include_bytes!("../assets/tray-icon-white@2x.png");
-    let png: &[u8] = if taskbar_is_light() { BLACK } else { WHITE };
+    let png: &[u8] = if light { BLACK } else { WHITE };
     // SAFETY: the buffer is a valid embedded PNG; the call copies it.
     let icon = unsafe {
         CreateIconFromResourceEx(
@@ -317,10 +672,28 @@ unsafe fn tray_icon() -> HICON {
     };
     if icon.is_null() {
         warn!("tray icon PNG rejected — falling back to the stock icon");
-        // SAFETY: loading a stock system icon.
-        unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) }
-    } else {
-        icon
+        // SAFETY: loading a stock system icon, which we must not destroy.
+        let stock = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
+        return (!stock.is_null()).then_some(OwnedIcon {
+            handle: stock,
+            owned: false,
+            key: IconKey::Brand { light },
+        });
+    }
+    Some(OwnedIcon {
+        handle: icon,
+        owned: true,
+        key: IconKey::Brand { light },
+    })
+}
+
+/// Destroy the icon we own, if any. The shell's copy is independent.
+fn destroy_current_icon() {
+    let icon = CURRENT_ICON.with_borrow_mut(Option::take);
+    if let Some(icon) = icon
+        && icon.owned
+    {
+        destroy_icon(icon.handle);
     }
 }
 
@@ -358,7 +731,46 @@ unsafe fn show_menu(hwnd: HWND) {
             ID_SHOW,
             wide(&rust_i18n::t!("app.show_main_window")).as_ptr(),
         );
+        let pinned = openlogi_agent::flow_pin::flow_pin().pinned();
+        AppendMenuW(
+            menu,
+            MF_STRING | if pinned { MF_CHECKED } else { 0 },
+            ID_FLOW_PIN,
+            wide(&rust_i18n::t!("flow_indicator.pin_card")).as_ptr(),
+        );
+        let indicator = crate::tray_setting::flow_indicator_enabled();
+        AppendMenuW(
+            menu,
+            MF_STRING | if indicator { MF_CHECKED } else { 0 },
+            ID_FLOW_INDICATOR,
+            wide(&rust_i18n::t!("flow_indicator.floating_indicator")).as_ptr(),
+        );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        let rows: Vec<String> = if TRAY_BATTERY.load(Ordering::Relaxed) {
+            let config = current_config();
+            OBSERVABLE.with_borrow(|observable| {
+                observable.as_ref().map_or_else(Vec::new, |observable| {
+                    observable.read(|snapshot| {
+                        TrayReadout::from_parts(
+                            &snapshot.inventory,
+                            &snapshot.standalone,
+                            &snapshot.lights,
+                            config.as_deref(),
+                        )
+                        .menu_lines()
+                        .collect()
+                    })
+                })
+            })
+        } else {
+            Vec::new()
+        };
+        for row in &rows {
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, wide(row).as_ptr());
+        }
+        if !rows.is_empty() {
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        }
         AppendMenuW(
             menu,
             MF_STRING,
@@ -382,27 +794,192 @@ unsafe fn show_menu(hwnd: HWND) {
         DestroyMenu(menu);
 
         match cmd as usize {
-            ID_SHOW => open_or_focus_gui(),
+            ID_SHOW => show_openlogi(),
+            ID_FLOW_PIN => {
+                let _ = openlogi_agent::flow_pin::flow_pin().toggle();
+            }
+            ID_FLOW_INDICATOR => {
+                if let Some(revision) = crate::tray_setting::toggle_flow_indicator() {
+                    OBSERVABLE.with_borrow(|observable| {
+                        if let Some(observable) = observable {
+                            observable.set_config_revision(revision);
+                        }
+                    });
+                }
+            }
             ID_QUIT => quit(hwnd),
             _ => {}
         }
     }
 }
 
-/// Focus the running GUI's window, or launch the sibling GUI binary when no
-/// GUI is running (a second launch would just exit on the `openlogi.lock`
-/// singleton, so spawning blindly does nothing visible).
-fn open_or_focus_gui() {
-    let pids = gui_pids();
-    if pids.is_empty() {
-        spawn_gui();
-        return;
+/// Focus the running OpenLogi windows, or launch the GUI when none is running.
+///
+/// The whole group moves together: the GUI's windows and the Flow Indicator
+/// card keep the stacking order they already had, so settings stay above the
+/// main window and the card keeps its place. Only a GUI window takes the
+/// foreground — the card is a passive readout and must not take focus.
+fn show_openlogi() {
+    let gui = gui_pids();
+    let windows = openlogi_windows(&gui, &overlay_pids());
+    let plan = plan_show(&windows);
+
+    // Back to front: each raise leaves the group in its original order.
+    for window in &plan.raise {
+        // A background process cannot move another process's normal window
+        // above the foreground window with `HWND_TOP` — the call reports
+        // success and the z-order stays put. Passing through the topmost band
+        // and back does move it, and leaves a previously normal window normal.
+        // Windows already in the topmost band are left alone, so a pinned card
+        // keeps its state.
+        // SAFETY: z-order changes with no move, resize, or activation, on
+        // windows `EnumWindows` just reported as live for this user.
+        unsafe {
+            SetWindowPos(
+                *window as HWND,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            SetWindowPos(
+                *window as HWND,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
     }
-    if !focus_window_of(&pids) {
+
+    match plan.foreground {
+        Some(window) => {
+            // SAFETY: the handle came from the same live enumeration; a
+            // minimized window is restored because the click asked for it.
+            unsafe {
+                if IsIconic(window as HWND) != 0 {
+                    ShowWindow(window as HWND, SW_RESTORE);
+                }
+                SetForegroundWindow(window as HWND);
+            }
+        }
         // Running but windowless should not happen (the GUI always has its
         // main window); log rather than spawn a doomed duplicate.
-        warn!("GUI process is running but no window was found to focus");
+        None if !gui.is_empty() => {
+            warn!("GUI process is running but no window was found to focus");
+        }
+        None => spawn_gui(),
     }
+}
+
+/// One window the tray raises, recorded in `EnumWindows` order (front to back).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StackWindow {
+    hwnd: isize,
+    /// A GUI window; the card never takes the foreground.
+    gui: bool,
+    minimized: bool,
+    /// Already in the topmost band; the raise leaves it there.
+    topmost: bool,
+}
+
+/// The OpenLogi windows on screen: every visible GUI window plus the Flow
+/// Indicator card, in `EnumWindows` order.
+fn openlogi_windows(gui: &[u32], overlay: &[u32]) -> Vec<StackWindow> {
+    struct Search<'a> {
+        gui: &'a [u32],
+        overlay: &'a [u32],
+        windows: Vec<StackWindow>,
+    }
+
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> i32 {
+        // SAFETY: lparam is the &mut Search passed to EnumWindows below and
+        // outlives the enumeration; the win32 queries take a valid hwnd.
+        unsafe {
+            let search = &mut *(lparam as *mut Search<'_>);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &raw mut pid);
+            let gui = search.gui.contains(&pid);
+            let card = !gui && search.overlay.contains(&pid) && is_flow_card(hwnd);
+            if !(gui || card) || IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            search.windows.push(StackWindow {
+                hwnd: hwnd as isize,
+                gui,
+                minimized: IsIconic(hwnd) != 0,
+                topmost: GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST.cast_signed() != 0,
+            });
+            1
+        }
+    }
+
+    let mut search = Search {
+        gui,
+        overlay,
+        windows: Vec::new(),
+    };
+    // SAFETY: the callback only dereferences the &mut Search for the duration
+    // of this call.
+    unsafe {
+        EnumWindows(Some(collect), std::ptr::addr_of_mut!(search) as LPARAM);
+    }
+    search.windows
+}
+
+/// Whether `hwnd` is the Flow Indicator card.
+///
+/// The card is the overlay's only window that outlives a session; the ring,
+/// notices, lock-key and backlight windows are transient and stay out of the
+/// raised group. Its title is the cross-process identity the overlay sets.
+fn is_flow_card(hwnd: HWND) -> bool {
+    // The title is short enough for 64 UTF-16 units; `GetWindowTextW` copies
+    // at most this many and returns the count it wrote.
+    let mut title = [0u16; 64];
+    // SAFETY: a title read into a buffer this call owns. A window owned by
+    // another process reports its cached title; no message is sent.
+    let len = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), 64) };
+    let Ok(len) = usize::try_from(len) else {
+        return false;
+    };
+    let expected = wide(openlogi_core::brand::FLOW_INDICATOR_TITLE);
+    len + 1 == expected.len() && title[..len] == expected[..len]
+}
+
+/// What a Show click does with the windows it found.
+struct ShowPlan {
+    /// Back to front. Raising in this order restores the group's stacking as
+    /// it was.
+    raise: Vec<isize>,
+    /// The window that takes the foreground; `None` when only the card is up.
+    foreground: Option<isize>,
+}
+
+/// Plan the raise: preserve the current front-to-back order, and hand the
+/// keyboard to the topmost GUI window rather than to the card.
+///
+/// Topmost windows are already above everything normal and stay in their band,
+/// so only normal windows are raised — among them the order is kept.
+fn plan_show(windows: &[StackWindow]) -> ShowPlan {
+    // Restoring a minimized window is a visible change the click did not ask
+    // for, so prefer a window that is already showing; when every GUI window
+    // is minimized, bring the topmost one back.
+    let foreground = windows
+        .iter()
+        .find(|window| window.gui && !window.minimized)
+        .or_else(|| windows.iter().find(|window| window.gui))
+        .map(|window| window.hwnd);
+    let raise = windows
+        .iter()
+        .rev()
+        .filter(|window| !window.minimized && !window.topmost)
+        .map(|window| window.hwnd)
+        .collect();
+    ShowPlan { raise, foreground }
 }
 
 /// PIDs of this user's running GUI processes: `OpenLogi.exe` (installed /
@@ -418,6 +995,17 @@ fn open_or_focus_gui() {
 /// Show/Quit — their windows are invisible to `EnumWindows` and their
 /// processes unkillable anyway, but don't even consider them.
 fn gui_pids() -> Vec<u32> {
+    matching_pids(is_gui_process_name)
+}
+
+/// PIDs of this user's running overlay helpers — the process that owns the
+/// Flow Indicator card.
+fn overlay_pids() -> Vec<u32> {
+    matching_pids(|name| name.eq_ignore_ascii_case("openlogi-overlay.exe"))
+}
+
+/// PIDs of this user's processes whose image name `is_target` accepts.
+fn matching_pids(is_target: impl Fn(&str) -> bool) -> Vec<u32> {
     use sysinfo::{Pid, Process, ProcessesToUpdate, System};
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
@@ -428,7 +1016,7 @@ fn gui_pids() -> Vec<u32> {
         .processes()
         .values()
         .filter(|p| {
-            is_gui_process_name(&p.name().to_string_lossy())
+            is_target(&p.name().to_string_lossy())
                 && (own_user.is_none() || p.user_id() == own_user)
         })
         .map(|p| p.pid().as_u32())
@@ -442,43 +1030,6 @@ fn gui_pids() -> Vec<u32> {
 /// both. Windows reports image names with their on-disk case, so this holds.
 fn is_gui_process_name(name: &str) -> bool {
     name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-desktop.exe")
-}
-
-/// Bring the first visible top-level window owned by one of `pids` to the
-/// foreground, restoring it if minimized. Returns whether one was found.
-fn focus_window_of(pids: &[u32]) -> bool {
-    struct Search<'a> {
-        pids: &'a [u32],
-        focused: bool,
-    }
-    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
-        // SAFETY: lparam is the &mut Search passed to EnumWindows below and
-        // outlives the enumeration; the win32 queries take a valid hwnd.
-        unsafe {
-            let search = &mut *(lparam as *mut Search<'_>);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, &raw mut pid);
-            if search.pids.contains(&pid) && IsWindowVisible(hwnd) != 0 {
-                if IsIconic(hwnd) != 0 {
-                    ShowWindow(hwnd, SW_RESTORE);
-                }
-                SetForegroundWindow(hwnd);
-                search.focused = true;
-                return 0; // stop enumerating
-            }
-            1
-        }
-    }
-    let mut search = Search {
-        pids,
-        focused: false,
-    };
-    // SAFETY: the callback only dereferences the &mut Search for the duration
-    // of this call.
-    unsafe {
-        EnumWindows(Some(enum_proc), std::ptr::addr_of_mut!(search) as LPARAM);
-    }
-    search.focused
 }
 
 /// Launch the GUI binary sitting next to the agent.
@@ -502,8 +1053,16 @@ fn spawn_gui() {
         warn!(dir = %dir.display(), "no GUI binary found next to the agent");
         return;
     };
-    match std::process::Command::new(&gui).spawn() {
-        Ok(_) => info!(path = %gui.display(), "tray — launched the GUI"),
+    let mut command = std::process::Command::new(&gui);
+    if MOCK_AGENT.load(Ordering::Relaxed) {
+        command.arg("--mock");
+    }
+    match command.spawn() {
+        Ok(_) => info!(
+            path = %gui.display(),
+            mock = MOCK_AGENT.load(Ordering::Relaxed),
+            "tray — launched the GUI"
+        ),
         Err(e) => warn!(error = %e, path = %gui.display(), "tray — could not launch the GUI"),
     }
 }
@@ -530,6 +1089,7 @@ fn quit(hwnd: HWND) {
     unsafe {
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
+    destroy_current_icon();
     crate::overlay::evict_on_quit();
     info!("tray Quit — requesting graceful agent shutdown");
     let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
@@ -541,15 +1101,125 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// `s` as a NUL-terminated UTF-16 buffer of at most `max` code units, not
+/// counting the terminator. Cuts on a character boundary so a truncated
+/// tooltip cannot end in half a surrogate pair.
+fn wide_truncated(s: &str, max: usize) -> Vec<u16> {
+    let mut units = Vec::with_capacity(max + 1);
+    for character in s.chars() {
+        let mut encoded = [0u16; 2];
+        let encoded = character.encode_utf16(&mut encoded);
+        if units.len() + encoded.len() > max {
+            break;
+        }
+        units.extend_from_slice(encoded);
+    }
+    units.push(0);
+    units
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NotifyArea, Readd, is_gui_process_name};
+    use super::{NotifyArea, Readd, StackWindow, is_gui_process_name, plan_show, wide_truncated};
+
+    fn window(hwnd: isize, gui: bool, minimized: bool) -> StackWindow {
+        StackWindow {
+            hwnd,
+            gui,
+            minimized,
+            topmost: false,
+        }
+    }
+
+    fn pinned_card(hwnd: isize) -> StackWindow {
+        StackWindow {
+            hwnd,
+            gui: false,
+            minimized: false,
+            topmost: true,
+        }
+    }
+
+    #[test]
+    fn a_show_keeps_the_group_in_its_stacking_order() {
+        // Front to back: the card, Settings, the main window.
+        let plan = plan_show(&[
+            window(1, false, false),
+            window(2, true, false),
+            window(3, true, false),
+        ]);
+        assert_eq!(plan.raise, vec![3, 2, 1], "raised back to front");
+        assert_eq!(
+            plan.foreground,
+            Some(2),
+            "the topmost GUI window takes the foreground"
+        );
+    }
+
+    #[test]
+    fn the_card_is_raised_without_taking_the_foreground() {
+        let plan = plan_show(&[window(7, false, false)]);
+        assert_eq!(plan.raise, vec![7]);
+        assert_eq!(plan.foreground, None);
+    }
+
+    #[test]
+    fn the_card_keeps_its_place_under_the_gui() {
+        let plan = plan_show(&[window(2, true, false), window(1, false, false)]);
+        assert_eq!(
+            plan.raise,
+            vec![1, 2],
+            "the card rises first, the panel last"
+        );
+        assert_eq!(plan.foreground, Some(2));
+    }
+
+    #[test]
+    fn a_pinned_card_stays_in_the_topmost_band() {
+        let plan = plan_show(&[pinned_card(1), window(2, true, false)]);
+        assert_eq!(plan.raise, vec![2], "only the normal window is raised");
+        assert_eq!(plan.foreground, Some(2));
+    }
+
+    #[test]
+    fn a_minimized_window_keeps_its_state_unless_no_gui_window_is_showing() {
+        let plan = plan_show(&[window(1, true, false), window(2, true, true)]);
+        assert_eq!(plan.raise, vec![1], "a minimized window is not raised");
+        assert_eq!(plan.foreground, Some(1));
+
+        let plan = plan_show(&[window(2, true, true)]);
+        assert!(plan.raise.is_empty());
+        assert_eq!(
+            plan.foreground,
+            Some(2),
+            "it is the only window to bring back"
+        );
+    }
 
     #[test]
     fn the_cli_binary_is_not_the_gui() {
         assert!(is_gui_process_name("OpenLogi.exe"));
         assert!(is_gui_process_name("openlogi-desktop.exe"));
         assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
+
+    #[test]
+    fn the_tooltip_fits_the_notify_icon_buffer() {
+        const MAX: usize = 127;
+
+        let exact = "a".repeat(MAX);
+        let wide = wide_truncated(&exact, MAX);
+        assert_eq!(wide.len(), MAX + 1);
+        assert_eq!(wide[MAX], 0);
+
+        let long = "a".repeat(200);
+        assert_eq!(wide_truncated(&long, MAX).len(), MAX + 1);
+
+        // A surrogate pair that would straddle the limit is dropped whole.
+        let boundary = format!("{}😀", "a".repeat(MAX - 1));
+        let wide = wide_truncated(&boundary, MAX);
+        assert_eq!(wide.len(), MAX);
+        assert_eq!(wide[MAX - 1], 0);
     }
 
     /// The notification area as a `TaskbarCreated` broadcast finds it.

@@ -18,8 +18,8 @@ use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::client::{self, ConnectError, Observer, Stamped};
 use openlogi_ipc::{
-    ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, LockKeyObservation,
-    NoticeObservation, RingObservation,
+    ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, FlowPinnedObservation,
+    LockKeyObservation, NoticeObservation, Observation, RingObservation,
 };
 use succession::Standing;
 use tarpc::context;
@@ -64,6 +64,16 @@ pub(crate) struct Handle {
     /// The lock-key change the agent says should be showing, each time that
     /// changes. `None` is no indicator, which is also how one ends.
     pub(crate) lock_keys: mpsc::UnboundedReceiver<LockKeyObservation>,
+    /// The whole agent snapshot, for the Flow Indicator's device rows.
+    /// `None` is the connection that carried it going away: the card keeps
+    /// the last readings but must stop presenting them as live.
+    pub(crate) state: mpsc::UnboundedReceiver<Option<Observation>>,
+    /// The Flow Indicator's pinned state, owned by the agent so the tray and
+    /// the card share one value.
+    pub(crate) flow_pinned: mpsc::UnboundedReceiver<FlowPinnedObservation>,
+    /// Where the card reports a pin it toggled itself, so the tray's
+    /// checkmark follows it.
+    pub(crate) flow_pin_reports: mpsc::UnboundedSender<bool>,
     /// Where the view reports hover, activation, and cancellation.
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
 }
@@ -75,22 +85,26 @@ pub(crate) fn spawn() -> Handle {
     let (backlight_tx, backlights) = mpsc::unbounded_channel();
     let (notice_tx, notices) = mpsc::unbounded_channel();
     let (lock_key_tx, lock_keys) = mpsc::unbounded_channel();
+    let (state_tx, state) = mpsc::unbounded_channel();
+    let (flow_pin_tx, flow_pinned) = mpsc::unbounded_channel();
+    let (flow_pin_reports, mut flow_pin_report_rx) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
             tokio::join!(
-                observe(connect, RING, |ring| invocation_tx
-                    .send(ring.invocation)
-                    .is_ok()),
-                observe(connect, BACKLIGHT, |observed| backlight_tx
-                    .send(observed)
-                    .is_ok()),
-                observe(connect, NOTICES, |observed| notice_tx
-                    .send(observed)
-                    .is_ok()),
-                observe(connect, LOCK_KEYS, |observed| lock_key_tx
-                    .send(observed)
-                    .is_ok()),
+                observe(connect, RING, |ring| ring.is_none_or(|ring| {
+                    invocation_tx.send(ring.invocation).is_ok()
+                })),
+                observe(connect, BACKLIGHT, |observed| observed
+                    .is_none_or(|observed| backlight_tx.send(observed).is_ok())),
+                observe(connect, NOTICES, |observed| observed
+                    .is_none_or(|observed| notice_tx.send(observed).is_ok())),
+                observe(connect, LOCK_KEYS, |observed| observed
+                    .is_none_or(|observed| lock_key_tx.send(observed).is_ok())),
+                observe(connect, STATE, |observed| state_tx.send(observed).is_ok()),
+                observe(connect, FLOW_PINNED, |observed| observed
+                    .is_none_or(|observed| flow_pin_tx.send(observed).is_ok())),
+                report_flow_pins(&mut flow_pin_report_rx),
                 send_commands(&mut command_rx)
             );
         });
@@ -103,6 +117,9 @@ pub(crate) fn spawn() -> Handle {
         backlights,
         notices,
         lock_keys,
+        state,
+        flow_pinned,
+        flow_pin_reports,
         commands,
     }
 }
@@ -115,7 +132,8 @@ struct Cell<T: Stamped> {
     what: &'static str,
     /// What to show once the agent is gone, for a cell whose agent also ends
     /// what it shows: the agent's timer went with it, so nothing else would
-    /// ever end what is on screen.
+    /// ever end what is on screen. A cell without one is handed `None`
+    /// instead, for a consumer that keeps its last value and must mark it.
     lost: Option<fn() -> T>,
 }
 
@@ -147,6 +165,25 @@ const LOCK_KEYS: Cell<LockKeyObservation> = Cell {
     open: Observer::lock_keys,
     what: "lock-key",
     lost: Some(no_lock_key),
+};
+
+/// The whole agent snapshot. Keeping the last answer on a lost connection
+/// leaves the Flow Indicator showing the last-known readings until this
+/// process gives up on the agent, which is the same last-known language the
+/// widget uses for a sleeping device. That is why this cell keeps no `lost`
+/// value: the card needs the disconnection itself to mark the readings stale.
+/// The Flow Indicator's pinned state. It keeps the last value on a lost
+/// connection: the card stays where it is, and the next agent re-seeds it.
+const FLOW_PINNED: Cell<FlowPinnedObservation> = Cell {
+    open: Observer::flow_pinned,
+    what: "Flow Indicator pin state",
+    lost: None,
+};
+
+const STATE: Cell<Observation> = Cell {
+    open: Observer::state,
+    what: "agent state",
+    lost: None,
 };
 
 /// The observation that closes the indicator when the agent that was driving
@@ -282,7 +319,7 @@ impl<T: Stamped> ObservationLink<T> {
 async fn observe<T: Stamped, C: Future<Output = Option<AgentClient>>>(
     mut connect: impl FnMut() -> C,
     cell: Cell<T>,
-    mut deliver: impl FnMut(T) -> bool,
+    mut deliver: impl FnMut(Option<T>) -> bool,
 ) {
     let mut link = ObservationLink::<T>::default();
     loop {
@@ -309,16 +346,16 @@ async fn observe<T: Stamped, C: Future<Output = Option<AgentClient>>>(
             // alive, nothing to show.
             Ok(None) => {}
             Ok(Some(latest)) => {
-                if !deliver(latest) {
+                if !deliver(Some(latest)) {
                     return;
                 }
             }
             Err(error) => {
                 debug!(?error, "{} channel disconnected", cell.what);
                 link.disconnected();
-                if let Some(lost) = cell.lost
-                    && !deliver(lost())
-                {
+                // A disconnected cell hands over its fallback value, or the
+                // disconnection itself for a consumer that keeps the last one.
+                if !deliver(cell.lost.map(|lost| lost())) {
                     return;
                 }
             }
@@ -371,6 +408,51 @@ async fn send_command(client: &AgentClient, command: OverlayCommand) -> bool {
             .is_ok(),
         OverlayCommand::Cancel { session_id } => {
             client.action_ring_cancel(ctx, session_id).await.is_ok()
+        }
+    }
+}
+
+/// Report a card-toggled pin to the agent. Best effort: a dropped report is
+/// corrected by the next toggle or the tray's own observation, and the card
+/// must never wait on the IPC handshake to finish its animation.
+async fn report_flow_pins(rx: &mut mpsc::UnboundedReceiver<bool>) {
+    let mut client: Option<AgentClient> = None;
+    let mut pending: Option<bool> = None;
+    loop {
+        if pending.is_none() {
+            match rx.recv().await {
+                Some(value) => pending = Some(value),
+                None => return,
+            }
+        }
+        while let Ok(next) = rx.try_recv() {
+            pending = Some(next);
+        }
+        if client.is_none() {
+            client = connect().await;
+        }
+        let Some(active) = client.as_ref() else {
+            // The agent is away; keep the latest value and try again. A pin
+            // clicked while it restarts must still reach the tray.
+            tokio::select! {
+                next = rx.recv() => match next {
+                    Some(next) => pending = Some(next),
+                    None => return,
+                },
+                () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+            continue;
+        };
+        let Some(value) = pending else {
+            continue;
+        };
+        let mut ctx = context::current();
+        ctx.deadline = Instant::now() + Duration::from_secs(2);
+        if active.report_flow_pinned(ctx, value).await.is_ok() {
+            pending = None;
+        } else {
+            debug!("flow pin report failed; retrying");
+            client = None;
         }
     }
 }

@@ -111,6 +111,11 @@ gpui-kit = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.8.1" }
 swr-core = "0.1"
 swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
 
+# The wide Linux tray face needs the Ayatana label extension, which upstream
+# ksni does not expose yet (PRs #42/#47). The copy under `vendor/ksni` is
+# upstream 0.3.7 plus that one patch; drop the entry once upstream ships it.
+[patch.crates-io]
+ksni = { path = "vendor/ksni" }
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely
 # needs FFI can opt in locally with `#[expect(unsafe_code, reason = "…")]`.

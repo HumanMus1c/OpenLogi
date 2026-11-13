@@ -51,10 +51,42 @@ pub enum UiScale {
     ExtraLarge,
 }
 
+/// Z-order of the floating Flow Indicator window.
+///
+/// GPUI has no bottom-most window layer, so the choices are a normal window
+/// (other apps can cover it) and an opt-in topmost window (can cover fullscreen
+/// games, so it must not be the default).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowIndicatorDisplayMode {
+    /// Normal stacking: other applications can cover it.
+    #[default]
+    Normal,
+    /// Above other windows; opt-in.
+    Topmost,
+}
+
+/// The tray badge's shape. Windows and Linux render the badge bitmap
+/// themselves, so the style is a rendering choice; macOS shows a text title
+/// instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayBadgeStyle {
+    /// A disc inscribed in the system's icon slot, edge-to-edge.
+    #[default]
+    Circle,
+    /// A full-bleed rounded square, matching the square-ish icons around it.
+    RoundedSquare,
+    /// A wide face with the device name, a progress bar, and the value in one
+    /// row. Linux-only: a StatusNotifierItem panel can keep the pixmap's
+    /// aspect ratio, while the Windows notification area squares every icon.
+    /// Selectable from `config.toml` only; Settings does not offer it yet.
+    Wide,
+}
+
 impl UiScale {
     /// Every supported scale, in the order Settings offers them.
     pub const ALL: [Self; 4] = [Self::Small, Self::Normal, Self::Large, Self::ExtraLarge];
-
     /// The displayed percentage for this scale.
     #[must_use]
     pub const fn percent(self) -> u16 {
@@ -200,11 +232,11 @@ pub struct AppSettings {
     /// Omitted from the file until a user picks a channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_channel: Option<UpdateChannel>,
-    /// Whether OpenLogi shows a macOS menu-bar (status item) icon — and, on
-    /// Windows, the notification-area (tray) icon. `true` (default) → the
-    /// agent is visible in the menu bar / tray; `false` → it runs with no
-    /// visible presence (macOS additionally keeps the ordinary Dock icon
-    /// while a window is open). Ignored on Linux.
+    /// Whether OpenLogi shows a macOS menu-bar (status item) icon, a Windows
+    /// notification-area (tray) icon, or a Linux StatusNotifierItem. `true`
+    /// (default) → the agent is visible in the menu bar / tray; `false` → it
+    /// runs with no visible presence (macOS additionally keeps the ordinary
+    /// Dock icon while a window is open).
     #[serde(default = "default_true")]
     pub show_in_menu_bar: bool,
     /// Whether the agent installs the OS-level mouse hook (CGEventTap /
@@ -305,6 +337,37 @@ pub struct AppSettings {
     /// for what counts as low.
     #[serde(default = "default_true")]
     pub low_battery_notifications: bool,
+    /// Whether the tray shows a battery readout: the tooltip, the device rows
+    /// in its menu, and the tray icon. **On by default.** The readout renders
+    /// the inventory the agent already polls; it never triggers a HID read of
+    /// its own. Off restores the static brand icon and the plain Show/Quit
+    /// menu. On Linux the icon is a StatusNotifierItem, so it appears only
+    /// where the desktop runs an SNI host.
+    #[serde(default = "default_true")]
+    pub tray_battery: bool,
+    /// The tray badge's shape. The circle fills the system's icon slot
+    /// edge-to-edge; the rounded square trades the disc look for the visual
+    /// weight the square-ish neighbouring icons carry. Used on Windows and
+    /// Linux; macOS reads the level out as text.
+    #[serde(default)]
+    pub tray_badge_style: TrayBadgeStyle,
+    /// Whether the floating Flow Indicator lists detected devices and their
+    /// battery readings. **On by default.** The indicator renders the same
+    /// inventory the agent already polls; it never triggers a HID read.
+    #[serde(default = "default_true")]
+    pub flow_indicator: bool,
+    /// Whether the Flow Indicator keeps offline devices with their last known
+    /// reading, marked offline, instead of hiding them.
+    #[serde(default = "default_true")]
+    pub flow_indicator_show_offline: bool,
+    /// How many device rows the Flow Indicator shows. Values outside
+    /// [`FLOW_INDICATOR_MAX_DEVICES_MIN`]..=[`FLOW_INDICATOR_MAX_DEVICES_MAX`]
+    /// clamp when read; the settings UI only writes the valid range.
+    #[serde(default = "default_flow_indicator_max_devices")]
+    pub flow_indicator_max_devices: u8,
+    /// Z-order of the Flow Indicator window.
+    #[serde(default)]
+    pub flow_indicator_display_mode: FlowIndicatorDisplayMode,
     /// Whether the overlay briefly shows a lock key a keyboard turned on or
     /// off. **On by default.** Caps Lock shows on every platform; Num Lock
     /// and Scroll Lock do not show on macOS, as in Logi Options+ (see
@@ -521,6 +584,12 @@ impl Default for AppSettings {
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
+            tray_battery: true,
+            tray_badge_style: TrayBadgeStyle::Circle,
+            flow_indicator: true,
+            flow_indicator_show_offline: true,
+            flow_indicator_max_devices: FLOW_INDICATOR_MAX_DEVICES_DEFAULT,
+            flow_indicator_display_mode: FlowIndicatorDisplayMode::Normal,
             lock_key_notifications: true,
             animate_desktop_switch: true,
         }
@@ -699,11 +768,33 @@ impl Default for MomentumScrolling {
 /// serde default for the on-by-default [`AppSettings`] toggles
 /// ([`AppSettings::show_in_menu_bar`], [`AppSettings::capture_mouse_events`],
 /// [`AppSettings::auto_download_assets`],
-/// [`AppSettings::low_battery_notifications`],
+/// [`AppSettings::low_battery_notifications`], [`AppSettings::tray_battery`],
 /// [`AppSettings::animate_desktop_switch`]), so configs predating a field keep
 /// the out-of-the-box behavior.
 fn default_true() -> bool {
     true
+}
+
+/// Range of device rows the Flow Indicator accepts; hand-edited values clamp.
+pub const FLOW_INDICATOR_MAX_DEVICES_MIN: u8 = 1;
+/// See [`FLOW_INDICATOR_MAX_DEVICES_MIN`].
+pub const FLOW_INDICATOR_MAX_DEVICES_MAX: u8 = 5;
+/// Out-of-the-box Flow Indicator row count.
+pub const FLOW_INDICATOR_MAX_DEVICES_DEFAULT: u8 = 3;
+
+fn default_flow_indicator_max_devices() -> u8 {
+    FLOW_INDICATOR_MAX_DEVICES_DEFAULT
+}
+
+impl AppSettings {
+    /// The Flow Indicator's row limit, clamped for hand-edited configs.
+    #[must_use]
+    pub fn flow_indicator_row_limit(&self) -> u8 {
+        self.flow_indicator_max_devices.clamp(
+            FLOW_INDICATOR_MAX_DEVICES_MIN,
+            FLOW_INDICATOR_MAX_DEVICES_MAX,
+        )
+    }
 }
 
 /// Per-device RGB lighting: a single static color, brightness, and on/off.

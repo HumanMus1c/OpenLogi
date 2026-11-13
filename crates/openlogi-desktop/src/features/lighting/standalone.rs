@@ -6,7 +6,7 @@ use crate::ui::components::Toggle;
 use crate::ui::slider_row::SliderRow;
 
 use super::visual::LightView;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::{
     BoxShadow, Context, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, hsla, point, prelude::FluentBuilder as _, px, rgb,
@@ -14,7 +14,7 @@ use gpui::{
 use gpui_kit::component::{Icon, IconName, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::{
     config::LightSettings,
-    device::{LightCapabilities, LightValueRange, LightValueUnit},
+    device::{BatteryStage, LightCapabilities, LightValueRange, LightValueUnit},
 };
 
 /// Standalone-light panel. The UI is driven by the active device's advertised
@@ -185,13 +185,12 @@ impl Render for LightPanel {
                 panel.child(div().h(px(1.)).w_full().bg(pal.border.opacity(0.55)))
             })
             .when_some(brightness, |panel, LightSlider { range, slider }| {
+                let shown = slider.shown(brightness_native(*range, settings));
                 panel.child(control_well(
                     tr!("camera.brightness"),
-                    format_light_value(
-                        slider.shown(brightness_native(*range, settings)),
-                        range.unit(),
-                    ),
+                    format_light_value(shown, range.unit()),
                     format_range_endpoints(*range),
+                    brightness_color(shown, *range),
                     Slider::new(slider.slider()).horizontal(),
                     pal,
                 ))
@@ -204,6 +203,7 @@ impl Render for LightPanel {
                         range.unit(),
                     ),
                     format_range_endpoints(*range),
+                    rgb(ACCENT_BLUE).into(),
                     Slider::new(slider.slider()).horizontal(),
                     pal,
                 ))
@@ -362,6 +362,7 @@ fn control_well(
     title: gpui::SharedString,
     value: String,
     endpoints: (String, String),
+    value_color: Hsla,
     slider: impl IntoElement,
     pal: Palette,
 ) -> impl IntoElement {
@@ -375,8 +376,21 @@ fn control_well(
         .child(
             SliderRow::new(title, slider)
                 .value(value, [min.clone(), max.clone()])
+                .value_color(value_color)
                 .hint(h_flex().justify_between().child(min).child(max)),
         )
+}
+
+/// The brightness readout's paint: a percentage takes the shared three-stage
+/// band, while a lumen range keeps the brand accent — its native value is not
+/// a charge-like percentage.
+fn brightness_color(native: u16, range: LightValueRange) -> Hsla {
+    match (range.unit(), range.percent_for_native(native)) {
+        (LightValueUnit::Percent, Some(percent)) => {
+            theme::percentage_color(BatteryStage::for_percentage(percent))
+        }
+        _ => rgb(ACCENT_BLUE).into(),
+    }
 }
 
 fn format_range_endpoints(range: LightValueRange) -> (String, String) {

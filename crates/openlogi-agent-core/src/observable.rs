@@ -19,10 +19,13 @@
 //! generation. The lock-key indicator has its own cell for the same reason,
 //! [`LockKeyIndicator`].
 
+use std::sync::{Mutex, PoisonError};
+
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::config::ConfigRevision;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::last_known::LastKnown;
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, FlowPairingPhase, FlowPeerStatus, FlowStatus, ForegroundApps,
@@ -39,11 +42,15 @@ pub struct ObservableState {
     tx: watch::Sender<Observation>,
     notices: NoticeBoard,
     lock_keys: LockKeyIndicator,
+    last_known: Mutex<LastKnown>,
 }
 
 impl ObservableState {
     /// Seed the cell for a starting agent: nothing enumerated yet, no hook, and
     /// the Accessibility trust this process currently holds.
+    ///
+    /// The last-known battery cache starts empty and stays in memory; a launch
+    /// that keeps readings across restarts uses [`Self::with_last_known`].
     ///
     /// `agent_version` comes from the binary because only the binary knows
     /// which version is serving. `launch_at_login` starts `false` and is
@@ -52,6 +59,14 @@ impl ObservableState {
     /// reader can observe the placeholder.
     #[must_use]
     pub fn new(agent_version: String) -> Self {
+        Self::with_last_known(agent_version, LastKnown::default())
+    }
+
+    /// Seed the cell with the last-known battery cache the launch loaded, so a
+    /// device that was asleep during an agent restart keeps the reading the
+    /// tray, the Flow Indicator, and the settings app last showed for it.
+    #[must_use]
+    pub fn with_last_known(agent_version: String, last_known: LastKnown) -> Self {
         // Generation 1, not 0: 0 is the client sentinel for "I have seen
         // nothing", so a first `observe(0)` must differ from whatever is here.
         let (tx, _) = watch::channel(Observation {
@@ -88,6 +103,7 @@ impl ObservableState {
             tx,
             notices: NoticeBoard::default(),
             lock_keys: LockKeyIndicator::default(),
+            last_known: Mutex::new(last_known),
         }
     }
 
@@ -156,6 +172,11 @@ impl ObservableState {
     /// produced — and whether that pass failed to open HID++ nodes — so none
     /// of the three can be read from different generations.
     ///
+    /// Every usable reading is recorded first, then an offline device that
+    /// lost its own reading gets it back from the last-known cache. The
+    /// restored device stays offline: no client presents the cache as a live
+    /// reading.
+    ///
     /// Reconciliations often carry the same devices as the last one; those
     /// notify nobody.
     pub fn set_inventory(
@@ -165,6 +186,15 @@ impl ObservableState {
         standalone: &[StandaloneDevice],
         hid_open_failures: bool,
     ) {
+        let mut inventories = inventories.to_vec();
+        {
+            let mut last_known = self
+                .last_known
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            last_known.observe(&inventories);
+            last_known.restore(&mut inventories);
+        }
         self.update(|snapshot| {
             if snapshot.status.inventory == health
                 && snapshot.inventory == inventories
@@ -174,7 +204,7 @@ impl ObservableState {
                 return false;
             }
             snapshot.status.inventory = health;
-            snapshot.inventory = inventories.to_vec();
+            snapshot.inventory = inventories;
             snapshot.standalone = standalone.to_vec();
             snapshot.status.hid_open_failures = hid_open_failures;
             true
@@ -488,6 +518,37 @@ mod tests {
 
         state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(rx.has_changed().unwrap());
+    }
+
+    /// The reading the agent saw before an agent restart stands in for a
+    /// sleeping device, and every client reads it from the same snapshot.
+    #[test]
+    fn an_offline_device_keeps_the_reading_the_agent_last_saw() {
+        use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+        use openlogi_core::last_known::LastKnown;
+
+        let mut seen = inventory(true);
+        seen.paired[0].battery = Some(BatteryInfo {
+            percentage: Some(59),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        });
+        let mut cache = LastKnown::default();
+        cache.observe(&[seen]);
+
+        let state = ObservableState::with_last_known("test".to_string(), cache);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(false)], &[], false);
+
+        let snapshot = state.snapshot();
+        assert!(!snapshot.inventory[0].paired[0].online);
+        assert_eq!(
+            snapshot.inventory[0].paired[0]
+                .battery
+                .as_ref()
+                .and_then(|battery| battery.percentage),
+            Some(59),
+            "the snapshot carries the last known reading to every client"
+        );
     }
 
     #[test]

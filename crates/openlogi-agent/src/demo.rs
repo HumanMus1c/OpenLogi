@@ -1,0 +1,208 @@
+//! The demo mode: an agent launched with `--mock` serves the scripted demo
+//! devices instead of real HID hardware.
+//!
+//! The launch decides the device source, not the build tree: feature testing
+//! (GUI, overlay, tray) runs the same on every host without hardware and
+//! without touching the user's devices, while a plain launch still drives
+//! real devices. Everything around the device layer is the agent's own
+//! production machinery: the same IPC contract, the same tray, the same
+//! shutdown handling, and the scripted inventory of
+//! [`openlogi_agent::mock`]. [`ObservableState`] — the cell the tray reads —
+//! is fed by a bridge that publishes the demo state the way the orchestrator
+//! publishes the real one, so the tray badge and hover card show demo
+//! batteries exactly as they would show real ones.
+//!
+//! `OPENLOGI_MOCK_DEVICES` is the scriptable form of the switch. A WSL guest
+//! defaults to this mode because it exposes no HID devices; set the variable
+//! to `0` to drive a passthrough receiver there.
+
+use std::ffi::OsString;
+use std::sync::Arc;
+
+use openlogi_agent::mock;
+use openlogi_agent_core::observable::ObservableState;
+use tracing::{info, warn};
+
+use crate::overlay;
+use crate::shutdown::{ShutdownRequest, ShutdownRequests, ShutdownSignals};
+
+/// Run the demo core: serve the scripted devices over the real IPC socket,
+/// mirror them into the observable state the tray reads, and leave on any
+/// shutdown path. Never returns: every exit is `process::exit`, exactly like
+/// the production lifecycle's.
+pub(crate) async fn run(
+    args: Vec<OsString>,
+    mut shutdown_requests: ShutdownRequests,
+    observable: Arc<ObservableState>,
+    #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+) {
+    let state = match mock::state_from_args(args.into_iter()) {
+        Ok(state) => state,
+        Err(error) => {
+            warn!(%error, "could not build the demo profile");
+            exit_demo(1);
+        }
+    };
+    let agent = mock::MockAgent::new(state).with_config_reload(crate::reload::apply_tray_settings);
+    // The console is inert when stdin is not interactive (a GUI-spawned
+    // agent): it stops at EOF and the demo keeps serving.
+    mock::spawn_console(agent.clone());
+    let mut shutdown = agent.shutdown_signal();
+    tokio::spawn(publish_loop(agent.clone(), observable));
+    // The demo serves the moment it is up, so the tray may show at once —
+    // there is no arming ladder to climb.
+    #[cfg(target_os = "macos")]
+    let _ = armed_tx.send(());
+    // The production lifecycle starts the overlay at its arming point; the
+    // demo must too, or the Flow Indicator can never appear in a demo session
+    // no matter what the setting says.
+    overlay::spawn();
+    let mut signals = ShutdownSignals::install();
+    info!(
+        "serving the scripted demo devices — set {}=0 to drive real hardware",
+        openlogi_core::env::MOCK_DEVICES
+    );
+    tokio::select! {
+        served = mock::serve(agent) => {
+            // The accept loop only ends with a bind failure.
+            if let Err(error) = served {
+                warn!(%error, "could not bind the IPC socket");
+                exit_demo(1);
+            }
+        }
+        () = signals.recv() => {
+            // A dev-run Ctrl-C/SIGTERM takes the overlay with it; the next
+            // agent would evict an orphan, but nobody should wait for that.
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            overlay::evict_on_quit();
+            info!("shutdown signal — demo agent leaving");
+        }
+        Some(request) = shutdown_requests.recv() => handle_shutdown_request(request),
+        _ = shutdown.changed() => {
+            // The next agent evicts an orphaned overlay; ask it to leave now
+            // so a mode switch does not leave a stray GPUI process behind.
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            overlay::evict_on_quit();
+            info!("shutdown requested over IPC — demo agent leaving");
+        }
+    }
+    exit_demo(0);
+}
+
+/// Fold one shutdown request into the demo's exit. There is no firmware, hook,
+/// or input-worker state to restore, so every path is a plain exit; a
+/// replacement leaves respawning — the GUI's spawn retry, or the developer —
+/// to start the fresh build.
+fn handle_shutdown_request(request: ShutdownRequest) {
+    match request {
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        ShutdownRequest::TrayQuit { core_guard } => {
+            // Held to the exit, as the lifecycle holds it through teardown.
+            let _core_guard = core_guard;
+            overlay::evict_on_quit();
+            info!("tray quit — demo agent leaving");
+        }
+        ShutdownRequest::Uninstalled => {
+            info!("the app was uninstalled — demo agent leaving");
+        }
+        ShutdownRequest::Quit => {
+            info!("quit requested — demo agent leaving");
+        }
+        ShutdownRequest::Restart { path, retry } => {
+            info!(path = %path.display(), "executable replaced — demo agent leaving");
+            let _ = retry.send(());
+        }
+    }
+}
+
+/// Mirror the demo state into the observable cell the tray reads, forever.
+///
+/// The mock state is the single authority; this publishes its derivations the
+/// way the orchestrator publishes the real ones. Every setter deduplicates, so
+/// polling costs nothing when nothing moved.
+async fn publish_loop(agent: mock::MockAgent, observable: Arc<ObservableState>) {
+    loop {
+        publish_once(&agent, &observable).await;
+        tokio::time::sleep(mock::OBSERVE_POLL_PERIOD).await;
+    }
+}
+
+/// Publish one rendering of the demo state into `observable`.
+async fn publish_once(agent: &mock::MockAgent, observable: &ObservableState) {
+    let snapshot = agent.current().await.snapshot;
+    observable.set_inventory(
+        snapshot.status.inventory,
+        &snapshot.inventory,
+        &snapshot.standalone,
+        snapshot.status.hid_open_failures,
+    );
+    observable.set_launch_at_login(snapshot.status.launch_at_login);
+    observable.set_camera_active(snapshot.camera_active);
+    observable.set_pairing(snapshot.pairing.clone());
+    observable.set_foreground(snapshot.foreground.current.clone());
+    observable.set_lights(snapshot.lights);
+}
+
+/// End the process from the demo core. The core runs off the process main
+/// thread on macOS, and returning would leave the tray threads keeping the
+/// process alive — the production lifecycle exits the same way, for the same
+/// reason.
+fn exit_demo(status: i32) -> ! {
+    #[expect(
+        clippy::exit,
+        reason = "the demo core owns no firmware, hook, or input-worker state to restore, runs off the process main thread on macOS, and returning would leave the tray threads holding the process alive"
+    )]
+    std::process::exit(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_ipc::InventoryHealth;
+
+    use crate::tray_readout::TrayReadout;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn the_bridge_publishes_the_demo_inventory_into_the_tray_cell() {
+        let agent = mock::MockAgent::new(
+            mock::state_from_args(std::iter::empty()).expect("built-in demo state"),
+        );
+        let observable = ObservableState::new("test".to_owned());
+        publish_once(&agent, &observable).await;
+
+        let snapshot = observable.snapshot();
+        assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
+        // The canonical demo: one Bolt receiver pairing three devices, one
+        // directly attached mouse, and the standalone light.
+        assert_eq!(snapshot.inventory.len(), 2);
+        assert_eq!(
+            snapshot
+                .inventory
+                .iter()
+                .map(|inventory| inventory.paired.len())
+                .sum::<usize>(),
+            4
+        );
+        assert_eq!(snapshot.standalone.len(), 1);
+        // The light publishes its readback, so the tray can show its power
+        // and brightness instead of a battery.
+        assert_eq!(snapshot.lights.len(), 1);
+        assert!(snapshot.lights[0].state.on);
+        assert!(
+            snapshot.inventory[0].paired[0].battery.is_some(),
+            "the tray badge needs the online mouse's battery"
+        );
+        // The tray's menu lists the light after the battery devices.
+        let rows: Vec<String> = TrayReadout::from_parts(
+            &snapshot.inventory,
+            &snapshot.standalone,
+            &snapshot.lights,
+            None,
+        )
+        .menu_lines()
+        .collect();
+        assert_eq!(rows.len(), 5);
+        assert!(rows[4].contains(rust_i18n::t!("common.on").as_ref()));
+    }
+}

@@ -103,6 +103,8 @@ Each run also stops the dev agent and overlay left behind by the previous one,
 then starts the freshly built agent and waits for its IPC socket before the
 GUI launches — so the window connects immediately instead of sitting on its
 connecting frame while the GUI's production fallback re-spawns the agent.
+The dev agent and the GUI both start in demo mode (`--mock`); set
+`OPENLOGI_DEV_REAL=1` to run both against real hardware instead.
 The helpers are launched through LaunchServices so they get their own TCC
 identity, which also means they are not children of the GUI: closing its
 window or pressing Ctrl-C ends only the GUI, and a surviving dev agent
@@ -137,28 +139,52 @@ The agent's input-hook watchdog gives CoreGraphics permission probes a 10-second
 
 ## Developing the GUI without hardware
 
-`openlogi-agent-mock` serves the real agent IPC contract from a scripted
-in-memory inventory, so the desktop app can be developed with no Logitech
-device (or receiver) attached:
+The launch decides the device source ("Device source: runtime `--mock`, one
+build" in the [agent guide](../AGENTS.md)): `--mock` serves the scripted demo
+devices — the real agent IPC contract from an in-memory inventory, with no HID
+or input-hook I/O — and no flag drives real hardware, in debug and release
+builds alike. A demo run needs no Logitech device (or receiver) attached and
+never touches one:
 
 ```sh
-cargo run -p openlogi-agent --bin openlogi-agent-mock   # then, in another terminal:
-OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop
+cargo run -p openlogi-desktop -- --mock   # the GUI spawns openlogi-agent --mock
 ```
 
-The mock defaults itself to the `openlogi-dev` profile (as if `OPENLOGI_PROFILE=dev`
-were set), which is the profile the dev app bundle already uses — so it meets the
-dev GUI on the dev socket, and an installed *release* build, which is on the
-production profile, keeps running untouched. (A locally built bundle installed
-into `/Applications` carries `-dev` identifiers and therefore shares the dev
-profile: it and the mock contend for the same lock, and whichever starts second
-exits.) `OPENLOGI_DEV_AGENT=0` keeps the runner from building and embedding
-the real agent for the GUI to auto-spawn; add `OPENLOGI_ALLOW_EXTERNAL_AGENT=1`
-if your installed production agent is running, since the runner's guard against
-it predates the profile split and cannot know the dev GUI is on a separate
-socket. Pass `OPENLOGI_PROFILE=prod` to serve the production socket instead; the
-mock then contends for the production agent's single-instance lock and refuses
-to start while it is running.
+The installed release build takes the same flag (`OpenLogi.exe --mock`), so
+feature work no longer needs a debug build. A WSL guest defaults to the demo
+without a flag (it exposes no HID devices); set `OPENLOGI_MOCK_DEVICES=0` there
+to drive a passthrough receiver. On every other host the flag or the variable
+selects the demo, and the default is hardware.
+
+The demo replaces only the device layer: the IPC server, the tray, shutdown
+handling, and the `-mock` version marker are the agent's own, and the profile
+resolves exactly as a production agent's does. The tray badge and hover card
+show demo batteries exactly as they would show real ones. The config,
+singleton locks, and IPC endpoint are the production profile's; a GUI launched
+for one source retires a running agent of the other over IPC first, so the two
+never run at once. Release builds have no console, so the demo's stdin
+commands (`battery`, `offline`, …) are only available from a debug build or
+`openlogi-agent-mock`; the agent's log file receives the demo log either way.
+
+`openlogi-agent-mock` remains as the standalone dev tool for the cases where
+the process must be the mock from the start — loading a semantic fixture
+(`--fixture profile.json`, frozen test time), or serving a chosen profile
+socket. It defaults itself to the `openlogi-dev` profile (as if
+`OPENLOGI_PROFILE=dev` were set), which is the profile the macOS dev app bundle
+already uses — so it meets the dev GUI on the dev socket, and an installed
+*release* build, which is on the production profile, keeps running untouched.
+(A locally built bundle installed into `/Applications` carries `-dev`
+identifiers and therefore shares the dev profile: it and the mock contend for
+the same lock, and whichever starts second exits.) `OPENLOGI_DEV_AGENT=0` keeps
+the runner from building and embedding the real agent for the GUI to
+auto-spawn; add `OPENLOGI_ALLOW_EXTERNAL_AGENT=1` if your installed production
+agent is running, since the runner's guard against it predates the profile
+split and cannot know the dev GUI is on a separate socket. Launch the GUI for
+this standalone mock with `--mock` (or run it on WSL, where the demo is the
+default source); a GUI launched for hardware would retire the mock agent on
+startup. Pass `OPENLOGI_PROFILE=prod` to serve the production socket instead;
+the mock then contends for the production agent's single-instance lock and
+refuses to start while it is running.
 
 The script covers an online mouse (DPI and SmartShift writes persist and read
 back, battery drains so poll-driven repaints are visible), an offline mouse, a
@@ -168,11 +194,11 @@ appear, choosing one or typing any address shows the code `418672`, and the
 other computer's user confirms 3 s after you do. The paired computer is saved
 in the profile's `config.toml`, as the agent saves it, and the snapshot lists
 the peers saved there. Its agent version carries a `-mock` suffix,
-so a mock session is identifiable in the UI. It is a dev tool only and is never
-bundled.
+so a mock session is identifiable in the UI. The demo mode exists in every
+agent build, and the mock binary is a dev tool only and is never bundled.
 
-While the mock runs, type a command in its terminal and press Enter to change
-what it reports. `help` lists the commands, and `devices` numbers the devices
+While the demo agent or the mock runs, type a command in its terminal and
+press Enter to change what it reports. `help` lists the commands, and `devices` numbers the devices
 that the other commands address:
 
 ```text

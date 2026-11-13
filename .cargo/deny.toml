@@ -45,6 +45,9 @@ allow = [
     "Unicode-3.0",
     "MPL-2.0",
     "CC0-1.0",
+    # The vendored ksni patch (`vendor/ksni`): a public-domain dedication with
+    # no conditions.
+    "Unlicense",
 ]
 
 [bans]

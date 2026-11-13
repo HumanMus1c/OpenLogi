@@ -14,6 +14,7 @@ use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
+use openlogi_core::device::BatteryStage;
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -89,6 +90,7 @@ impl Render for LightingPanel {
             .iter()
             .map(|&color| swatch(color, &lighting, pal))
             .collect();
+        let brightness = self.brightness.shown(lighting.brightness);
 
         v_flex()
             .gap_3()
@@ -118,10 +120,10 @@ impl Render for LightingPanel {
                     tr!("camera.brightness"),
                     Slider::new(self.brightness.slider()).horizontal(),
                 )
-                .value(
-                    format!("{}%", self.brightness.shown(lighting.brightness)),
-                    ["100%"],
-                ),
+                .value(format!("{brightness}%"), ["100%"])
+                .value_color(theme::percentage_color(BatteryStage::for_percentage(
+                    brightness,
+                ))),
             )
     }
 }

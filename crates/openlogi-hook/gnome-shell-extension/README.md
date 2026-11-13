@@ -15,13 +15,37 @@ animation ends, especially near screen edges ([#1210](https://github.com/AprilNE
 Other windows retain their normal animation policy; disabling the extension
 restores GNOME's original policy. The global animation setting is never changed.
 
-No titles, window contents, or input are read, and the extension adds no UI.
+It also remembers where the user left the main settings window and the Flow
+Indicator card: GNOME does not let an ordinary Wayland client position its own
+toplevel, so the shell moves the two windows to the saved geometry after they
+open, saves the geometry the user leaves them at, and lifts the card when
+`flow_indicator_display_mode = "topmost"` or the card is pinned. A pinned card
+also gives keyboard focus back to the window the user came from and re-checks
+the pointer's input region: Mutter keeps routing clicks inside a focused
+window's old frame to it even after the card's input region has shrunk to the
+pin, and only re-picks the actor under the pointer when it leaves and re-enters
+the surface. The extension warps the pointer just outside the card's frame and
+straight back, so the click-through works without recreating the card. That
+state lives in
+`~/.config/openlogi/gnome-window-state.json`; the card's first enable seeds its
+position from the app's `flow-indicator.toml`, and the main window is only
+placed after the user moves it once.
+
+No window contents or input are read. The extension reads the window class and
+the two OpenLogi windows' frame geometry, and the OpenLogi windows' titles only
+for a diagnostic log line; `config.toml` supplies the card's display mode and
+`flow-indicator.toml` its position and pinned state. The first
+`org.openlogi.openlogi` window is the settings app's main window; later windows
+with that id (the Settings sub-windows) are left alone. It adds no UI.
 
 ## D-Bus surface
 
 - name: `org.openlogi.Frontmost`
 - path: `/org/openlogi/Frontmost`
 - method: `GetFocusedWmClass() -> s` (empty string when nothing is focused)
+- method: `RepickPointer(nudge: b)` (live diagnostic for the pinned card's
+  pointer focus; `true` warps outside the card and back, `false` warps to the
+  current position)
 - signal: `FocusedWmClassChanged(s)` (emitted on each GNOME focus change)
 
 ## Install
@@ -30,11 +54,11 @@ No titles, window contents, or input are read, and the extension adds no UI.
 UUID=openlogi-frontmost@openlogi.dev
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 mkdir -p "$DEST"
-cp metadata.json extension.js ringAnimation.js "$DEST"/
+cp metadata.json extension.js ringAnimation.js windowState.js windowStatePolicy.js "$DEST"/
 ```
 
 On Wayland the shell cannot be reloaded in place, so **log out and back in** to
-let GNOME pick up the newly added extension, then enable it:
+let GNOME pick up the newly added or updated extension, then enable it:
 
 ```sh
 gnome-extensions enable "$UUID"
@@ -70,10 +94,18 @@ enough inward to keep the ring visible. Hover and click a slot to verify its
 hit target matches the drawing. Ordinary application windows should still
 animate. Disable the extension to verify that its animation override is removed.
 
+Pin the Flow Indicator card and focus another window before that. Focus must go
+back to the other window (query `GetFocusedWmClass`, or type in it), and clicks
+on the transparent card must reach the window underneath immediately; the card
+must not take a click that is outside the pin. If a click is still swallowed,
+call `RepickPointer(true)` over D-Bus and try again; a re-pick that works should
+leave the card's pixels untouched.
+
 The animation-policy regression tests need Node.js 22 or newer and no running shell:
 
 ```sh
 node --test crates/openlogi-hook/gnome-shell-extension/tests/ringAnimation.test.mjs
+node --test crates/openlogi-hook/gnome-shell-extension/tests/windowState.test.mjs
 ```
 
 Run that command from the repository root. It does not replace the live GNOME

@@ -9,7 +9,7 @@
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FontWeight, Hsla, IntoElement,
     ParentElement, Render, Size, Styled, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, div, px, svg,
+    WindowDecorations, WindowHandle, WindowKind, WindowOptions, div, px, svg,
 };
 use openlogi_core::device::LockKey;
 use openlogi_ipc::LockKeyChange;
@@ -97,8 +97,13 @@ pub(crate) fn present(cx: &mut App, shown: Option<LockKeyChange>) {
     };
     if open.is_empty() {
         let options = window_options(cx);
-        if let Err(error) = cx.open_window(options, |_, cx| cx.new(|_| LockKeyView { change })) {
-            warn!(%error, "could not open the lock-key indicator window");
+        match cx.open_window(options, |_, cx| cx.new(|_| LockKeyView { change })) {
+            Ok(handle) => {
+                let _ = handle.update(cx, |_, window, _| {
+                    window.set_window_title("OpenLogi Lock Keys");
+                });
+            }
+            Err(error) => warn!(%error, "could not open the lock-key indicator window"),
         }
         return;
     }
@@ -120,6 +125,7 @@ fn window_options(cx: &mut App) -> WindowOptions {
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
+        window_decorations: Some(WindowDecorations::Client),
         window_background: WindowBackgroundAppearance::Transparent,
         app_id: Some("openlogi-lock-key-osd".to_string()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),

@@ -73,7 +73,7 @@ pub fn spawn() {
 /// Only the tray platforms have a deliberate shutdown to hook. Elsewhere the
 /// agent runs until something kills it, and the overlay's own deadline is all
 /// there is.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub fn evict_on_quit() {
     use std::time::Duration;
 

@@ -23,9 +23,12 @@ pub mod color;
 pub mod config;
 pub mod device;
 pub mod device_order;
+pub mod device_source;
 pub mod diagnostics;
 pub mod env;
 pub mod hid;
+#[cfg(feature = "fs")]
+pub mod last_known;
 #[cfg(feature = "locale")]
 pub mod locale;
 #[cfg(feature = "logging")]

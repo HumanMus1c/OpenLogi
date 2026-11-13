@@ -124,6 +124,37 @@ optional physical device key.
   clicked. With the setting off the agent posts no notice, but it still notes
   when a device charges, so the next discharge is announced once the setting
   is back on. A notice already on screen still closes on its own.
+- `tray_battery` (default `true`): the tray shows a battery readout — the
+  device the agent would read out in its tooltip and a disabled row per device
+  in the menu. The values use the same `needs_attention` thresholds and status
+  words as the settings app, and the readout renders the inventory the agent
+  already polls rather than triggering a HID read. Off restores the static
+  brand icon and the plain Show/Quit menu; the change applies on the next
+  config reload. Windows uses the notification area, macOS the menu-bar item,
+  and Linux a StatusNotifierItem (visible only where the desktop runs an SNI
+  host).
+- `tray_badge_style` (default `"circle"`): the shape of the tray badge.
+  `"circle"` draws the disc inscribed in the system's icon slot;
+  `"rounded_square"` draws a full-bleed rounded square that carries the same
+  visual weight as the square-ish icons around it. `"wide"` is a Linux-only
+  face showing the device name and its value: GNOME's AppIndicator extension
+  paints it as a text label beside the circle badge (that extension shows no
+  hover tooltip), XFCE keeps the circle badge because its systray scales every
+  item into the panel's icon slot, and other desktops render one wide pixmap
+  whose legibility depends on the host. It is set from this file only
+  (Settings offers the two square styles). Windows keeps the circle badge for
+  it; macOS shows a text title.
+- `flow_indicator` (default `true`): a floating card listing the devices the
+  agent has detected, their battery percentages, and charging state. It lives
+  in the overlay process, so it stays available with the settings window
+  closed. `flow_indicator_show_offline` (default `true`) keeps a sleeping
+  device's last known reading with an Offline marker;
+  `flow_indicator_max_devices` (default `3`, valid `1`–`5`, out-of-range values
+  clamp) limits the rows; `flow_indicator_display_mode` is `normal` (default)
+  or `topmost`. The card follows the OS light/dark appearance, does not take
+  focus, and hides when disabled or when no device has a reading. The card can
+  be dragged and remembers its position in `flow-indicator.toml` beside
+  `config.toml`.
 - `lock_key_notifications` (default `true`): when a keyboard with the HID++
   `LockKeyState` feature (`0x4220`) reports Caps Lock turning on or off, the
   agent shows an indicator in the centre of the screen for 1.5 seconds. On

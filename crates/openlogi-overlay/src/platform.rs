@@ -6,11 +6,74 @@ mod placement;
 // Keep Windows geometry tests runnable on the host; only native.rs needs Win32.
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+/// The card's own X11 window positioning: GPUI exposes no way to move a
+/// window, and no window manager moves an override-redirect one.
+#[cfg(target_os = "linux")]
+pub(crate) mod x11;
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) use placement::{NoticePlacement, RingPlacement};
 #[cfg(target_os = "windows")]
-pub(crate) use windows::{NoticePlacement, RingPlacement};
+pub(crate) use windows::{
+    MonitorInfo, NoticePlacement, RingPlacement, card_dpi_mismatch, card_needs_raise,
+    card_physical_placement, card_target, monitor_layout, place_card_visible,
+    set_card_layout_scale, take_card_user_moved, topology_changed,
+};
+
+/// Take the card's window off the screen without destroying it.
+///
+/// Windows hides the window natively: a shrunk one still shows, because GPUI
+/// creates pop-ups as `WS_OVERLAPPED`, Windows clamps them to the frame
+/// minimum and DWM keeps drawing the frame and its shadow.
+#[cfg(target_os = "windows")]
+pub(crate) fn hide_card(window: &mut gpui::Window) {
+    windows::set_card_visible(window, false);
+}
+
+/// Bring a natively hidden card back without activating its window.
+#[cfg(target_os = "windows")]
+pub(crate) fn show_card(window: &mut gpui::Window) {
+    windows::set_card_visible(window, true);
+}
+
+/// Shrink the card to a transparent 1x1: on Wayland that is the only way to
+/// keep the placement a compositor chose while the card is hidden.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn hide_card(window: &mut gpui::Window) {
+    window.resize(gpui::size(gpui::px(1.0), gpui::px(1.0)));
+}
+
+/// The 1x1 window only needs resizing back when the card returns.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn show_card(_window: &mut gpui::Window) {}
+
+/// Drop the Win32 frame from the card's window: GPUI leaves a captioned frame
+/// on its pop-ups, and Windows 11 paints a border, rounded corners and a
+/// backdrop around the transparent client area — a second, larger frame
+/// around the card.
+#[cfg(target_os = "windows")]
+pub(crate) fn make_card_frameless(window: &gpui::Window) {
+    windows::make_card_frameless(window);
+}
+
+/// Keep the card's window from taking the foreground when clicked.
+#[cfg(target_os = "windows")]
+pub(crate) fn make_card_nonactivating(window: &gpui::Window) {
+    windows::make_card_nonactivating(window);
+}
+
+/// Move the card by a logical offset without resizing or activating it.
+#[cfg(target_os = "windows")]
+pub(crate) fn move_card_by(window: &gpui::Window, delta: gpui::Point<gpui::Pixels>) {
+    windows::move_card_by(window, delta);
+}
+
+/// Let the pinned card's mouse fall through except over its pin button; see
+/// [`windows::set_card_click_through`].
+#[cfg(target_os = "windows")]
+pub(crate) fn set_card_click_through(window: &gpui::Window, pinned: bool) {
+    windows::set_card_click_through(window, pinned);
+}
 
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -92,6 +155,44 @@ const fn refused_for_good(_error: &anyhow::Error) -> bool {
 #[cfg(target_os = "linux")]
 pub(crate) fn layer_shell_refused() -> bool {
     LAYER_SHELL_REFUSED.load(Ordering::Relaxed)
+}
+
+/// Wait for the session's Wayland socket before GPUI connects.
+///
+/// The agent starts this helper at session start, and at login the helper can
+/// win the race against the compositor: GPUI's Wayland client then panics with
+/// `NoCompositor` (exit 101) and the supervisor only retries after a delay.
+/// Waiting for the socket keeps the first start alive; X11 has no equivalent
+/// wait because its client retries on its own.
+#[cfg(target_os = "linux")]
+pub(crate) fn await_compositor() {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    let (Some(display), Some(runtime)) = (
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+    ) else {
+        return;
+    };
+    let display = PathBuf::from(display);
+    let socket = if display.is_absolute() {
+        display
+    } else {
+        PathBuf::from(runtime).join(display)
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if socket.exists() {
+        tracing::info!(socket = %socket.display(), "compositor socket is up");
+    } else {
+        tracing::warn!(
+            socket = %socket.display(),
+            "compositor socket did not appear; GPUI will try anyway"
+        );
+    }
 }
 
 /// Keep the overlay out of the Dock and app switcher.

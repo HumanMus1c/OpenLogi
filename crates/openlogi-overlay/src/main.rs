@@ -16,7 +16,9 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
+mod appearance;
 mod backlight;
+mod flow_indicator;
 mod ipc;
 mod lock_key;
 mod notice;
@@ -30,8 +32,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use gpui::AppContext as _;
-use tracing::{debug, warn};
+use gpui::{AppContext as _, AssetSource, SharedString};
+use std::borrow::Cow;
+use tracing::{debug, info, warn};
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
@@ -45,6 +48,36 @@ use crate::session::{
     spawn_click_away_dismissal,
 };
 
+/// The overlay's asset source: the shared action glyphs, plus the Flow
+/// Indicator's generated shadow — the view rebuilds that SVG under a
+/// content-hashed path and hands the bytes over when GPUI asks for it.
+struct OverlayAssets;
+
+impl AssetSource for OverlayAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if flow_indicator::is_shadow_asset(path)
+            && let Some(svg) = flow_indicator::take_shadow_asset(path)
+        {
+            return Ok(Some(Cow::Owned(svg.into_bytes())));
+        }
+        openlogi_ui::action_icons::ActionIcons.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        openlogi_ui::action_icons::ActionIcons.list(path)
+    }
+}
+
+/// An observation's language overrides the panel language only when it names
+/// one. A "nothing to show" notice or lock-key observation carries `None`,
+/// meaning "no content", not "reset the shared catalog to this helper
+/// process's system locale"; the config poll owns the panel language.
+fn apply_observed_language(language: Option<&str>) {
+    if let Some(language) = language {
+        openlogi_core::locale::activate(Some(language));
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the overlay bootstraps its independent IPC observation tasks"
@@ -53,22 +86,36 @@ fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
 
     openlogi_core::locale::activate(None);
+    // The panel's language, not this helper's system locale: the card, ring,
+    // and notices all share one catalog, so settle it before any window opens.
+    if let Some((settings, _)) = flow_indicator::load_settings() {
+        openlogi_core::locale::activate(settings.language.as_deref());
+    }
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
+    // Started before the window loop: at login the settings portal can appear
+    // seconds after us, and the regular card must already know the mode when
+    // it opens.
+    let appearance = appearance::Appearance::start();
     let ipc::Handle {
         mut invocations,
         mut backlights,
         mut notices,
         mut lock_keys,
+        mut state,
+        mut flow_pinned,
+        flow_pin_reports,
         commands,
     } = ipc::spawn();
 
+    #[cfg(target_os = "linux")]
+    platform::await_compositor();
     // GPUI 0.3.4 never releases a window's AccessKit adapter, and the adapter
     // keeps the window's view, renderer and Metal surfaces alive, so every
     // ring the overlay opened stayed in memory (#1741). The ring exposes no
     // accessibility roles, so the overlay runs without AccessKit.
     let mut app = gpui::Application::new_inaccessible(gpui_platform::current_platform(false))
-        .with_assets(openlogi_ui::action_icons::ActionIcons);
+        .with_assets(OverlayAssets);
     // Application construction establishes GPUI's NSApplication subclass.
     // Asking AppKit for its singleton sooner creates a plain NSApplication,
     // which lacks the `platform` ivar GPUI needs. Set Accessory policy now:
@@ -87,9 +134,117 @@ fn main() -> Result<()> {
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         let shelf = Rc::new(RefCell::new(NoticeShelf::default()));
+        let (flow_commands, mut flow_command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let observation_commands = flow_commands.clone();
+        cx.spawn(async move |_cx| {
+            while let Some(observation) = state.recv().await {
+                if observation_commands
+                    .send(flow_indicator::Command::Observation(
+                        observation.map(Box::new),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let flow_pin_commands = flow_commands.clone();
+        cx.spawn(async move |_cx| {
+            while let Some(observed) = flow_pinned.recv().await {
+                if flow_pin_commands
+                    .send(flow_indicator::Command::FlowPinned(observed.pinned))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // Live settings and theme: a stat and two atomics every 200 ms cost
+        // nothing next to the panel's own repaint, and they close most of the
+        // delay the card used to show when the settings app switched themes.
+        // The desktop mode is watched here too, since the portal signal only
+        // moves a revision the owner has to be told to read.
+        let settings_commands = flow_commands.clone();
+        let watched_appearance = Arc::clone(&appearance);
+        cx.spawn(async move |cx| {
+            let mut stamp = flow_indicator::config_stamp();
+            let mut revision = watched_appearance.revision();
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                let now = flow_indicator::config_stamp();
+                if now != stamp {
+                    stamp = now;
+                    if let Some((settings, config)) = flow_indicator::load_settings() {
+                        openlogi_core::locale::activate(settings.language.as_deref());
+                        if settings_commands
+                            .send(flow_indicator::Command::Settings(Box::new((
+                                settings, config,
+                            ))))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                let current = watched_appearance.revision();
+                if current != revision {
+                    revision = current;
+                    if settings_commands
+                        .send(flow_indicator::Command::Tick)
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+        // The once-a-second tick owns the window-side settles and saving the
+        // dragged position; neither needs the theme poll's cadence.
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if flow_commands.send(flow_indicator::Command::Tick).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            let (settings, config) = flow_indicator::load_settings().unwrap_or_default();
+            // The card follows the panel's language, not this helper process's
+            // own system locale (which can differ when launched from a shell).
+            openlogi_core::locale::activate(settings.language.as_deref());
+            info!(enabled = settings.enabled, "flow indicator settings loaded");
+            let mut indicator = flow_indicator::FlowIndicator::new(
+                settings,
+                Some(config),
+                appearance,
+                flow_indicator::load_pinned(),
+                flow_pin_reports,
+            );
+            while let Some(command) = flow_command_rx.recv().await {
+                // The card opens through GPUI, which refuses a window while
+                // the overlay is headless; Windows starts headless and only
+                // connects when something shows, so that connection belongs
+                // before the command that may open the card.
+                let needs_display = indicator.needs_display();
+                if needs_display && let Err(error) = cx.update(windowing::connect).await {
+                    warn!(%error, "could not connect to the display for the Flow Indicator card");
+                }
+                cx.update(|cx| indicator.handle(command, cx));
+            }
+        })
+        .detach();
         cx.spawn(async move |cx| {
             while let Some(observed) = notices.recv().await {
-                openlogi_core::locale::activate(observed.language.as_deref());
+                apply_observed_language(observed.language.as_deref());
                 // Connect before the shelf records the list as shown, so a
                 // list that could not be shown is still new the next time.
                 if !observed.notices.is_empty()
@@ -109,7 +264,7 @@ fn main() -> Result<()> {
             // The agent's timer is the indicator's only clock: it reports
             // nothing showing when the time is up, or when it is gone.
             while let Some(observed) = lock_keys.recv().await {
-                openlogi_core::locale::activate(observed.language.as_deref());
+                apply_observed_language(observed.language.as_deref());
                 if observed.shown.is_some()
                     && let Err(error) = cx.update(windowing::connect).await
                 {
@@ -129,7 +284,7 @@ fn main() -> Result<()> {
                     cx.update(close_all_ring_windows);
                     continue;
                 };
-                openlogi_core::locale::activate(invocation.language.as_deref());
+                apply_observed_language(invocation.language.as_deref());
                 if let Err(error) = cx.update(windowing::connect).await {
                     warn!(%error, "could not connect to the display for the Actions Ring");
                     let _ = commands.send(OverlayCommand::Cancel {
@@ -186,6 +341,7 @@ fn main() -> Result<()> {
                     };
                     if let Err(error) = primary
                         .update(cx, |_, window, cx| {
+                            window.set_window_title("OpenLogi Actions Ring");
                             // Native placement resizes the window inside this
                             // update, where GPUI's own resize/move callbacks
                             // cannot borrow the app. Resync its viewport and
@@ -249,7 +405,13 @@ fn main() -> Result<()> {
                         let opened = cx.open_window(options, |_, cx| {
                             cx.new(|_| BacklightView::new(observation.clone()))
                         });
-                        debug!(success = opened.is_ok(), "backlight window opened");
+                        let success = opened.is_ok();
+                        if let Ok(handle) = opened {
+                            let _ = handle.update(cx, |_, window, _| {
+                                window.set_window_title("OpenLogi Backlight");
+                            });
+                        }
+                        debug!(success, "backlight window opened");
                     }
                 });
             }

@@ -224,6 +224,10 @@ fn request_variant_order() {
         },
         "1902",
     );
+    // Appended after every v46 method; 58 is its declaration index.
+    assert_wire(&AgentRequest::RequestShutdown {}, "3a");
+    assert_wire(&AgentRequest::ObserveFlowPinned { since: 7 }, "3b07");
+    assert_wire(&AgentRequest::ReportFlowPinned { pinned: true }, "3c01");
 }
 
 #[test]
