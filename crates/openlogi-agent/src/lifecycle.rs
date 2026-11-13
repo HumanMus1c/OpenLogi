@@ -230,7 +230,9 @@ impl Wanted {
             ..
         } = self.0;
         #[cfg(target_os = "macos")]
-        let _ = armed_tx.send(());
+        {
+            let _ = armed_tx.send(());
+        }
         #[cfg(target_os = "macos")]
         armed_session::record();
         overlay::spawn();
@@ -245,6 +247,8 @@ impl Wanted {
             inputs,
             backlight_overlay,
             ring_haptics,
+            #[cfg(target_os = "macos")]
+                server: _,
             demand,
         } = core;
         observable.set_virtual_keyboard(virtual_keyboard.status());
@@ -356,6 +360,13 @@ impl Armed {
                             .lock()
                             .await
                             .turn_keypad_page(device_key.as_deref(), turn);
+                    }
+                    ActionRequest::SwitchHost { device_key, slot } => {
+                        running
+                            .orchestrator
+                            .lock()
+                            .await
+                            .switch_host_for_action(device_key.as_deref(), slot);
                     }
                     ActionRequest::SettingsWritten { route } => {
                         running

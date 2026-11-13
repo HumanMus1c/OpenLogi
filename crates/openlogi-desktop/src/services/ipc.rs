@@ -1411,6 +1411,7 @@ mod tests {
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
             flow: openlogi_ipc::FlowStatus::default(),
+            config_revision: openlogi_core::config::ConfigRevision::default(),
         }
     }
 

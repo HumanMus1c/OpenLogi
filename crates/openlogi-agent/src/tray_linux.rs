@@ -377,8 +377,10 @@ impl Tray for OpenLogiTray {
             CheckmarkItem {
                 label: rust_i18n::t!("flow_indicator.floating_indicator").to_string(),
                 checked: crate::tray_setting::flow_indicator_enabled(),
-                activate: Box::new(|_| {
-                    let _ = crate::tray_setting::toggle_flow_indicator();
+                activate: Box::new(|tray: &mut Self| {
+                    if let Some(revision) = crate::tray_setting::toggle_flow_indicator() {
+                        tray.observable.set_config_revision(revision);
+                    }
                 }),
                 ..CheckmarkItem::default()
             }

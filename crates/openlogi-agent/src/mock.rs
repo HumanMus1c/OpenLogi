@@ -1166,6 +1166,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         foreground: state.foreground(),
         lights: state.observed_lights(),
         flow: state.flow.status(),
+        config_revision: openlogi_core::config::ConfigRevision::default(),
     }
 }
 

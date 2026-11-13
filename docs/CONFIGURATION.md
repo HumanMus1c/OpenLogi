@@ -31,6 +31,17 @@ refused rather than overwriting the external edit. Relaunch to load that
 revision. Opening the GUI also tells the resident agent to reload the current
 file, so hand edits and runtime behavior converge immediately.
 
+On macOS, a change made from the menu-bar menu is saved by the agent, the way
+`openlogi api --save` saves: an online device takes the change first, so a
+value it refuses is never saved, and the file is saved only while it is still
+at the revision the agent read. When another writer saved in between, nothing
+is saved and the device's submenu says so; choose the change again. The agent
+then reloads the file, and an open GUI picks up the change without a relaunch.
+A sleeping mouse's DPI preset and wheel mode, and whether OpenLogi manages a
+device, are saved and applied when the device reconnects; the other menu
+controls need the device online. The backlight and sidetone stay on the device
+and are not saved.
+
 Schema versions newer than the running build are rejected before their fields
 are parsed. v1 binding maps and the v2–v3 gesture-owner layout migrate on load.
 The v3 physical-device-key transition cannot safely assign older model-scoped
@@ -550,6 +561,32 @@ and the mouse reconnects at its saved speed, or at the speed for none saved.
 After an agent restart, precision mode is off. A mouse with a saved speed gets
 that speed when the agent connects to it. A mouse without one keeps the
 slowest speed until precision mode is switched on and off again.
+
+`EasySwitchChannel1`, `EasySwitchChannel2` and `EasySwitchChannel3` (shown as
+**Easy-Switch Channel 1** to **3** in the action list) move a device to one of
+its Easy-Switch channels, as its own channel key does (HID++ `0x1814`). Bind
+one to a mouse button, a keyboard control or an Actions Ring slot; the device
+that fires it is the one that moves.
+
+- The device disconnects from this computer once the request is out, and
+  returns when its own channel key is pressed. A channel with no paired
+  computer is refused before anything is sent, but only on a device that
+  reports its channels (HID++ `0x1815`). A device with `0x1814` alone, such
+  as the MX Master 3, cannot be checked: the request is sent to whatever the
+  channel holds.
+- A keyboard with `host_switch_targets`, or a device listed there, moves with
+  the rest of its link, as when the keyboard's own host key is pressed. The
+  channel number is then the keyboard's: Channel 2 on the mouse moves the
+  keyboard to its channel 2, and the mouse to the slot for the same computer.
+- A function key (F1–F12) binds across every keyboard, so the agent cannot tell
+  which keyboard pressed it. The editor does not offer these actions there, and
+  the agent passes such a key through if a hand edit binds one.
+- A button that the OS input hook delivers, rather than HID++ diversion, names
+  no device. Its bindings belong to the selected device, so the action moves
+  the selected one.
+- If the device's receiver slot is paired to another device before the request
+  runs, the request is refused.
+
 Payload actions use a one-key inline table:
 
 ```toml

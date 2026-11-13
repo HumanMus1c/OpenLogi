@@ -1,16 +1,17 @@
 //! App settings a tray can toggle without the settings app.
 //!
-//! The tray writes the same `config.toml` the GUI owns, so a save uses the
-//! tracked [`ConfigFile`] and retries when the GUI wins the file between the
-//! read and the write. The overlay polls the file; the GUI detects the new
-//! revision and adopts it through its external-config reconciliation.
+//! The tray writes the same `config.toml` the GUI owns, through the shared
+//! [`ConfigEdit`] owner. After a save it publishes the new revision to the
+//! observable state, so the GUI's `saved_elsewhere` path adopts the change and
+//! asks the agent to reload it. The overlay polls the file directly.
 
 use std::io;
+use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use openlogi_core::config::{Config, ConfigError, ConfigFile};
+use openlogi_core::config::{Config, ConfigEdit, ConfigError, ConfigRevision};
 use tracing::{info, warn};
 
 /// How many times a save retries when another writer wins the file.
@@ -39,39 +40,38 @@ pub(crate) fn flow_indicator_enabled() -> bool {
     flow_indicator().load(Ordering::Relaxed)
 }
 
-/// Toggle the persisted `[app_settings].flow_indicator` and return the new
-/// value. A failed save leaves the old value in place.
-pub(crate) fn toggle_flow_indicator() -> bool {
+/// Toggle the persisted `[app_settings].flow_indicator`, returning the new
+/// revision when the file changed. A failed save leaves the old value in
+/// place.
+pub(crate) fn toggle_flow_indicator() -> Option<ConfigRevision> {
     let enabled = !flow_indicator_enabled();
     match save_flow_indicator(enabled) {
-        Ok(()) => {
+        Ok(revision) => {
             flow_indicator().store(enabled, Ordering::Relaxed);
             info!(enabled, "flow indicator setting changed from the tray");
-            enabled
+            revision
         }
         Err(error) => {
             warn!(%error, "could not save the flow indicator setting");
-            flow_indicator_enabled()
+            None
         }
     }
 }
 
-fn save_flow_indicator(enabled: bool) -> Result<(), String> {
-    save_flow_indicator_with(ConfigFile::load_or_default, enabled)
+fn save_flow_indicator(enabled: bool) -> Result<Option<ConfigRevision>, String> {
+    let path = openlogi_core::paths::config_path().map_err(|error| error.to_string())?;
+    save_flow_indicator_at(&path, enabled)
 }
 
-fn save_flow_indicator_with(
-    load: impl Fn() -> Result<(Config, ConfigFile), ConfigError>,
-    enabled: bool,
-) -> Result<(), String> {
+fn save_flow_indicator_at(path: &Path, enabled: bool) -> Result<Option<ConfigRevision>, String> {
     for attempt in 0..SAVE_ATTEMPTS {
-        let (mut config, mut file) = load().map_err(|error| error.to_string())?;
-        if config.app_settings.flow_indicator == enabled {
-            return Ok(());
+        let mut edit = ConfigEdit::load(path).map_err(|error| error.to_string())?;
+        if edit.config().app_settings.flow_indicator == enabled {
+            return Ok(None);
         }
-        config.app_settings.flow_indicator = enabled;
-        match file.save(&config) {
-            Ok(()) => return Ok(()),
+        edit.config_mut().app_settings.flow_indicator = enabled;
+        match edit.commit() {
+            Ok(revision) => return Ok(Some(revision)),
             Err(ConfigError::Conflict { .. }) if attempt + 1 < SAVE_ATTEMPTS => {
                 // The GUI saved between our read and write. Re-read and apply
                 // the toggle to the newer file.
@@ -96,10 +96,10 @@ mod tests {
     fn the_setting_is_persisted_and_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
-        let (config, mut file) = ConfigFile::load_from_path(&path).unwrap();
-        file.save(&config).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
-        save_flow_indicator_with(|| ConfigFile::load_from_path(&path), false).unwrap();
+        let revision = save_flow_indicator_at(&path, false).unwrap();
+        assert!(revision.is_some());
         assert!(
             !Config::load_from_path(&path)
                 .unwrap()
@@ -108,12 +108,7 @@ mod tests {
         );
 
         // Saving the value already on disk is a no-op.
-        save_flow_indicator_with(|| ConfigFile::load_from_path(&path), false).unwrap();
-        assert!(
-            !Config::load_from_path(&path)
-                .unwrap()
-                .app_settings
-                .flow_indicator
-        );
+        let no_change = save_flow_indicator_at(&path, false).unwrap();
+        assert!(no_change.is_none());
     }
 }

@@ -45,6 +45,9 @@ pub(super) struct ConfigState {
     persisted: Config,
     persistence: ConfigPersistence,
     issue: Option<ConfigIssue>,
+    /// The revision of `config.toml` the agent last reported it loaded, or
+    /// `None` before its first report.
+    agent_revision: Option<ConfigRevision>,
 }
 
 impl ConfigState {
@@ -59,6 +62,7 @@ impl ConfigState {
             persisted,
             persistence,
             issue,
+            agent_revision: None,
         }
     }
 
@@ -82,15 +86,32 @@ impl ConfigState {
         }
     }
 
-    /// Whether `config.toml` changed since this handle loaded or last saved
-    /// it. The tray can save `[app_settings]` while the GUI runs.
-    pub(super) fn external_revision_changed(&self) -> bool {
+    /// Whether another writer saved `config.toml` since this process last
+    /// loaded or saved it, asked when the agent reports it loaded the file
+    /// at `reported`.
+    ///
+    /// The report only says when to look. A report the agent made before,
+    /// or of this process's own revision, needs no look. Any other is read
+    /// from the file, which answers: the agent may only be behind, still at
+    /// an earlier save of this process, and then the file is unchanged. A
+    /// report whose file could not be read is looked at again with the next.
+    pub(super) fn saved_elsewhere(&mut self, reported: ConfigRevision) -> bool {
+        if self.agent_revision == Some(reported) || reported == self.revision() {
+            self.agent_revision = Some(reported);
+            return false;
+        }
         let ConfigPersistence::UserFile(file) = &self.persistence else {
             return false;
         };
         match file.reload() {
-            Ok((_, fresh)) => fresh.revision() != file.revision(),
-            Err(_) => false,
+            Ok((_, on_disk)) => {
+                self.agent_revision = Some(reported);
+                on_disk.revision() != file.revision()
+            }
+            Err(error) => {
+                warn!(%error, "could not read config.toml the agent reloaded");
+                false
+            }
         }
     }
 
@@ -194,27 +215,5 @@ impl Deref for ConfigState {
 
     fn deref(&self) -> &Self::Target {
         &self.current
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_external_save_is_detected_and_refreshed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
-        let (config, mut file) = ConfigFile::load_from_path(&path).unwrap();
-        file.save(&config).unwrap();
-
-        let state = ConfigState::new(config.clone(), ConfigPersistence::UserFile(file));
-        assert!(!state.external_revision_changed());
-
-        let mut external = config;
-        external.app_settings.flow_indicator = false;
-        external.save_to_path(&path).unwrap();
-
-        assert!(state.external_revision_changed());
     }
 }

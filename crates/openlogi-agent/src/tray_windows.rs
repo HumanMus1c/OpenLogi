@@ -799,7 +799,13 @@ unsafe fn show_menu(hwnd: HWND) {
                 let _ = openlogi_agent::flow_pin::flow_pin().toggle();
             }
             ID_FLOW_INDICATOR => {
-                let _ = crate::tray_setting::toggle_flow_indicator();
+                if let Some(revision) = crate::tray_setting::toggle_flow_indicator() {
+                    OBSERVABLE.with_borrow(|observable| {
+                        if let Some(observable) = observable {
+                            observable.set_config_revision(revision);
+                        }
+                    });
+                }
             }
             ID_QUIT => quit(hwnd),
             _ => {}

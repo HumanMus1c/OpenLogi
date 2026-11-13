@@ -38,6 +38,9 @@ pub(crate) struct Core {
     pub(crate) inputs: InputServices,
     pub(crate) backlight_overlay: BacklightOverlayManager,
     pub(crate) ring_haptics: server::RingHapticPlayer,
+    /// The IPC server, whose device settings the menu-bar item changes too.
+    #[cfg(target_os = "macos")]
+    pub(crate) server: AgentServer,
     /// Client declarations forwarded by the IPC server — the dormancy gate's
     /// demand channel. It buffers, so a declaration that lands before the
     /// gate listens is not lost.
@@ -77,7 +80,7 @@ pub(crate) async fn bootstrap(
         Arc::clone(&observable),
     ));
 
-    let (ring_haptics, demand) = spawn_ipc_server(
+    let (server, demand) = spawn_ipc_server(
         Arc::clone(&orchestrator),
         &shared,
         Arc::clone(&observable),
@@ -94,7 +97,9 @@ pub(crate) async fn bootstrap(
         event_monitor,
         inputs,
         backlight_overlay,
-        ring_haptics,
+        ring_haptics: server.ring_haptics.clone(),
+        #[cfg(target_os = "macos")]
+        server,
         demand,
     })
 }
@@ -113,7 +118,7 @@ fn spawn_ipc_server(
     backlight_overlay: BacklightOverlayManager,
     shutdown_tx: crate::shutdown::ShutdownRequestSender,
 ) -> (
-    server::RingHapticPlayer,
+    AgentServer,
     tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
 ) {
     let (server, demand) = AgentServer::new(
@@ -127,9 +132,8 @@ fn spawn_ipc_server(
         backlight_overlay,
         shutdown_tx,
     );
-    let ring_haptics = server.ring_haptics.clone();
-    tokio::spawn(server::run(server));
-    (ring_haptics, demand)
+    tokio::spawn(server::run(server.clone()));
+    (server, demand)
 }
 
 /// The input-action runtimes — pure in-process workers that touch no device
@@ -224,6 +228,7 @@ pub(crate) fn spawn_hidpp_watchers(
     );
     let host_switch = watchers::host_switch::spawn(
         &shared.host_switch_links,
+        &shared.linked_host_switch,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),

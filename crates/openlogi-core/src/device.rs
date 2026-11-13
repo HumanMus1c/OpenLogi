@@ -526,6 +526,19 @@ pub enum BatteryColor {
 /// The charge at or below which a discharging battery needs attention.
 const LOW_BATTERY_PERCENT: u8 = 20;
 
+/// The charge at or below which a discharging battery is critically low.
+const CRITICAL_BATTERY_PERCENT: u8 = 10;
+
+/// How urgently a battery reading needs the user's attention. See
+/// [`BatteryInfo::attention`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BatteryAttention {
+    /// Low: worth a warning tone and a one-time notice.
+    Low,
+    /// Critically low: also worth a mark on the menu-bar icon.
+    Critical,
+}
+
 impl BatteryInfo {
     /// What this reading can show: a measured percentage, the firmware's
     /// coarse level, or nothing usable yet.
@@ -557,24 +570,19 @@ impl BatteryInfo {
     /// The colour role this reading maps to.
     ///
     /// Status decides first: charging, full, and error readings never carry a
-    /// low-battery tone. A discharging reading is critical only at the
-    /// firmware's [`BatteryLevel::Critical`]; otherwise
-    /// [`Self::needs_attention`] decides between low and normal.
+    /// low-battery tone. A discharging reading takes its tone from
+    /// [`Self::attention`], the one low/critical rule.
     #[must_use]
     pub fn tone(&self) -> BatteryTone {
         match self.status {
             BatteryStatus::Charging | BatteryStatus::ChargingSlow => BatteryTone::Charging,
             BatteryStatus::Error => BatteryTone::Error,
             BatteryStatus::Full => BatteryTone::Full,
-            BatteryStatus::Discharging | BatteryStatus::Unknown => {
-                if self.level == BatteryLevel::Critical {
-                    BatteryTone::Critical
-                } else if self.needs_attention() {
-                    BatteryTone::Low
-                } else {
-                    BatteryTone::Normal
-                }
-            }
+            BatteryStatus::Discharging | BatteryStatus::Unknown => match self.attention() {
+                Some(BatteryAttention::Critical) => BatteryTone::Critical,
+                Some(BatteryAttention::Low) => BatteryTone::Low,
+                None => BatteryTone::Normal,
+            },
         }
     }
 
@@ -651,22 +659,35 @@ impl BatteryInfo {
         )
     }
 
-    /// Whether this reading should draw the user's attention: a discharging
-    /// battery at 20% or less, or, on a device that reports no percentage, at
-    /// the firmware's low or critical level.
     ///
-    /// Every low-battery cue asks this one rule: the settings app's warning
-    /// tone and caption, and the agent's low-battery notice.
+    /// Every battery cue asks this one rule: the settings app's warning tone
+    /// and caption, the agent's low-battery notice, and the menu bar.
     #[must_use]
-    pub fn needs_attention(&self) -> bool {
-        let low = match self.percentage {
-            Some(percentage) => percentage <= LOW_BATTERY_PERCENT,
-            None => matches!(self.level, BatteryLevel::Low | BatteryLevel::Critical),
-        };
-        low && !matches!(
+    pub fn attention(&self) -> Option<BatteryAttention> {
+        if matches!(
             self.status,
             BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-        )
+        ) {
+            return None;
+        }
+        match (self.percentage, self.level) {
+            (Some(percentage), _) if percentage <= CRITICAL_BATTERY_PERCENT => {
+                Some(BatteryAttention::Critical)
+            }
+            (Some(percentage), _) if percentage <= LOW_BATTERY_PERCENT => {
+                Some(BatteryAttention::Low)
+            }
+            (None, BatteryLevel::Critical) => Some(BatteryAttention::Critical),
+            (None, BatteryLevel::Low) => Some(BatteryAttention::Low),
+            _ => None,
+        }
+    }
+
+    /// Whether this reading should draw the user's attention at all — see
+    /// [`Self::attention`].
+    #[must_use]
+    pub fn needs_attention(&self) -> bool {
+        self.attention().is_some()
     }
 }
 
@@ -1123,9 +1144,9 @@ pub struct DeviceInventory {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryColor, BatteryDevice, BatteryInfo, BatteryLevel, BatteryReading, BatteryStage,
-        BatteryStatus, BatteryTone, BatteryValue, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
+        BatteryAttention, BatteryColor, BatteryDevice, BatteryInfo, BatteryLevel, BatteryReading,
+        BatteryStage, BatteryStatus, BatteryTone, BatteryValue, Capabilities, DeviceInventory,
+        DeviceKind, DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
         ModelTransport, PairedDevice, ReceiverInfo, battery_devices, first_battery_readout,
         flow_indicator_rows, prettify_codename,
     };
@@ -1337,7 +1358,12 @@ mod tests {
                 BatteryStatus::Discharging,
                 Critical,
             ),
-            (Some(5), BatteryLevel::Good, BatteryStatus::Discharging, Low),
+            (
+                Some(5),
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+                Critical,
+            ),
             (Some(20), BatteryLevel::Low, BatteryStatus::Discharging, Low),
             (
                 Some(21),
@@ -1353,7 +1379,12 @@ mod tests {
                 BatteryStatus::Discharging,
                 Normal,
             ),
-            (Some(10), BatteryLevel::Good, BatteryStatus::Unknown, Low),
+            (
+                Some(10),
+                BatteryLevel::Good,
+                BatteryStatus::Unknown,
+                Critical,
+            ),
             (Some(21), BatteryLevel::Good, BatteryStatus::Unknown, Normal),
         ];
         for (percentage, level, status, expected) in cases {
@@ -1707,6 +1738,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Alpha", "Zeta"]
         );
+    }
+
+    #[test]
+    fn a_battery_at_ten_percent_or_less_is_critical() {
+        let discharging = |percentage, level| BatteryInfo {
+            percentage,
+            level,
+            status: BatteryStatus::Discharging,
+        };
+        let good = BatteryLevel::Good;
+
+        assert_eq!(
+            discharging(Some(10), good).attention(),
+            Some(BatteryAttention::Critical)
+        );
+        assert_eq!(
+            discharging(Some(11), good).attention(),
+            Some(BatteryAttention::Low)
+        );
+        assert_eq!(
+            discharging(Some(20), good).attention(),
+            Some(BatteryAttention::Low)
+        );
+        assert_eq!(discharging(Some(21), good).attention(), None);
+        // The percentage decides on its own, in both directions.
+        assert_eq!(
+            discharging(Some(15), BatteryLevel::Critical).attention(),
+            Some(BatteryAttention::Low)
+        );
+        assert_eq!(
+            discharging(Some(5), BatteryLevel::Good).attention(),
+            Some(BatteryAttention::Critical)
+        );
+        // Without one, the firmware's level stands in.
+        assert_eq!(
+            discharging(None, BatteryLevel::Critical).attention(),
+            Some(BatteryAttention::Critical)
+        );
+        assert_eq!(
+            discharging(None, BatteryLevel::Low).attention(),
+            Some(BatteryAttention::Low)
+        );
+        let charging = BatteryInfo {
+            status: BatteryStatus::Charging,
+            ..discharging(Some(3), BatteryLevel::Critical)
+        };
+        assert_eq!(charging.attention(), None);
     }
 
     #[test]

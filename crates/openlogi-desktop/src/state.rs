@@ -401,12 +401,23 @@ impl AppState {
 
     fn restore_config_projections(&mut self) {
         self.restore_binding_projections();
-        if let Some(dpi) = self.current_record().and_then(|record| {
-            record
-                .persistent_config_key()
-                .and_then(|key| self.config.devices.get(key))
-                .and_then(|device| device.effective_dpi(&record.route_key))
-        }) {
+        // A DPI the mouse has not answered yet keeps showing; its answer
+        // decides what shows next (`apply_dpi_written`).
+        if let Some(dpi) = self
+            .current_record()
+            .filter(|record| {
+                !self
+                    .pointer
+                    .pending_dpi_writes
+                    .contains_key(&record.device_key())
+            })
+            .and_then(|record| {
+                record
+                    .persistent_config_key()
+                    .and_then(|key| self.config.devices.get(key))
+                    .and_then(|device| device.effective_dpi(&record.route_key))
+            })
+        {
             self.pointer.dpi = dpi;
         }
     }
@@ -440,16 +451,6 @@ impl AppState {
         } else {
             events
         })
-    }
-
-    /// Adopt a `config.toml` another writer saved (the tray's floating
-    /// indicator toggle), then ask the agent to reload that exact revision.
-    /// The existing reconciliation path also refreshes derived projections.
-    pub(crate) fn adopt_external_config(&mut self) -> StateEvents {
-        if !self.config.external_revision_changed() {
-            return StateEvents::none();
-        }
-        self.reconcile_saved_config()
     }
 
     /// Current config failure, shown as a fail-closed whole-window notice.

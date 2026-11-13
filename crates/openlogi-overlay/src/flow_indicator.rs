@@ -33,9 +33,7 @@ use gpui::{
 };
 #[cfg(target_os = "linux")]
 use gpui::{MouseButton, MouseDownEvent, MouseUpEvent};
-use openlogi_core::config::{
-    AppSettings, Config, ConfigFile, FlowIndicatorDisplayMode, battery_devices_named,
-};
+use openlogi_core::config::{AppSettings, Config, FlowIndicatorDisplayMode, battery_devices_named};
 use openlogi_core::device::{
     BatteryColor, BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceInventory,
     DeviceKind, battery_devices, flow_indicator_rows,
@@ -295,8 +293,8 @@ impl From<&AppSettings> for Settings {
 /// Read the widget settings and the device names from the shared config. A
 /// missing or invalid file keeps the caller's last-good values.
 pub(crate) fn load_settings() -> Option<(Settings, Config)> {
-    match ConfigFile::load_or_default() {
-        Ok((config, _)) => Some((Settings::from(&config.app_settings), config)),
+    match Config::load_or_default() {
+        Ok(config) => Some((Settings::from(&config.app_settings), config)),
         Err(error) => {
             warn!(%error, "Flow Indicator: keeping the last-good config");
             None
