@@ -31,6 +31,13 @@ fn main() {
     // unrelated change happens to recompile this crate.
     println!("cargo:rerun-if-changed=../openlogi-ui/locales");
 
+    // GPUI's debug build overflows Windows' default 1 MB main-thread stack
+    // during startup (before the first window paints). Reserve 16 MB of
+    // virtual address space for the GUI; the OS commits it on demand.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rustc-link-arg=/STACK:16777216");
+    }
+
     embed_windows_resources();
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));

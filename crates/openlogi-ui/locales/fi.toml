@@ -1060,3 +1060,16 @@ change_not_reloaded = "Tallennettu, mutta OpenLogi ei ole vielä ottanut sitä k
 camera_in_use = "Käytössä"
 camera_idle = "Ei käytössä"
 open_camera_preview = "Avaa esikatselu…"
+
+[flow_indicator]
+flow_indicator = "Kelluva ilmaisin"
+floating_indicator = "Kelluva ilmaisin"
+floating_indicator_description = "Näyttää pienen kortin havaituista laitteista ja niiden akun tasosta. Se pysyy käytettävissä, vaikka tämä ikkuna on suljettu."
+show_offline = "Näytä offline-laitteet"
+show_offline_description = "Säilyttää lepotilassa olevan laitteen viimeisimmän tunnetun lukeman ja merkitsee sen offline-tilaan."
+max_devices = "Laitteiden enimmäismäärä"
+max_devices_description = "Kuinka monta laiteriviä kortti näyttää, 1–5."
+display_mode = "Näyttötila"
+display_mode_description = "Normaali pysyy muiden ikkunoiden kanssa. Aina päällimmäisenä pysyy niiden yläpuolella, myös koko näytön peleissä."
+mode_normal = "Normaali"
+mode_topmost = "Aina päällimmäisenä"
