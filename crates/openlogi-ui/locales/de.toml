@@ -1060,3 +1060,16 @@ change_not_reloaded = "Gespeichert, aber OpenLogi hat es noch nicht übernommen.
 camera_in_use = "In Verwendung"
 camera_idle = "Nicht in Verwendung"
 open_camera_preview = "Vorschau öffnen…"
+
+[flow_indicator]
+flow_indicator = "Flow-Indikator"
+floating_indicator = "Schwebende Anzeige"
+floating_indicator_description = "Zeigt eine kleine Karte mit erkannten Geräten und ihren Akkuständen. Sie bleibt verfügbar, während dieses Fenster geschlossen ist."
+show_offline = "Offline-Geräte anzeigen"
+show_offline_description = "Behält den letzten bekannten Akkustand eines schlafenden Geräts und markiert es als offline."
+max_devices = "Maximale Geräte"
+max_devices_description = "Wie viele Gerätezeilen die Karte anzeigt, von 1 bis 5."
+display_mode = "Anzeigemodus"
+display_mode_description = "Normal bleibt bei anderen Fenstern. Ganz oben bleibt über ihnen, auch über Vollbildspielen."
+mode_normal = "Normal"
+mode_topmost = "Ganz oben"
