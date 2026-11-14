@@ -278,3 +278,47 @@ fn appearance_resolves_dark_for_every_preference_and_os_mode() {
         );
     }
 }
+
+#[test]
+fn the_flow_indicator_is_opt_in_and_its_controls_default() {
+    let cfg = Config::default();
+    assert!(
+        !cfg.app_settings.flow_indicator,
+        "the floating card must not appear without a user turning it on"
+    );
+    assert!(cfg.app_settings.flow_indicator_show_offline);
+    assert_eq!(cfg.app_settings.flow_indicator_row_limit(), 3);
+    assert_eq!(
+        cfg.app_settings.flow_indicator_display_mode,
+        crate::config::FlowIndicatorDisplayMode::Normal
+    );
+
+    let parsed: Config = toml::from_str("schema_version = 5").expect("a config predating the card");
+    assert!(!parsed.app_settings.flow_indicator);
+    assert!(parsed.app_settings.flow_indicator_show_offline);
+    assert_eq!(parsed.app_settings.flow_indicator_row_limit(), 3);
+}
+
+#[test]
+fn flow_indicator_settings_roundtrip_and_clamp_the_row_limit() {
+    let mut cfg = Config::default();
+    cfg.app_settings.flow_indicator = true;
+    cfg.app_settings.flow_indicator_show_offline = false;
+    cfg.app_settings.flow_indicator_max_devices = 5;
+    cfg.app_settings.flow_indicator_display_mode = crate::config::FlowIndicatorDisplayMode::Topmost;
+
+    let read = write_and_read(&cfg);
+    assert!(read.app_settings.flow_indicator);
+    assert!(!read.app_settings.flow_indicator_show_offline);
+    assert_eq!(read.app_settings.flow_indicator_row_limit(), 5);
+    assert_eq!(
+        read.app_settings.flow_indicator_display_mode,
+        crate::config::FlowIndicatorDisplayMode::Topmost
+    );
+
+    let mut clamped = cfg.clone();
+    clamped.app_settings.flow_indicator_max_devices = 0;
+    assert_eq!(clamped.app_settings.flow_indicator_row_limit(), 1);
+    clamped.app_settings.flow_indicator_max_devices = 9;
+    assert_eq!(clamped.app_settings.flow_indicator_row_limit(), 5);
+}
