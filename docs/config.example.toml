@@ -24,6 +24,12 @@ app_icon = "openlogi"
 # macOS only: Previous / Next Desktop slide like a three-finger swipe (default
 # true); false switches at once.
 animate_desktop_switch = true
+# Floating battery card (Flow Indicator). Off by default; the card reads the
+# inventory the agent already polls and adds no device I/O.
+flow_indicator = false
+flow_indicator_show_offline = true
+flow_indicator_max_devices = 3
+flow_indicator_display_mode = "normal"
 
 # Momentum scrolling for every mouse whose smooth_wheel is on. A device's own
 # momentum_scrolling table overrides it.
