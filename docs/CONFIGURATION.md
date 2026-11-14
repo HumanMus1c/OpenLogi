@@ -138,7 +138,10 @@ optional physical device key.
   other windows; `topmost` keeps it above them, including fullscreen games.
   Windows and Linux apply this to the pop-up; macOS maps it through the window
   kind.
-- The card opens in the bottom-right corner of the primary display's work area.
+- The card opens in the bottom-right corner of the primary display's work area
+  and follows the settings app's `appearance` choice. Its pin button keeps it
+  on top and remembers the choice in `flow-indicator.toml` beside
+  `config.toml`.
 - `lock_key_notifications` (default `true`): when a keyboard with the HID++
   `LockKeyState` feature (`0x4220`) reports Caps Lock turning on or off, the
   agent shows an indicator in the centre of the screen for 1.5 seconds. On

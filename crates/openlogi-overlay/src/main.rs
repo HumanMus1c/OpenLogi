@@ -91,6 +91,7 @@ fn main() -> Result<()> {
         let shelf = Rc::new(RefCell::new(NoticeShelf::default()));
         let (flow_commands, mut flow_command_rx) = tokio::sync::mpsc::unbounded_channel();
         let observation_commands = flow_commands.clone();
+        let view_commands = flow_commands.clone();
         cx.spawn(async move |_cx| {
             while let Some(observation) = state.recv().await {
                 if observation_commands
@@ -111,9 +112,12 @@ fn main() -> Result<()> {
                 let now = flow_indicator::config_stamp();
                 if now != stamp {
                     stamp = now;
-                    if let Some(settings) = flow_indicator::load_settings()
+                    if let Some((settings, config)) = flow_indicator::load_settings()
                         && flow_commands
-                            .send(flow_indicator::Command::Settings(settings))
+                            .send(flow_indicator::Command::Settings {
+                                settings,
+                                config: Some(Box::new(config)),
+                            })
                             .is_err()
                     {
                         break;
@@ -123,9 +127,13 @@ fn main() -> Result<()> {
         })
         .detach();
         cx.spawn(async move |cx| {
-            let mut indicator = flow_indicator::FlowIndicator::new(
-                flow_indicator::load_settings().unwrap_or_default(),
+            let (settings, config) = flow_indicator::load_settings().map_or_else(
+                || (flow_indicator::Settings::default(), None),
+                |(settings, config)| (settings, Some(config)),
             );
+            let pinned = std::rc::Rc::new(std::cell::Cell::new(flow_indicator::load_pinned()));
+            let mut indicator =
+                flow_indicator::FlowIndicator::new(settings, config, pinned, view_commands);
             while let Some(command) = flow_command_rx.recv().await {
                 // Windows starts the overlay headless and GPUI refuses a
                 // window in that mode, so the display connection belongs
