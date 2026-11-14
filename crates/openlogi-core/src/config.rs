@@ -49,7 +49,7 @@ pub use flow::{
     FlowPeer, FlowPeerName, FlowPublicKey, SELF_CHANNEL,
 };
 pub use function_key::FunctionKey;
-pub use identity::canonical_device_key;
+pub use identity::{battery_devices_named, canonical_device_key};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
