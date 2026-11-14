@@ -124,6 +124,21 @@ optional physical device key.
   clicked. With the setting off the agent posts no notice, but it still notes
   when a device charges, so the next discharge is announced once the setting
   is back on. A notice already on screen still closes on its own.
+- `flow_indicator` (default `false`): the overlay shows a small floating card
+  with one row per detected device and its battery reading. The card reads the
+  inventory the agent already polls, never triggers a HID read, and cannot be
+  shown while this is false. The switch lives on the Flow Indicator settings
+  page.
+- `flow_indicator_show_offline` (default `true`): keep a sleeping device in the
+  card with its last known reading, marked Offline. Off hides offline rows.
+- `flow_indicator_max_devices` (default `3`, clamped to 1–5): how many device
+  rows the card shows. Rows sort low battery first, then healthy, charging, and
+  full, with a name tie-break.
+- `flow_indicator_display_mode` (default `normal`): `normal` keeps the card with
+  other windows; `topmost` keeps it above them, including fullscreen games.
+  Windows and Linux apply this to the pop-up; macOS maps it through the window
+  kind.
+- The card opens in the bottom-right corner of the primary display's work area.
 - `lock_key_notifications` (default `true`): when a keyboard with the HID++
   `LockKeyState` feature (`0x4220`) reports Caps Lock turning on or off, the
   agent shows an indicator in the centre of the screen for 1.5 seconds. On

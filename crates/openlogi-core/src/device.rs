@@ -601,6 +601,103 @@ impl BatteryInfo {
     }
 }
 
+/// A device as a battery surface sees it: the identity a row needs, plus the
+/// reading the agent last observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatteryDevice {
+    /// Firmware codename tidied for display. `None` when the device reported
+    /// no usable name; the surface falls back to its kind's localized name.
+    pub name: Option<String>,
+    /// Best-guess classification; surfaces use it for the row glyph.
+    pub kind: DeviceKind,
+    /// Whether the device was reachable at the last enumeration.
+    pub online: bool,
+    /// Last battery reading, `None` when the device reports no battery.
+    pub battery: Option<BatteryInfo>,
+}
+
+impl BatteryDevice {
+    /// Project one paired device onto the facts a battery surface needs.
+    #[must_use]
+    pub fn from_paired(device: &PairedDevice) -> Self {
+        let name = device
+            .codename
+            .as_deref()
+            .map(prettify_codename)
+            .filter(|name| !name.is_empty());
+        Self {
+            name,
+            kind: device.kind,
+            online: device.online,
+            battery: device.battery.clone(),
+        }
+    }
+
+    /// Whether this device can contribute a visible readout. A charging cold
+    /// start shows "Charging" and an error has a word even without a
+    /// percentage; a reading with neither stays out.
+    #[must_use]
+    pub fn has_readout(&self) -> bool {
+        self.battery.as_ref().is_some_and(|battery| {
+            battery.reading() != BatteryReading::NoReading
+                || battery.charging_without_reading()
+                || battery.tone() == BatteryTone::Error
+        })
+    }
+}
+
+/// Every paired device in an inventory snapshot, in inventory order.
+#[must_use]
+pub fn battery_devices(inventory: &[DeviceInventory]) -> Vec<BatteryDevice> {
+    inventory
+        .iter()
+        .flat_map(|inventory| inventory.paired.iter())
+        .map(BatteryDevice::from_paired)
+        .collect()
+}
+
+/// Rows for the floating indicator: devices with something to show, offline
+/// ones only when `show_offline`, sorted low-first and capped at `limit`.
+///
+/// Charging and full devices sort after healthy discharging ones, and readings
+/// with no value sort last. The tie-break is the display name, so a stable
+/// inventory does not reorder equal rows between polls.
+#[must_use]
+pub fn flow_indicator_devices(
+    devices: &[BatteryDevice],
+    show_offline: bool,
+    limit: usize,
+) -> Vec<&BatteryDevice> {
+    let mut rows: Vec<&BatteryDevice> = devices
+        .iter()
+        .filter(|device| device.has_readout() && (device.online || show_offline))
+        .collect();
+    rows.sort_by_key(|device| indicator_sort_key(device));
+    rows.truncate(limit);
+    rows
+}
+
+fn indicator_sort_key(device: &BatteryDevice) -> (u8, u8, bool, String) {
+    let tone = device.battery.as_ref().map(BatteryInfo::tone);
+    let rank = match tone {
+        Some(BatteryTone::Critical | BatteryTone::Low | BatteryTone::Error) => 0,
+        Some(BatteryTone::Normal) => 1,
+        Some(BatteryTone::Charging | BatteryTone::Full) => 2,
+        None => 3,
+    };
+    let fill = device
+        .battery
+        .as_ref()
+        .and_then(BatteryInfo::bar_percentage)
+        .unwrap_or(u8::MAX);
+    (
+        rank,
+        fill,
+        !device.online,
+        device.name.clone().unwrap_or_default(),
+    )
+}
+
 /// Tidy a device name reported over HID++ for display.
 ///
 /// Logitech reports gaming names in ALL CAPS (e.g. `"G513 RGB MECHANICAL
@@ -928,10 +1025,10 @@ pub struct DeviceInventory {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryAttention, BatteryInfo, BatteryLevel, BatteryReading, BatteryStatus, BatteryTone,
-        BatteryValue, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-        LightValueRange, LightValueUnit, LockKey, ModelTransport, PairedDevice, ReceiverInfo,
-        prettify_codename,
+        BatteryAttention, BatteryDevice, BatteryInfo, BatteryLevel, BatteryReading, BatteryStatus,
+        BatteryTone, BatteryValue, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo,
+        DeviceTransports, LightValueRange, LightValueUnit, LockKey, ModelTransport, PairedDevice,
+        ReceiverInfo, battery_devices, flow_indicator_devices, prettify_codename,
     };
 
     #[test]
@@ -1644,6 +1741,155 @@ mod tests {
         assert_eq!(
             bar(Some(0), BatteryLevel::Good, BatteryStatus::Charging),
             None
+        );
+    }
+
+    fn reading(percentage: Option<u8>, level: BatteryLevel) -> BatteryInfo {
+        BatteryInfo {
+            percentage,
+            level,
+            status: BatteryStatus::Discharging,
+        }
+    }
+
+    fn display_device(
+        name: Option<&str>,
+        online: bool,
+        battery: Option<BatteryInfo>,
+    ) -> BatteryDevice {
+        BatteryDevice {
+            name: name.map(str::to_owned),
+            kind: DeviceKind::Mouse,
+            online,
+            battery,
+        }
+    }
+
+    #[test]
+    fn battery_devices_flatten_in_inventory_order_and_prettify_names() {
+        let inventory = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".to_string(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: None,
+            },
+            paired: vec![
+                PairedDevice {
+                    slot: 1,
+                    codename: Some("MX MASTER 3S".to_string()),
+                    wpid: None,
+                    kind: DeviceKind::Mouse,
+                    online: true,
+                    battery: None,
+                    model_info: None,
+                    capabilities: None,
+                    settings_revision: 0,
+                    hidpp10: false,
+                },
+                PairedDevice {
+                    slot: 2,
+                    codename: None,
+                    wpid: None,
+                    kind: DeviceKind::Keyboard,
+                    online: false,
+                    battery: None,
+                    model_info: None,
+                    capabilities: None,
+                    settings_revision: 0,
+                    hidpp10: false,
+                },
+            ],
+        };
+
+        let devices = battery_devices(&[inventory]);
+        assert_eq!(devices[0].name.as_deref(), Some("MX Master 3S"));
+        assert_eq!(devices[1].name, None);
+        assert_eq!(devices[1].kind, DeviceKind::Keyboard);
+    }
+
+    #[test]
+    fn a_charging_cold_start_is_a_battery_readout() {
+        let charging = BatteryInfo {
+            percentage: Some(0),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        assert!(display_device(Some("Charging"), true, Some(charging)).has_readout());
+    }
+
+    #[test]
+    fn flow_indicator_rows_are_low_first_capped_and_filter_offline() {
+        let devices = vec![
+            display_device(
+                Some("Nearly Empty"),
+                true,
+                Some(reading(Some(5), BatteryLevel::Critical)),
+            ),
+            display_device(
+                Some("Offline Low"),
+                false,
+                Some(reading(Some(15), BatteryLevel::Low)),
+            ),
+            display_device(
+                Some("Healthy"),
+                true,
+                Some(reading(Some(87), BatteryLevel::Good)),
+            ),
+            display_device(
+                Some("Charging"),
+                true,
+                Some(BatteryInfo {
+                    percentage: Some(50),
+                    level: BatteryLevel::Good,
+                    status: BatteryStatus::Charging,
+                }),
+            ),
+            display_device(Some("No Battery"), true, None),
+            display_device(Some("Offline Empty"), false, None),
+        ];
+
+        let names = |rows: Vec<&BatteryDevice>| {
+            rows.into_iter()
+                .filter_map(|device| device.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(flow_indicator_devices(&devices, true, 4)),
+            ["Nearly Empty", "Offline Low", "Healthy", "Charging"]
+        );
+        assert_eq!(
+            names(flow_indicator_devices(&devices, false, 4)),
+            ["Nearly Empty", "Healthy", "Charging"]
+        );
+        assert_eq!(
+            names(flow_indicator_devices(&devices, true, 2)),
+            ["Nearly Empty", "Offline Low"]
+        );
+    }
+
+    #[test]
+    fn flow_indicator_rows_break_ties_by_name() {
+        let devices = vec![
+            display_device(
+                Some("Zeta"),
+                true,
+                Some(reading(Some(10), BatteryLevel::Low)),
+            ),
+            display_device(
+                Some("Alpha"),
+                true,
+                Some(reading(Some(10), BatteryLevel::Low)),
+            ),
+        ];
+
+        assert_eq!(
+            flow_indicator_devices(&devices, true, 5)
+                .into_iter()
+                .filter_map(|device| device.name.as_deref())
+                .collect::<Vec<_>>(),
+            ["Alpha", "Zeta"]
         );
     }
 }
