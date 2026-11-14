@@ -20,6 +20,9 @@ openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-ui = { path = "../openlogi-ui" }
 anyhow = { workspace = true }
+atomic-write-file = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 rust-i18n = "4"

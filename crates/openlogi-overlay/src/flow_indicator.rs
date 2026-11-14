@@ -4,24 +4,33 @@
 //! The window is a non-activating pop-up owned by this process, so it survives
 //! the settings window closing. Rows come from the same `Observer::state`
 //! snapshot the GUI reads, and settings from the shared `config.toml` (polled
-//! by mtime).
+//! by mtime). The pin toggle keeps the card on top and is remembered in an
+//! overlay-owned file beside the config.
 
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Bounds, Context, FontWeight, Hsla, IntoElement, ParentElement, Point,
-    Render, SharedString, Size, Styled, Subscription, Window, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point,
-    px, rgb, size, svg,
+    App, AppContext as _, Bounds, ClickEvent, Context, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, div, point, px, rgb, size, svg,
 };
-use openlogi_core::config::{AppSettings, ConfigFile, FlowIndicatorDisplayMode};
+use openlogi_core::config::{
+    AppSettings, Appearance, Config, ConfigFile, FlowIndicatorDisplayMode, battery_devices_named,
+};
 use openlogi_core::device::{
-    BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceKind, battery_devices,
-    flow_indicator_devices,
+    BatteryDevice, BatteryInfo, BatteryTone, BatteryValue, DeviceInventory, DeviceKind,
+    battery_devices, flow_indicator_devices,
 };
 use openlogi_ipc::Observation;
+use openlogi_ui::action_icons::PIN_ICON;
 use openlogi_ui::color::neutral;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 /// Card width at 100% scale.
@@ -29,18 +38,36 @@ const CARD_WIDTH: f32 = 300.0;
 const PADDING_X: f32 = 16.0;
 const PADDING_Y: f32 = 14.0;
 const RADIUS: f32 = 12.0;
-/// One row: the 22 px line, the 9 px gap, and the 6 px bar.
-const ROW_HEIGHT: f32 = 37.0;
-const ROW_GAP: f32 = 16.0;
+/// The header's pin lane, and the gap to the first row.
+const HEADER_LANE: f32 = 20.0;
+const HEADER_GAP: f32 = 6.0;
+const PIN_ICON_SIZE: f32 = 14.0;
+/// The line box is pinned so the card's height arithmetic matches the layout:
+/// GPUI's default line height otherwise makes the last row overflow.
+const LINE_HEIGHT: f32 = 26.0;
 const LINE_GAP: f32 = 9.0;
 const BAR_HEIGHT: f32 = 6.0;
+const ROW_HEIGHT: f32 = LINE_HEIGHT + LINE_GAP + BAR_HEIGHT;
+const ROW_GAP: f32 = 16.0;
 const ICON_SIZE: f32 = 18.0;
 const ICON_LANE: f32 = 22.0;
-const MARGIN: f32 = 24.0;
+const ROW_INNER_GAP: f32 = 8.0;
+const BOLT_SIZE: f32 = 16.0;
+const NAME_TEXT_SIZE: f32 = 16.0;
+const VALUE_TEXT_SIZE: f32 = 16.0;
+/// A minimum trailing lane for the reading, so the name's truncation point
+/// stays stable as `9%`, `99%` and `100%` change width.
+const VALUE_LANE: f32 = 48.0;
+/// Transparent room around the visible card so its box shadow is drawn by the
+/// window instead of being clipped at its edge.
+const SHADOW_MARGIN: f32 = 24.0;
 
 const BOLT_ICON: &str = "action-icons/bolt.svg";
 const MOUSE_ICON: &str = "action-icons/mouse.svg";
 const KEYBOARD_ICON: &str = "action-icons/keyboard.svg";
+const HEADSET_ICON: &str = "action-icons/headset.svg";
+const GAMEPAD_ICON: &str = "action-icons/gamepad-2.svg";
+const CAMERA_ICON: &str = "action-icons/camera.svg";
 const GENERIC_ICON: &str = "action-icons/circle-dot.svg";
 /// WS_EX_TOPMOST's documented value; avoiding a lossy integer cast from the
 /// windows-sys `u32` constant.
@@ -54,6 +81,7 @@ pub(crate) struct Settings {
     pub(crate) show_offline: bool,
     pub(crate) max_devices: usize,
     pub(crate) display_mode: FlowIndicatorDisplayMode,
+    pub(crate) appearance: Appearance,
 }
 
 impl Default for Settings {
@@ -71,15 +99,16 @@ impl From<&AppSettings> for Settings {
             // writes the valid range.
             max_devices: usize::from(settings.flow_indicator_row_limit()),
             display_mode: settings.flow_indicator_display_mode,
+            appearance: settings.appearance,
         }
     }
 }
 
-/// Read the widget settings from the shared config. A missing or invalid file
-/// keeps the caller's last-good settings.
-pub(crate) fn load_settings() -> Option<Settings> {
+/// Read the widget settings and the config its rows take product names from.
+/// A missing or invalid file keeps the caller's last-good settings.
+pub(crate) fn load_settings() -> Option<(Settings, Config)> {
     match ConfigFile::load_or_default() {
-        Ok((config, _)) => Some(Settings::from(&config.app_settings)),
+        Ok((config, _)) => Some((Settings::from(&config.app_settings), config)),
         Err(error) => {
             warn!(%error, "Flow Indicator: keeping the last-good config");
             None
@@ -95,38 +124,93 @@ pub(crate) fn config_stamp() -> Option<SystemTime> {
         .ok()
 }
 
+/// The overlay-owned pin state. It lives in the same file the fork uses for
+/// the card placement, so an existing `pinned` value carries over; the extra
+/// placement keys are ignored here and dropped when the state is rewritten.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SavedState {
+    #[serde(default)]
+    pinned: bool,
+}
+
+fn state_path() -> Option<PathBuf> {
+    openlogi_core::paths::config_dir()
+        .ok()
+        .map(|dir| dir.join("flow-indicator.toml"))
+}
+
+pub(crate) fn load_pinned() -> bool {
+    let Some(path) = state_path() else {
+        return false;
+    };
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    match toml::from_str::<SavedState>(&body) {
+        Ok(saved) => saved.pinned,
+        Err(error) => {
+            warn!(%error, "Flow Indicator: ignoring an unreadable pin state");
+            false
+        }
+    }
+}
+
+fn save_pinned(pinned: bool) {
+    let Some(path) = state_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        warn!(%error, "Flow Indicator: could not create its config directory");
+        return;
+    }
+    let Ok(body) = toml::to_string(&SavedState { pinned }) else {
+        return;
+    };
+    let written = atomic_write_file::AtomicWriteFile::options()
+        .open(&path)
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, body.as_bytes())?;
+            file.commit()
+        });
+    if let Err(error) = written {
+        warn!(%error, "Flow Indicator: could not save its pin state");
+    }
+}
+
 fn card_size(rows: usize) -> Size<gpui::Pixels> {
     let count = u16::try_from(rows).unwrap_or(u16::MAX);
     let rows_height = f32::from(count) * ROW_HEIGHT;
     let gaps = f32::from(count.saturating_sub(1)) * ROW_GAP;
-    size(px(CARD_WIDTH), px(PADDING_Y * 2.0 + rows_height + gaps))
+    size(
+        px(CARD_WIDTH),
+        px(PADDING_Y * 2.0 + HEADER_LANE + HEADER_GAP + rows_height + gaps),
+    )
 }
 
-/// The bottom-right corner of `area`, inside the screen margin.
-fn bottom_right(area: Bounds<gpui::Pixels>, card: Size<gpui::Pixels>) -> Point<gpui::Pixels> {
-    let desired = point(
-        area.origin.x + area.size.width - card.width - px(MARGIN),
-        area.origin.y + area.size.height - card.height - px(MARGIN),
-    );
-    clamp_origin(area, card, desired)
+fn window_size(card: Size<gpui::Pixels>) -> Size<gpui::Pixels> {
+    size(
+        px(f32::from(card.width) + SHADOW_MARGIN * 2.0),
+        px(f32::from(card.height) + SHADOW_MARGIN * 2.0),
+    )
 }
 
-fn clamp_origin(
-    area: Bounds<gpui::Pixels>,
-    card: Size<gpui::Pixels>,
-    origin: Point<gpui::Pixels>,
-) -> Point<gpui::Pixels> {
-    let max = point(
-        (area.right() - card.width).max(area.origin.x),
-        (area.bottom() - card.height).max(area.origin.y),
-    );
-    origin.clamp(&area.origin, &max)
+/// Place the window so the visible card sits in the bottom-right corner with a
+/// `SHADOW_MARGIN` screen margin. The window's own right and bottom edges sit
+/// on the work-area edge, leaving the shadow room inside the window.
+fn window_origin(area: Bounds<gpui::Pixels>, window: Size<gpui::Pixels>) -> Point<gpui::Pixels> {
+    point(
+        (area.right() - window.width).max(area.origin.x),
+        (area.bottom() - window.height).max(area.origin.y),
+    )
 }
 
 fn resolve_origin(cx: &App, card: Size<gpui::Pixels>) -> Point<gpui::Pixels> {
+    let window = window_size(card);
     cx.primary_display().map_or_else(
         || point(px(0.0), px(0.0)),
-        |display| bottom_right(display.visible_bounds(), card),
+        |display| window_origin(display.visible_bounds(), window),
     )
 }
 
@@ -190,7 +274,12 @@ fn kind_icon(kind: DeviceKind) -> &'static str {
     } else if kind.is_keyboard_family() {
         KEYBOARD_ICON
     } else {
-        GENERIC_ICON
+        match kind {
+            DeviceKind::Headset => HEADSET_ICON,
+            DeviceKind::Gamepad | DeviceKind::Joystick => GAMEPAD_ICON,
+            DeviceKind::Camera => CAMERA_ICON,
+            _ => GENERIC_ICON,
+        }
     }
 }
 
@@ -200,28 +289,29 @@ struct Palette {
     muted: Hsla,
     track: Hsla,
     border: Hsla,
+    accent: Hsla,
 }
 
 impl Palette {
-    fn for_appearance(appearance: WindowAppearance) -> Self {
-        if matches!(
-            appearance,
-            WindowAppearance::Dark | WindowAppearance::VibrantDark
-        ) {
+    fn for_dark(dark: bool) -> Self {
+        let accent = rgb(0x3B_82_F6).into();
+        if dark {
             Self {
-                card: neutral(0.10, 0.94),
+                card: neutral(0.10, 0.98),
                 text: rgb(0xF5_F5_F7).into(),
                 muted: rgb(0xA1_A1_A6).into(),
                 track: neutral(1.0, 0.12),
                 border: neutral(1.0, 0.10),
+                accent,
             }
         } else {
             Self {
-                card: neutral(1.0, 0.96),
+                card: neutral(1.0, 0.98),
                 text: rgb(0x1D_1D_1F).into(),
                 muted: rgb(0x6E_6E_73).into(),
                 track: neutral(0.0, 0.08),
                 border: neutral(0.0, 0.12),
+                accent,
             }
         }
     }
@@ -236,24 +326,87 @@ fn tone_color(tone: BatteryTone, pal: &Palette) -> Hsla {
     }
 }
 
-/// What the widget should show: disabled, empty, or a row set.
+/// What the widget should show: a row set, the pin toggle, and the theme.
 struct FlowIndicatorView {
     rows: Vec<Row>,
+    pinned: Rc<Cell<bool>>,
+    appearance: Appearance,
     /// Repaints when the platform's light/dark appearance changes.
     appearance_subscription: Option<Subscription>,
+    command_tx: mpsc::UnboundedSender<Command>,
 }
 
 impl FlowIndicatorView {
-    fn new(rows: Vec<Row>) -> Self {
+    fn new(
+        rows: Vec<Row>,
+        pinned: Rc<Cell<bool>>,
+        appearance: Appearance,
+        command_tx: mpsc::UnboundedSender<Command>,
+    ) -> Self {
         Self {
             rows,
+            pinned,
+            appearance,
             appearance_subscription: None,
+            command_tx,
         }
     }
 
     fn observe_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.appearance_subscription =
             Some(cx.observe_window_appearance(window, |_, _, cx| cx.notify()));
+    }
+
+    fn dark_mode(&self, window: &Window) -> bool {
+        if self.pinned.get() {
+            return true;
+        }
+        match self.appearance {
+            Appearance::System => matches!(
+                window.appearance(),
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            ),
+            Appearance::Light => false,
+            Appearance::Dark => true,
+        }
+    }
+
+    fn header(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let pinned = self.pinned.get();
+        div()
+            .h(px(HEADER_LANE))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(pal.muted)
+                    .child(if pinned {
+                        rust_i18n::t!("flow_indicator.unpin_card").to_string()
+                    } else {
+                        rust_i18n::t!("flow_indicator.pin_card").to_string()
+                    }),
+            )
+            .child(
+                div()
+                    .id("flow-indicator-pin")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(HEADER_LANE))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(pal.track))
+                    .on_click(cx.listener(Self::toggle_pin))
+                    .child(
+                        svg()
+                            .path(PIN_ICON)
+                            .size(px(PIN_ICON_SIZE))
+                            .text_color(if pinned { pal.accent } else { pal.muted }),
+                    ),
+            )
     }
 
     fn row_view(row: &Row, pal: &Palette) -> impl IntoElement + use<> {
@@ -266,10 +419,11 @@ impl FlowIndicatorView {
             .gap(px(LINE_GAP))
             .child(
                 div()
+                    .h(px(LINE_HEIGHT))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(ROW_INNER_GAP))
                     .child(
                         div().w(px(ICON_LANE)).h(px(ICON_LANE)).flex_none().child(
                             svg()
@@ -283,7 +437,7 @@ impl FlowIndicatorView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.0))
+                            .text_size(px(NAME_TEXT_SIZE))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(pal.text)
                             .child(row.name.clone()),
@@ -292,7 +446,7 @@ impl FlowIndicatorView {
                         line.child(
                             svg()
                                 .path(BOLT_ICON)
-                                .size(px(12.0))
+                                .size(px(BOLT_SIZE))
                                 .flex_none()
                                 .text_color(color),
                         )
@@ -307,7 +461,11 @@ impl FlowIndicatorView {
                     })
                     .child(
                         div()
-                            .text_size(px(16.0))
+                            .w(px(VALUE_LANE))
+                            .flex_none()
+                            .flex()
+                            .justify_end()
+                            .text_size(px(VALUE_TEXT_SIZE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(color)
                             .child(row.value.clone()),
@@ -325,57 +483,96 @@ impl FlowIndicatorView {
             )
     }
 
-    fn card(&self, pal: &Palette) -> impl IntoElement + use<> {
+    fn toggle_pin(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let next = !self.pinned.get();
+        self.pinned.set(next);
+        cx.notify();
+        let _ = self.command_tx.send(Command::Pin(next));
+    }
+
+    fn card(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div()
             .w(px(CARD_WIDTH))
             .flex()
             .flex_col()
-            .gap(px(ROW_GAP))
+            .gap(px(HEADER_GAP))
             .px(px(PADDING_X))
             .py(px(PADDING_Y))
             .rounded(px(RADIUS))
             .bg(pal.card)
             .border_1()
-            .border_color(pal.border)
+            .border_color(if self.pinned.get() {
+                pal.accent
+            } else {
+                pal.border
+            })
             .shadow_lg()
-            .children(self.rows.iter().map(|row| Self::row_view(row, pal)))
+            .child(self.header(pal, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ROW_GAP))
+                    .children(self.rows.iter().map(|row| Self::row_view(row, pal))),
+            )
     }
 }
 
 impl Render for FlowIndicatorView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let pal = Palette::for_appearance(window.appearance());
-        div().size_full().child(self.card(&pal))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = Palette::for_dark(self.dark_mode(window));
+        div()
+            .size_full()
+            .p(px(SHADOW_MARGIN))
+            .child(self.card(&pal, cx))
     }
 }
 
-/// What the widget task receives: a new agent snapshot or new config.
+/// What the widget task receives: a new agent snapshot, new config, or a pin
+/// toggle from the card's own button.
 pub(crate) enum Command {
     Observation(Box<Observation>),
-    Settings(Settings),
+    Settings {
+        settings: Settings,
+        config: Option<Box<Config>>,
+    },
+    Pin(bool),
 }
 
 /// The widget's window lifecycle: open it when there is something to show,
-/// update it in place for percentage changes, and reopen it when its height or
-/// display mode changes.
+/// update it in place for percentage changes, and reopen it when its height,
+/// display mode, or pin state changes.
 ///
 /// This type is owned by one GPUI task, not an entity: opening a window inside
 /// an entity update re-enters GPUI's app borrow. The task hands each command
 /// through `App::update`, the same context the notice windows open from.
 pub(crate) struct FlowIndicator {
     settings: Settings,
-    devices: Vec<BatteryDevice>,
+    config: Option<Config>,
+    inventory: Vec<DeviceInventory>,
+    pinned: Rc<Cell<bool>>,
     window: Option<WindowHandle<FlowIndicatorView>>,
     window_mode: Option<FlowIndicatorDisplayMode>,
+    window_pinned: Option<bool>,
+    command_tx: mpsc::UnboundedSender<Command>,
 }
 
 impl FlowIndicator {
-    pub(crate) fn new(settings: Settings) -> Self {
+    pub(crate) fn new(
+        settings: Settings,
+        config: Option<Config>,
+        pinned: Rc<Cell<bool>>,
+        command_tx: mpsc::UnboundedSender<Command>,
+    ) -> Self {
         Self {
             settings,
-            devices: Vec::new(),
+            config,
+            inventory: Vec::new(),
+            pinned,
             window: None,
             window_mode: None,
+            window_pinned: None,
+            command_tx,
         }
     }
 
@@ -388,8 +585,9 @@ impl FlowIndicator {
     /// carries, because the toggle that enables the card arrives that way.
     pub(crate) fn needs_display(&self, command: &Command) -> bool {
         let enabled = match command {
-            Command::Settings(settings) => settings.enabled,
+            Command::Settings { settings, .. } => settings.enabled,
             Command::Observation(_) => self.settings.enabled,
+            Command::Pin(_) => false,
         };
         enabled && self.window.is_none()
     }
@@ -397,11 +595,17 @@ impl FlowIndicator {
     pub(crate) fn handle(&mut self, command: Command, cx: &mut App) {
         match command {
             Command::Observation(observation) => {
-                self.devices = battery_devices(&observation.snapshot.inventory);
+                self.inventory = observation.snapshot.inventory;
                 self.sync(cx);
             }
-            Command::Settings(settings) => {
+            Command::Settings { settings, config } => {
                 self.settings = settings;
+                self.config = config.map(|config| *config);
+                self.sync(cx);
+            }
+            Command::Pin(pinned) => {
+                self.pinned.set(pinned);
+                save_pinned(pinned);
                 self.sync(cx);
             }
         }
@@ -411,8 +615,12 @@ impl FlowIndicator {
         if !self.settings.enabled {
             return Vec::new();
         }
+        let devices = match self.config.as_ref() {
+            Some(config) => battery_devices_named(&self.inventory, config),
+            None => battery_devices(&self.inventory),
+        };
         flow_indicator_devices(
-            &self.devices,
+            &devices,
             self.settings.show_offline,
             self.settings.max_devices,
         )
@@ -427,17 +635,32 @@ impl FlowIndicator {
             self.close(cx);
             return;
         }
+        let pinned = self.pinned.get();
+        let mode = self.settings.display_mode;
+        let appearance = self.settings.appearance;
         if let Some(handle) = self.window.as_ref() {
-            let same = self.window_mode == Some(self.settings.display_mode)
-                && handle
-                    .update(cx, |view, _, _| view.rows.len() == rows.len())
-                    .unwrap_or(false);
-            if same {
-                let _ = handle.update(cx, |view, _, cx| {
-                    view.rows = rows;
+            let same_mode = self.window_mode == Some(mode);
+            let same_pinned = self.window_pinned == Some(pinned);
+            let same_rows = handle
+                .update(cx, |view, _, _| view.rows.len() == rows.len())
+                .unwrap_or(false);
+            if same_mode && same_rows {
+                let _ = handle.update(cx, |view, window, cx| {
+                    view.rows.clone_from(&rows);
+                    view.appearance = appearance;
+                    if !same_pinned {
+                        apply_window_mode(window, mode, pinned);
+                    }
                     cx.notify();
                 });
-                return;
+                if same_pinned {
+                    return;
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    self.window_pinned = Some(pinned);
+                    return;
+                }
             }
         }
         self.close(cx);
@@ -449,13 +672,25 @@ impl FlowIndicator {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
         self.window_mode = None;
+        self.window_pinned = None;
     }
 
     fn open(&mut self, rows: Vec<Row>, cx: &mut App) {
         let card = card_size(rows.len());
+        let window = window_size(card);
         let origin = resolve_origin(cx, card);
-        let options = window_options(self.settings.display_mode, Bounds::new(origin, card));
-        let opened = cx.open_window(options, |_, cx| cx.new(|_| FlowIndicatorView::new(rows)));
+        let pinned = self.pinned.get();
+        let options = window_options(
+            self.settings.display_mode,
+            pinned,
+            Bounds::new(origin, window),
+        );
+        let appearance = self.settings.appearance;
+        let command_tx = self.command_tx.clone();
+        let pin_state = Rc::clone(&self.pinned);
+        let opened = cx.open_window(options, |_, cx| {
+            cx.new(|_| FlowIndicatorView::new(rows, pin_state, appearance, command_tx))
+        });
         let handle = match opened {
             Ok(handle) => handle,
             Err(error) => {
@@ -465,7 +700,7 @@ impl FlowIndicator {
         };
         let mode = self.settings.display_mode;
         if let Err(error) = handle.update(cx, |view, window, cx| {
-            apply_display_mode(window, mode);
+            apply_window_mode(window, mode, pinned);
             place_card(window);
             view.observe_appearance(window, cx);
         }) {
@@ -473,20 +708,25 @@ impl FlowIndicator {
         }
         self.window = Some(handle);
         self.window_mode = Some(mode);
+        self.window_pinned = Some(pinned);
     }
 }
 
-fn window_options(_mode: FlowIndicatorDisplayMode, bounds: Bounds<gpui::Pixels>) -> WindowOptions {
+fn window_options(
+    _mode: FlowIndicatorDisplayMode,
+    _pinned: bool,
+    bounds: Bounds<gpui::Pixels>,
+) -> WindowOptions {
     // Windows has no non-topmost toolwindow kind in GPUI. A PopUp is the
-    // taskbar-less/Alt-Tab-less window; `apply_display_mode` strips its
-    // TOPMOST bit when the user chose Normal. Other platforms map the mode
-    // through the window kind directly.
+    // taskbar-less/Alt-Tab-less window; `apply_window_mode` sets or strips its
+    // TOPMOST bit. Other platforms map the mode through the window kind.
     #[cfg(target_os = "windows")]
     let kind = WindowKind::PopUp;
     #[cfg(not(target_os = "windows"))]
-    let kind = match _mode {
-        FlowIndicatorDisplayMode::Normal => WindowKind::Normal,
-        FlowIndicatorDisplayMode::Topmost => WindowKind::PopUp,
+    let kind = if _pinned || _mode == FlowIndicatorDisplayMode::Topmost {
+        WindowKind::PopUp
+    } else {
+        WindowKind::Normal
     };
     WindowOptions {
         titlebar: None,
@@ -506,19 +746,17 @@ fn window_options(_mode: FlowIndicatorDisplayMode, bounds: Bounds<gpui::Pixels>)
 #[cfg(target_os = "windows")]
 #[expect(
     unsafe_code,
-    reason = "strip WS_EX_TOPMOST from the live GPUI window on its UI thread"
+    reason = "set or strip WS_EX_TOPMOST on the live GPUI window on its UI thread"
 )]
-fn apply_display_mode(window: &mut Window, mode: FlowIndicatorDisplayMode) {
+fn apply_window_mode(window: &mut Window, mode: FlowIndicatorDisplayMode, pinned: bool) {
     use raw_window_handle::RawWindowHandle;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetWindowLongW, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SetWindowLongW, SetWindowPos,
+        GWL_EXSTYLE, GetWindowLongW, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SetWindowLongW, SetWindowPos,
     };
 
-    if mode == FlowIndicatorDisplayMode::Topmost {
-        return;
-    }
+    let topmost = pinned || mode == FlowIndicatorDisplayMode::Topmost;
     let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
         return;
     };
@@ -526,16 +764,23 @@ fn apply_display_mode(window: &mut Window, mode: FlowIndicatorDisplayMode) {
         return;
     };
     let hwnd = handle.hwnd.get() as HWND;
-    // WS_EX_TOPMOST's documented value; keeping it here avoids a lossy
-    // integer cast from the windows-sys `u32` constant.
     // SAFETY: style reads/writes on the live HWND owned by `window`, on the
     // thread GPUI requires; the style value is a bit-set of documented flags.
     unsafe {
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        SetWindowLongW(hwnd, GWL_EXSTYLE, style & !TOPMOST_BIT);
+        let style = if topmost {
+            style | TOPMOST_BIT
+        } else {
+            style & !TOPMOST_BIT
+        };
+        SetWindowLongW(hwnd, GWL_EXSTYLE, style);
         SetWindowPos(
             hwnd,
-            HWND_NOTOPMOST,
+            if topmost {
+                HWND_TOPMOST
+            } else {
+                HWND_NOTOPMOST
+            },
             0,
             0,
             0,
@@ -546,7 +791,7 @@ fn apply_display_mode(window: &mut Window, mode: FlowIndicatorDisplayMode) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn apply_display_mode(_window: &mut Window, _mode: FlowIndicatorDisplayMode) {}
+fn apply_window_mode(_window: &mut Window, _mode: FlowIndicatorDisplayMode, _pinned: bool) {}
 
 /// Place the card in the primary monitor's work area after GPUI created it.
 ///
@@ -554,7 +799,9 @@ fn apply_display_mode(_window: &mut Window, _mode: FlowIndicatorDisplayMode) {}
 /// bounds the card is opened with are logical pixels, so the logical
 /// bottom-right origin is wrong at any scale other than 100%. Working from
 /// the real window rect and the monitor's work area keeps the card on screen
-/// at every scale.
+/// at every scale. The window includes the shadow margin, so its bottom-right
+/// edge lands on the work area's edge while the visible card stays one margin
+/// inside it.
 #[cfg(target_os = "windows")]
 #[expect(
     unsafe_code,
@@ -562,7 +809,7 @@ fn apply_display_mode(_window: &mut Window, _mode: FlowIndicatorDisplayMode) {}
 )]
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "a work-area coordinate and the card margin are whole physical pixels"
+    reason = "a work-area coordinate is a whole physical pixel"
 )]
 fn place_card(window: &mut Window) {
     use raw_window_handle::RawWindowHandle;
@@ -581,7 +828,6 @@ fn place_card(window: &mut Window) {
         return;
     };
     let hwnd = handle.hwnd.get() as HWND;
-    let margin = (MARGIN * window.scale_factor()).round() as i32;
     // SAFETY: reads the live HWND's rect and the primary monitor's work area,
     // then moves that same window without resizing or changing its z-order,
     // on GPUI's UI thread.
@@ -604,8 +850,8 @@ fn place_card(window: &mut Window) {
         if GetWindowRect(hwnd, &raw mut rect) == 0 {
             return;
         }
-        let x = (info.rcWork.right - (rect.right - rect.left) - margin).max(info.rcWork.left);
-        let y = (info.rcWork.bottom - (rect.bottom - rect.top) - margin).max(info.rcWork.top);
+        let x = (info.rcWork.right - (rect.right - rect.left)).max(info.rcWork.left);
+        let y = (info.rcWork.bottom - (rect.bottom - rect.top)).max(info.rcWork.top);
         SetWindowPos(
             hwnd,
             std::ptr::null_mut(),
@@ -623,18 +869,37 @@ fn place_card(_window: &mut Window) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, FlowIndicator, Settings, bottom_right, card_size};
+    use super::{
+        Appearance, Command, FlowIndicator, SavedState, Settings, card_size, window_origin,
+        window_size,
+    };
     use gpui::{Bounds, point, px, size};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use tokio::sync::mpsc;
+
+    fn settings(enabled: bool) -> Settings {
+        Settings {
+            enabled,
+            ..Settings::default()
+        }
+    }
 
     #[test]
     fn the_card_asks_for_a_display_when_a_command_may_open_it() {
-        let indicator = FlowIndicator::new(Settings::default());
-        assert!(!indicator.needs_display(&Command::Settings(Settings::default())));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let pinned = Rc::new(Cell::new(false));
+        let indicator = FlowIndicator::new(Settings::default(), None, pinned, tx);
+        let disabled = Command::Settings {
+            settings: Settings::default(),
+            config: None,
+        };
+        assert!(!indicator.needs_display(&disabled));
 
-        let enabling = Command::Settings(Settings {
-            enabled: true,
-            ..Settings::default()
-        });
+        let enabling = Command::Settings {
+            settings: settings(true),
+            config: None,
+        };
         assert!(
             indicator.needs_display(&enabling),
             "turning the card on must connect before its window opens"
@@ -643,26 +908,42 @@ mod tests {
 
     #[test]
     fn the_card_height_follows_the_row_count() {
-        assert_eq!(f32::from(card_size(1).height), 28.0 + 37.0);
+        assert_eq!(f32::from(card_size(1).height), 28.0 + 20.0 + 6.0 + 41.0);
         assert_eq!(
             f32::from(card_size(3).height),
-            28.0 + 3.0 * 37.0 + 2.0 * 16.0
+            28.0 + 20.0 + 6.0 + 3.0 * 41.0 + 2.0 * 16.0
         );
         assert_eq!(
             f32::from(card_size(5).height),
-            28.0 + 5.0 * 37.0 + 4.0 * 16.0
+            28.0 + 20.0 + 6.0 + 5.0 * 41.0 + 4.0 * 16.0
         );
     }
 
     #[test]
-    fn the_card_starts_in_the_bottom_right_corner() {
-        let area = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
-        let card = size(px(300.0), px(171.0));
-
+    fn the_window_leaves_room_for_the_shadow_and_the_card_corner() {
+        let card = card_size(3);
+        let window = window_size(card);
+        assert_eq!(f32::from(window.width), f32::from(card.width) + 2.0 * 24.0);
         assert_eq!(
-            bottom_right(area, card),
-            point(px(1920.0 - 300.0 - 24.0), px(1080.0 - 171.0 - 24.0))
+            f32::from(window.height),
+            f32::from(card.height) + 2.0 * 24.0
         );
+
+        let area = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        assert_eq!(
+            window_origin(area, window),
+            point(
+                px(1920.0 - f32::from(window.width)),
+                px(1080.0 - f32::from(window.height))
+            )
+        );
+    }
+
+    #[test]
+    fn the_pin_state_roundtrips_through_toml() {
+        let body = toml::to_string(&SavedState { pinned: true }).expect("serialize");
+        let saved: SavedState = toml::from_str(&body).expect("parse");
+        assert!(saved.pinned);
     }
 
     #[gpui::test]
@@ -678,7 +959,10 @@ mod tests {
             online: true,
             kind: DeviceKind::Mouse,
         }];
-        let window = cx.add_window(|_, _| FlowIndicatorView::new(rows));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let pinned = Rc::new(Cell::new(false));
+        let window =
+            cx.add_window(|_, _| FlowIndicatorView::new(rows, pinned, Appearance::System, tx));
         cx.run_until_parked();
         let shown = window
             .read_with(cx, |view, _| view.rows.len())
