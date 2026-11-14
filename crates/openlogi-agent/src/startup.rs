@@ -20,6 +20,7 @@ use openlogi_agent_core::runtime::{ActionDispatcher, ActionRequest, ActionRuntim
 use openlogi_agent_core::watchers::shutdown::{StopOutcome, WatcherHandle};
 use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
+use openlogi_core::last_known::LastKnown;
 #[cfg(target_os = "macos")]
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -54,8 +55,13 @@ pub(crate) struct Core {
 pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     // The orchestrator is shared with the IPC server and mutated by the
     // select loop, so it lives behind an async mutex; locks are brief. The
-    // hook facts are published by the select loop, which owns the hook.
-    let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
+    // hook facts are published by the select loop, which owns the hook. The
+    // last-known cache is loaded before the first inventory is published, so a
+    // sleeping device keeps the reading clients last showed for it.
+    let observable = Arc::new(ObservableState::with_last_known(
+        env!("CARGO_PKG_VERSION").to_string(),
+        LastKnown::load(),
+    ));
     #[cfg(target_os = "macos")]
     seed_permission_facts(&observable);
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(
