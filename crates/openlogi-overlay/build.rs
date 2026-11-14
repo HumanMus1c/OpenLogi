@@ -26,6 +26,10 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // GPUI's debug build overflows Windows' default 1 MB main-thread stack
+    // during startup (before the first window paints). Reserve 16 MB of
+    // virtual address space; the OS commits it on demand.
+    println!("cargo:rustc-link-arg=/STACK:16777216");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     // rc.exe treats `\` in string literals as escapes; forward slashes are
     // accepted by every resource compiler embed-resource can drive.
