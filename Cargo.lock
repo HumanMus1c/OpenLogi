@@ -6347,6 +6347,7 @@ name = "openlogi-overlay"
 version = "0.9.0"
 dependencies = [
  "anyhow",
+ "atomic-write-file",
  "block2 0.6.2",
  "core-graphics 0.25.0",
  "embed-resource",
@@ -6360,9 +6361,11 @@ dependencies = [
  "openlogi-ui",
  "raw-window-handle",
  "rust-i18n",
+ "serde",
  "succession",
  "tarpc",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "windows-sys 0.61.2",
 ]
