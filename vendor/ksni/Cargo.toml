@@ -1,0 +1,63 @@
+# Vendored patch of the `ksni` crate from https://github.com/iovxw/ksni
+# @ 0.3.7 (2026-10-20), Unlicense © iovxw (see UNLICENSE). The patch adds the
+# Ayatana label extension (`XAyatanaLabel`/`XAyatanaLabelGuide`), which Ubuntu's
+# AppIndicator GNOME Shell extension renders next to the tray icon; upstream
+# PRs #42 and #47 cover the same ground (see AGENTS.md).
+#
+# This directory is deliberately NOT a workspace member: it is third-party
+# source kept byte-for-byte upstream except for the patch, so it stays
+# diffable against future releases and does not take the workspace lint table.
+# Consumers reach it through the root Cargo.toml `[patch.crates-io]` entry.
+#
+[package]
+name = "ksni"
+version = "0.3.7"
+edition = "2021"
+rust-version = "1.80"
+authors = ["iovxw <iovxw@outlook.com>"]
+description = """
+A Rust implementation of the KDE/freedesktop StatusNotifierItem specification
+"""
+readme = "README.md"
+keywords = ["systray", "linux", "gui"]
+categories = ["api-bindings"]
+license = "Unlicense"
+repository = "https://github.com/iovxw/ksni"
+publish = false
+
+[features]
+async-io = [
+    "dep:async-io",
+    "dep:async-lock",
+    "dep:async-executor",
+    "dep:futures-lite",
+    "dep:futures-channel",
+    "dep:task-local",
+    "zbus/async-io",
+]
+blocking = []
+default = ["tokio"]
+node = []
+tokio = [
+    "dep:tokio",
+    "zbus/tokio",
+]
+
+[lib]
+name = "ksni"
+path = "src/lib.rs"
+
+[dependencies]
+arc-swap = "1"
+async-executor = { version = "1", optional = true }
+async-io = { version = "2", optional = true }
+async-lock = { version = "3", optional = true }
+crossbeam-queue = "0.3"
+futures-channel = { version = "0.3", optional = true }
+futures-lite = { version = "2", optional = true }
+futures-util = "0.3"
+pastey = "0.2"
+serde = { version = "1", features = ["derive"] }
+task-local = { version = "0.1", optional = true }
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
+zbus = { version = "5", default-features = false }
