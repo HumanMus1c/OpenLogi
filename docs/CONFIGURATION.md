@@ -124,6 +124,15 @@ optional physical device key.
   clicked. With the setting off the agent posts no notice, but it still notes
   when a device charges, so the next discharge is announced once the setting
   is back on. A notice already on screen still closes on its own.
+- `tray_battery` (default `true`, Windows/Linux): the tray shows a battery
+  readout — the tooltip, device rows in its menu, and the icon badge. The
+  readout uses the inventory the agent already polls and never triggers a HID
+  read. On Linux the icon is a StatusNotifierItem, so it appears only where the
+  desktop runs an SNI host.
+- `tray_badge_style` (default `circle`, Windows/Linux): the tray badge's shape.
+  `circle` fills the icon slot; `rounded_square` matches square-ish neighbours;
+  `wide` is Linux-only and config-file-only (the settings page offers the first
+  two).
 - `flow_indicator` (default `false`): the overlay shows a small floating card
   with one row per detected device and its battery reading. The card reads the
   inventory the agent already polls, never triggers a HID read, and cannot be
