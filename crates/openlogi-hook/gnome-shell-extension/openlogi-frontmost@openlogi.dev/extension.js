@@ -7,9 +7,9 @@
 //
 // It also keeps Actions Ring surfaces out of GNOME's window animations so
 // their initial pointer coordinates stay valid, and remembers where the user
-// left the main window (GNOME does not let a Wayland client place its own
-// toplevel). No window contents or input are read. ESM module style; targets
-// GNOME Shell 45+.
+// left the main window and the Flow Indicator card (GNOME does not let a
+// Wayland client place its own toplevel). No window contents or input are
+// read. ESM module style; targets GNOME Shell 45+.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -26,6 +26,9 @@ const DBUS_INTERFACE = `
   <interface name="org.openlogi.Frontmost">
     <method name="GetFocusedWmClass">
       <arg type="s" direction="out" name="wmClass"/>
+    </method>
+    <method name="RepickPointer">
+      <arg type="b" direction="in" name="nudge"/>
     </method>
     <signal name="FocusedWmClassChanged">
       <arg type="s" name="wmClass"/>
@@ -97,6 +100,13 @@ export default class OpenLogiFrontmostExtension extends Extension {
         if (!win)
             return '';
         return win.get_wm_class() || '';
+    }
+
+    // D-Bus method org.openlogi.Frontmost.RepickPointer. A live diagnostic
+    // for the pinned card's pointer focus; nudge=true leaves and re-enters
+    // the card's frame, false warps to the current position.
+    RepickPointer(nudge) {
+        this._windowState?.repickPointer(nudge);
     }
 
     _emitFocusedWmClassChanged() {
