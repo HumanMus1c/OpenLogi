@@ -39,10 +39,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
     GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
-    LoadIconW, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPED,
+    LoadIconW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW,
+    SW_RESTORE, SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 
 use crate::shutdown::{self, ShutdownRequestSender};
@@ -52,6 +52,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 /// Menu command ids returned by `TrackPopupMenu`.
 const ID_SHOW: usize = 1;
 const ID_QUIT: usize = 2;
+const ID_FLOW_PIN: usize = 3;
 
 /// The `TaskbarCreated` broadcast id, resolved once the window exists. Zero
 /// until then; real ids are never zero (`RegisterWindowMessageW` starts at
@@ -358,6 +359,13 @@ unsafe fn show_menu(hwnd: HWND) {
             ID_SHOW,
             wide(&rust_i18n::t!("app.show_main_window")).as_ptr(),
         );
+        let pinned = openlogi_agent::flow_pin::flow_pin().pinned();
+        AppendMenuW(
+            menu,
+            MF_STRING | if pinned { MF_CHECKED } else { 0 },
+            ID_FLOW_PIN,
+            wide(&rust_i18n::t!("flow_indicator.pin_card")).as_ptr(),
+        );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(
             menu,
@@ -383,6 +391,9 @@ unsafe fn show_menu(hwnd: HWND) {
 
         match cmd as usize {
             ID_SHOW => open_or_focus_gui(),
+            ID_FLOW_PIN => {
+                let _ = openlogi_agent::flow_pin::flow_pin().toggle();
+            }
             ID_QUIT => quit(hwnd),
             _ => {}
         }

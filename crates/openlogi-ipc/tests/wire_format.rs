@@ -119,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -1514,4 +1514,10 @@ fn disable_keys_requests_are_appended() {
         },
         "2d000846303044434146450101",
     );
+}
+
+#[test]
+fn flow_pin_requests_are_appended() {
+    assert_wire(&AgentRequest::ObserveFlowPinned { since: 7 }, "3a07");
+    assert_wire(&AgentRequest::ReportFlowPinned { pinned: true }, "3b01");
 }
