@@ -520,6 +520,62 @@ pub enum BatteryTone {
     Error,
 }
 
+/// The three-stage colour band a measured percentage maps to.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray, and the floating widget on the same band for the
+/// same percentage: 70% and above is healthy, 40% up to 70% is mid, and
+/// anything below 40% is low. Level-only readings have no percentage to
+/// band — [`BatteryInfo::color`] falls back to the firmware level for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryStage {
+    /// 70% and above.
+    Healthy,
+    /// 40% up to, but not including, 70%.
+    Mid,
+    /// Below 40%.
+    Low,
+}
+
+/// The percentage at or above which a reading is healthy.
+const HEALTHY_PERCENT: u8 = 70;
+/// The percentage at or above which a reading is in the middle band.
+const MID_PERCENT: u8 = 40;
+
+impl BatteryStage {
+    /// The band `percentage` falls in.
+    #[must_use]
+    pub const fn for_percentage(percentage: u8) -> Self {
+        if percentage >= HEALTHY_PERCENT {
+            Self::Healthy
+        } else if percentage >= MID_PERCENT {
+            Self::Mid
+        } else {
+            Self::Low
+        }
+    }
+}
+
+/// The colour role a battery surface paints a reading with.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray badge, and the floating widget on one colour for
+/// one reading. Status roles win over the percentage band: charging and
+/// charge complete paint green, a fault paints red, and only a discharging
+/// percentage takes its [`BatteryStage`]. A level-only reading keeps its
+/// firmware meaning, or stays neutral when the firmware reports nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryColor {
+    /// Charging, charge complete, or a healthy percentage.
+    Green,
+    /// A percentage in the middle band, or a firmware low level.
+    Amber,
+    /// A charging fault, a critical firmware level, or a low percentage.
+    Red,
+    /// Neither a percentage nor an urgent firmware level.
+    Neutral,
+}
+
 impl BatteryInfo {
     /// What this reading can show: a measured percentage, the firmware's
     /// coarse level, or nothing usable yet.
@@ -563,6 +619,46 @@ impl BatteryInfo {
                 Some(BatteryAttention::Critical) => BatteryTone::Critical,
                 Some(BatteryAttention::Low) => BatteryTone::Low,
                 None => BatteryTone::Normal,
+            },
+        }
+    }
+
+    /// The three-stage colour band this reading's percentage falls in.
+    ///
+    /// `None` for a level-only or missing reading: there is no percentage to
+    /// band, so a surface asks [`Self::color`] instead, which falls back to
+    /// the firmware level.
+    #[must_use]
+    pub fn stage(&self) -> Option<BatteryStage> {
+        match self.reading() {
+            BatteryReading::Percent(percentage) => Some(BatteryStage::for_percentage(percentage)),
+            BatteryReading::Level(_) | BatteryReading::NoReading => None,
+        }
+    }
+
+    /// The colour role a surface paints this reading with.
+    ///
+    /// Precedence is status first, then the percentage band, then the
+    /// firmware level: a charging 45% device paints green (the bolt explains
+    /// why) rather than the band's amber, and a fault paints red even while
+    /// the firmware still reports a healthy percentage.
+    #[must_use]
+    pub fn color(&self) -> BatteryColor {
+        match self.status {
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full => {
+                BatteryColor::Green
+            }
+            BatteryStatus::Error => BatteryColor::Red,
+            BatteryStatus::Discharging | BatteryStatus::Unknown => match self.stage() {
+                Some(BatteryStage::Healthy) => BatteryColor::Green,
+                Some(BatteryStage::Mid) => BatteryColor::Amber,
+                Some(BatteryStage::Low) => BatteryColor::Red,
+                None => match self.level {
+                    BatteryLevel::Critical => BatteryColor::Red,
+                    BatteryLevel::Low => BatteryColor::Amber,
+                    BatteryLevel::Full => BatteryColor::Green,
+                    BatteryLevel::Good | BatteryLevel::Unknown => BatteryColor::Neutral,
+                },
             },
         }
     }
@@ -675,6 +771,47 @@ pub fn flow_indicator_devices(
     rows.sort_by_key(|device| indicator_sort_key(device));
     rows.truncate(limit);
     rows
+}
+
+/// The rows a floating indicator can show, and how many matching devices its
+/// row limit hid.
+pub struct FlowIndicatorRows<'a> {
+    /// The rows the card shows, low-first and capped at the limit.
+    pub rows: Vec<&'a BatteryDevice>,
+    /// Matching devices the limit hid.
+    pub hidden: usize,
+}
+
+/// Rows for the floating indicator: online devices with something to show and,
+/// when `show_offline`, every paired device the receiver still reports — a
+/// sleeping device with no reading left keeps its row (with an empty reading)
+/// instead of dropping the card to its empty state. Sorted low-first and capped
+/// at `limit`.
+///
+/// Charging and full devices sort after healthy discharging ones, and readings
+/// with no value sort last. The tie-break is the display name, so a stable
+/// inventory does not reorder equal rows between polls. `hidden` tells a
+/// surface how many matching devices did not fit.
+#[must_use]
+pub fn flow_indicator_rows(
+    devices: &[BatteryDevice],
+    show_offline: bool,
+    limit: usize,
+) -> FlowIndicatorRows<'_> {
+    let mut rows: Vec<&BatteryDevice> = devices
+        .iter()
+        .filter(|device| {
+            if device.online {
+                device.has_readout()
+            } else {
+                show_offline
+            }
+        })
+        .collect();
+    rows.sort_by_key(|device| indicator_sort_key(device));
+    let hidden = rows.len().saturating_sub(limit);
+    rows.truncate(limit);
+    FlowIndicatorRows { rows, hidden }
 }
 
 fn indicator_sort_key(device: &BatteryDevice) -> (u8, u8, bool, String) {
