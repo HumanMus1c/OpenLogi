@@ -44,8 +44,14 @@ mod takeover;
 mod tray;
 // The menu-bar menu's platform-free model. Only the macOS tray draws it so
 // far; tests build it everywhere, since nothing in it is platform code.
+#[cfg(target_os = "linux")]
+mod tray_linux;
 #[cfg(any(target_os = "macos", test))]
 mod tray_model;
+#[cfg(target_os = "linux")]
+mod tray_readout;
+#[cfg(target_os = "linux")]
+mod tray_setting;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 mod virtual_keyboard;
@@ -141,10 +147,16 @@ fn main() {
         // the core exited without arming — fall through and let the process
         // end.
         let (armed_tx, armed_rx) = std::sync::mpsc::channel();
+        let lifecycle_shutdown = shutdown_tx.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(config, shutdown_requests, armed_tx));
+                runtime.block_on(lifecycle::run(
+                    config,
+                    shutdown_requests,
+                    lifecycle_shutdown,
+                    armed_tx,
+                ));
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
@@ -170,7 +182,7 @@ fn main() {
         resume_linux::register(device_io_signal.clone());
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         drop(device_io_signal);
-        runtime.block_on(lifecycle::run(config, shutdown_requests));
+        runtime.block_on(lifecycle::run(config, shutdown_requests, shutdown_tx));
     }
 }
 
