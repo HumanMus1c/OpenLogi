@@ -24,6 +24,10 @@ app_icon = "openlogi"
 # macOS only: Previous / Next Desktop slide like a three-finger swipe (default
 # true); false switches at once.
 animate_desktop_switch = true
+# Tray battery readout and badge shape (Windows/Linux). The wide badge is a
+# Linux-only config-file choice.
+tray_battery = true
+tray_badge_style = "circle"
 # Floating battery card (Flow Indicator). Off by default; the card reads the
 # inventory the agent already polls and adds no device I/O.
 flow_indicator = false

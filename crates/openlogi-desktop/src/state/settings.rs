@@ -5,6 +5,8 @@ use super::events::StateEvents;
 use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_kit::component::ThemeMode;
+#[cfg(target_os = "linux")]
+use openlogi_core::config::TrayBadgeStyle;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode,
     FLOW_INDICATOR_MAX_DEVICES_MAX, FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode,
@@ -401,6 +403,29 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.low_battery_notifications = enabled);
         self.persist_and_reload("low-battery notifications setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle the tray's battery readout and persist it. The agent owns the
+    /// tray; it reads the new value on config reload.
+    #[cfg(target_os = "linux")]
+    pub fn commit_tray_battery(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.tray_battery == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.tray_battery = enabled);
+        self.persist_and_reload("tray battery readout setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Set the tray badge's shape and persist it.
+    #[cfg(target_os = "linux")]
+    pub fn commit_tray_badge_style(&mut self, style: TrayBadgeStyle) -> StateEvents {
+        if self.config.app_settings.tray_badge_style == style {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.tray_badge_style = style);
+        self.persist_and_reload("tray badge style setting");
         StateEvent::SettingsChanged.into()
     }
     /// Toggle the floating Flow Indicator and persist it. The overlay watches
