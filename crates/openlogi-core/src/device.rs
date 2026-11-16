@@ -752,6 +752,15 @@ pub fn battery_devices(inventory: &[DeviceInventory]) -> Vec<BatteryDevice> {
         .collect()
 }
 
+/// The first online device with something to show, for a single-device readout
+/// such as the tray tooltip.
+#[must_use]
+pub fn first_battery_readout(devices: &[BatteryDevice]) -> Option<&BatteryDevice> {
+    devices
+        .iter()
+        .find(|device| device.online && device.has_readout())
+}
+
 /// Rows for the floating indicator: devices with something to show, offline
 /// ones only when `show_offline`, sorted low-first and capped at `limit`.
 ///

@@ -82,6 +82,23 @@ pub enum FlowIndicatorDisplayMode {
     Topmost,
 }
 
+/// The tray badge's shape. Windows and Linux render the badge bitmap
+/// themselves, so the style is a rendering choice; macOS shows a text title
+/// instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayBadgeStyle {
+    /// A disc inscribed in the system's icon slot, edge-to-edge.
+    #[default]
+    Circle,
+    /// A full-bleed rounded square, matching the square-ish icons around it.
+    RoundedSquare,
+    /// A wide face with the device name, a progress bar, and the value in one
+    /// row. Linux-only: a StatusNotifierItem panel can keep the pixmap's
+    /// aspect ratio, while the Windows notification area squares every icon.
+    Wide,
+}
+
 /// Layout used for the Home device gallery.
 ///
 /// This is a presentation preference: the GUI owns how each mode renders, while
@@ -215,11 +232,11 @@ pub struct AppSettings {
     /// Omitted from the file until a user picks a channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_channel: Option<UpdateChannel>,
-    /// Whether OpenLogi shows a macOS menu-bar (status item) icon — and, on
-    /// Windows, the notification-area (tray) icon. `true` (default) → the
-    /// agent is visible in the menu bar / tray; `false` → it runs with no
-    /// visible presence (macOS additionally keeps the ordinary Dock icon
-    /// while a window is open). Ignored on Linux.
+    /// Whether OpenLogi shows a macOS menu-bar (status item) icon, a Windows
+    /// notification-area (tray) icon, or a Linux StatusNotifierItem. `true`
+    /// (default) → the agent is visible in the menu bar / tray; `false` → it
+    /// runs with no visible presence (macOS additionally keeps the ordinary
+    /// Dock icon while a window is open).
     #[serde(default = "default_true")]
     pub show_in_menu_bar: bool,
     /// Whether the agent installs the OS-level mouse hook (CGEventTap /
@@ -320,6 +337,17 @@ pub struct AppSettings {
     /// for what counts as low.
     #[serde(default = "default_true")]
     pub low_battery_notifications: bool,
+    /// Whether the tray shows a battery readout: the tooltip, the device rows
+    /// in its menu, and the tray icon. **On by default.** The readout renders
+    /// the inventory the agent already polls; it never triggers a HID read of
+    /// its own. On Linux the icon is a StatusNotifierItem, so it appears only
+    /// where the desktop runs an SNI host.
+    #[serde(default = "default_true")]
+    pub tray_battery: bool,
+    /// The tray badge's shape. Used on Windows and Linux; macOS reads the
+    /// level out as text.
+    #[serde(default)]
+    pub tray_badge_style: TrayBadgeStyle,
     /// Whether the floating Flow Indicator lists detected devices and their
     /// battery readings. **Off by default**: the card is an opt-in surface,
     /// and turning it off restores the settings app's previous behaviour. The
@@ -577,6 +605,8 @@ impl Default for AppSettings {
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
+            tray_battery: true,
+            tray_badge_style: TrayBadgeStyle::Circle,
             flow_indicator: false,
             flow_indicator_show_offline: true,
             flow_indicator_max_devices: FLOW_INDICATOR_MAX_DEVICES_DEFAULT,

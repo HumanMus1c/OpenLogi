@@ -125,6 +125,13 @@ impl AgentServer {
                 // copy.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_config(Arc::new(config.clone()));
+                #[cfg(target_os = "linux")]
+                {
+                    crate::tray_setting::apply_config(&config);
+                    crate::tray_linux::set_battery_readout(config.app_settings.tray_battery);
+                    crate::tray_linux::set_badge_style(config.app_settings.tray_badge_style);
+                    crate::tray_linux::set_config(Arc::new(config.clone()));
+                }
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
                     Some(saved) => self

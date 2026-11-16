@@ -27,6 +27,7 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::server::AgentServer;
+use crate::shutdown::ShutdownRequestSender;
 use crate::{pairing, server};
 
 /// Everything the lifecycle keeps alive after [`bootstrap`]: the shared state
@@ -52,7 +53,7 @@ pub(crate) struct Core {
 /// arming: no permission prompt, no device open, no helper spawn. Binding
 /// ahead of the watchers and prompts lets a dormant agent hear demand, and
 /// keeps a first-run consent dialog from blackholing the GUI's connect.
-pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
+pub(crate) async fn bootstrap(config: Config, shutdown_tx: ShutdownRequestSender) -> Option<Core> {
     // The orchestrator is shared with the IPC server and mutated by the
     // select loop, so it lives behind an async mutex; locks are brief. The
     // hook facts are published by the select loop, which owns the hook. The
@@ -64,6 +65,21 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     ));
     #[cfg(target_os = "macos")]
     seed_permission_facts(&observable);
+    #[cfg(target_os = "linux")]
+    {
+        let tray_config = Arc::new(config.clone());
+        crate::tray_linux::spawn(
+            config.app_settings.show_in_menu_bar,
+            config.app_settings.tray_battery,
+            config.app_settings.tray_badge_style,
+            tray_config,
+            Arc::clone(&observable),
+            shutdown_tx,
+            false,
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = shutdown_tx;
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(
         config,
         Arc::clone(&observable),

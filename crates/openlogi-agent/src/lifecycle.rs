@@ -62,6 +62,7 @@ const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) async fn run(
     config: Config,
     shutdown_requests: ShutdownRequests,
+    shutdown_tx: crate::shutdown::ShutdownRequestSender,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<crate::tray::Backend>,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
@@ -71,6 +72,7 @@ pub(crate) async fn run(
     let Some(booted) = Booted::bootstrap(
         config,
         shutdown_requests,
+        shutdown_tx,
         #[cfg(target_os = "macos")]
         armed_tx,
     )
@@ -112,13 +114,14 @@ impl Booted {
     async fn bootstrap(
         config: Config,
         shutdown_requests: ShutdownRequests,
+        shutdown_tx: crate::shutdown::ShutdownRequestSender,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<crate::tray::Backend>,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
         let capture_mouse_events = config.app_settings.capture_mouse_events;
         #[cfg(target_os = "macos")]
         let launch_at_login = config.app_settings.launch_at_login;
-        let core = startup::bootstrap(config).await?;
+        let core = startup::bootstrap(config, shutdown_tx).await?;
         Some(Self {
             core,
             signals: ShutdownSignals::install(),
@@ -720,7 +723,7 @@ impl Running {
 
     async fn handle_shutdown_request(&mut self, request: ShutdownRequest) {
         match request {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             ShutdownRequest::TrayQuit { core_guard } => {
                 self.shut_down("tray quit", Some(core_guard)).await;
             }
