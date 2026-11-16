@@ -21,9 +21,10 @@ use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
     ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget, FlowPairingCommandError,
-    FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth, LockKeyObservation,
-    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    FlowPinnedObservation, FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth,
+    LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -547,6 +548,18 @@ impl Agent for TestAgent {
         _desired: DisableKeysMask,
     ) -> Result<DisableKeysState, WriteError> {
         unreachable!("profile capture must never write Disable Keys")
+    }
+
+    async fn observe_flow_pinned(
+        self,
+        _: TarpcContext,
+        _since: Generation,
+    ) -> FlowPinnedObservation {
+        unreachable!("profile capture must not inspect the Flow Indicator pin state")
+    }
+
+    async fn report_flow_pinned(self, _: TarpcContext, _pinned: bool) {
+        unreachable!("profile capture must not change the Flow Indicator pin state")
     }
 }
 
