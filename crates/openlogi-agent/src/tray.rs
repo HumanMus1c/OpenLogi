@@ -279,6 +279,8 @@ enum Action {
     Pane(Permission),
     /// Show the log directory in Finder.
     ShowLogs,
+    /// Pin or unpin the Flow Indicator card.
+    ToggleFlowPin,
     /// Make this change to this device.
     Change(RoutedDevice, Change),
 }
@@ -401,6 +403,9 @@ impl MenuTarget {
                 Permission::InputMonitoring => openlogi_permissions::Permission::InputMonitoring,
             }),
             Some(Action::ShowLogs) => show_logs(),
+            Some(Action::ToggleFlowPin) => {
+                let _ = openlogi_agent::flow_pin::flow_pin().toggle();
+            }
             Some(Action::Change(device, change)) => self.change(device, change),
             None => warn!(tag, "menu-bar item with no action"),
         }
@@ -819,6 +824,16 @@ fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
     if !model.issues.is_empty() {
         status_item::add_separator(menu, mtm);
     }
+
+    let pinned = openlogi_agent::flow_pin::flow_pin().pinned();
+    let pin = target.action_item(&t!("flow_indicator.pin_card"), Action::ToggleFlowPin);
+    pin.setState(if pinned {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+    menu.addItem(&pin);
+    status_item::add_separator(menu, mtm);
 
     menu.addItem(&status_item::section_header(mtm, &t!("device.devices")));
     if model.devices.is_empty() && cameras.is_empty() {

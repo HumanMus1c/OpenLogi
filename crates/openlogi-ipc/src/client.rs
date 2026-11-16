@@ -33,8 +33,9 @@ use tarpc::client::{self, RpcError};
 use tarpc::context::{self, Context};
 
 use crate::{
-    AgentClient, BacklightObservation, ClientKind, Generation, LockKeyObservation,
-    NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, RingObservation, transport,
+    AgentClient, BacklightObservation, ClientKind, FlowPinnedObservation, Generation,
+    LockKeyObservation, NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
+    RingObservation, transport,
 };
 
 /// Why a client could not be established.
@@ -233,6 +234,12 @@ impl Stamped for LockKeyObservation {
     }
 }
 
+impl Stamped for FlowPinnedObservation {
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
 /// One connection's view of the agent's generation counter.
 ///
 /// Starts at 0 — "I have seen nothing" — so the first answer is the agent's
@@ -357,6 +364,17 @@ impl Observer<LockKeyObservation> {
         Self::new(client, |client, since| {
             let client = client.clone();
             Box::pin(async move { client.observe_lock_keys(observe_context(), since).await })
+        })
+    }
+}
+
+impl Observer<FlowPinnedObservation> {
+    /// Observe the Flow Indicator's pinned state over `client`.
+    #[must_use]
+    pub fn flow_pinned(client: AgentClient) -> Self {
+        Self::new(client, |client, since| {
+            let client = client.clone();
+            Box::pin(async move { client.observe_flow_pinned(observe_context(), since).await })
         })
     }
 }
