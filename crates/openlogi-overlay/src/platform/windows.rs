@@ -6,11 +6,238 @@ use gpui::{
     Bounds, DevicePixels, DisplayId, Pixels, Point, Size, WindowBounds, WindowOptions, point, size,
 };
 
+use crate::flow_indicator::MARGIN;
 use crate::notice::{BOTTOM_MARGIN, notice_window_options};
 use crate::ring::{Placement, ring_window_options};
 
 #[cfg(target_os = "windows")]
 mod native;
+
+/// One active display in physical virtual-desktop pixels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MonitorInfo {
+    /// The GDI device name (`\\.\DISPLAY1`), stable across reconnects.
+    pub(crate) device: String,
+    pub(crate) display_id: DisplayId,
+    /// The whole monitor (`rcMonitor`).
+    pub(crate) monitor: Bounds<DevicePixels>,
+    /// The monitor without the taskbar (`rcWork`).
+    pub(crate) work: Bounds<DevicePixels>,
+    pub(crate) dpi: u32,
+}
+
+/// Whether the display topology changed between two monitor layouts.
+///
+/// The work area is deliberately left out: the taskbar coming and going must
+/// not re-anchor the card or pause its position writes. A resolution, DPI, or
+/// monitor-set change is a topology change.
+pub(crate) fn topology_changed(previous: Option<&[MonitorInfo]>, current: &[MonitorInfo]) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    previous.len() != current.len()
+        || previous.iter().zip(current).any(|(before, after)| {
+            before.device != after.device
+                || before.monitor != after.monitor
+                || before.dpi != after.dpi
+        })
+}
+
+/// A physical place for the visible card.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CardTarget {
+    pub(crate) origin: Point<DevicePixels>,
+    pub(crate) display_id: DisplayId,
+    /// The target monitor's `dpi / 96`, for converting the card's logical size.
+    pub(crate) scale: f32,
+}
+
+/// Where the visible card belongs, in physical pixels.
+///
+/// A saved point stays on its own monitor while that monitor exists; a point
+/// whose monitor is gone falls back to the monitor that contains it, then to
+/// the primary. The card is clamped into the chosen work area so a removed or
+/// resized display cannot strand it off-screen.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a display's DPI divided by 96 and a screen-sized position fit their wider types"
+)]
+pub(crate) fn card_target(
+    layout: &[MonitorInfo],
+    saved: Option<(Point<DevicePixels>, Option<&str>)>,
+    card: Size<Pixels>,
+    scale: Option<f32>,
+) -> Option<CardTarget> {
+    let primary = layout
+        .iter()
+        .find(|monitor| monitor.monitor.origin == point(DevicePixels(0), DevicePixels(0)))
+        .or_else(|| layout.first())?;
+    let monitor = saved
+        .and_then(|(_, device)| {
+            device.and_then(|device| layout.iter().find(|monitor| monitor.device == device))
+        })
+        .or_else(|| {
+            saved.and_then(|(origin, _)| {
+                layout
+                    .iter()
+                    .find(|monitor| monitor.monitor.contains(&origin))
+            })
+        })
+        .unwrap_or(primary);
+    // A virtual display can report a different effective DPI to
+    // `GetDpiForMonitor` than the DPI the window actually gets. The window's
+    // own scale is the one its card is painted at, so callers that have a
+    // window pass it in; only a not-yet-created window falls back to the
+    // monitor's DPI.
+    let scale = scale.map_or_else(|| f64::from(monitor.dpi) / 96.0, f64::from);
+    let visible = size(
+        DevicePixels((f64::from(f32::from(card.width)) * scale).round() as i32),
+        DevicePixels((f64::from(f32::from(card.height)) * scale).round() as i32),
+    );
+    let margin = (f64::from(MARGIN) * scale).round() as i32;
+    let desired = saved.map_or_else(
+        || {
+            point(
+                monitor.work.right() - visible.width - DevicePixels(margin),
+                monitor.work.bottom() - visible.height - DevicePixels(margin),
+            )
+        },
+        |(origin, _)| origin,
+    );
+    let max = point(
+        (monitor.work.right() - visible.width).max(monitor.work.left()),
+        (monitor.work.bottom() - visible.height).max(monitor.work.top()),
+    );
+    Some(CardTarget {
+        origin: desired.clamp(&monitor.work.origin, &max),
+        display_id: monitor.display_id,
+        scale: scale as f32,
+    })
+}
+
+/// The card's visible size in physical pixels at `scale`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a card's logical size scaled by a display DPI fits in screen-sized i32 pixels"
+)]
+fn visible_card(card: Size<Pixels>, scale: f64) -> Size<DevicePixels> {
+    size(
+        DevicePixels((f64::from(f32::from(card.width)) * scale).round() as i32),
+        DevicePixels((f64::from(f32::from(card.height)) * scale).round() as i32),
+    )
+}
+
+/// How far the card's top-left may move inside `work`: from flush top-left to
+/// flush bottom-right. Smaller than zero when the card does not fit.
+fn free_space(work: Bounds<DevicePixels>, visible: Size<DevicePixels>) -> Size<DevicePixels> {
+    size(
+        (work.size.width - visible.width).max(DevicePixels(0)),
+        (work.size.height - visible.height).max(DevicePixels(0)),
+    )
+}
+
+/// The card's place from one relative position shared by every display.
+///
+/// `relative` is the visible card's top-left as a fraction of the work area's
+/// free space: 0 is flush left/top, 1 is flush right/bottom. The same absolute
+/// point covers a different share of another display, and a point near an
+/// edge clamps, so switching displays shifts the card's relative place; the
+/// same fraction is the same spot in every display's own proportions.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a card's logical size scaled by a display DPI, and a fraction of a screen-sized work area, fit in i32 pixels"
+)]
+pub(crate) fn relative_card_target(
+    layout: &[MonitorInfo],
+    display: Option<&str>,
+    card: Size<Pixels>,
+    scale: Option<f32>,
+    relative: (f32, f32),
+) -> Option<CardTarget> {
+    let primary = layout
+        .iter()
+        .find(|monitor| monitor.monitor.origin == point(DevicePixels(0), DevicePixels(0)))
+        .or_else(|| layout.first())?;
+    let monitor = display
+        .and_then(|device| layout.iter().find(|monitor| monitor.device == device))
+        .unwrap_or(primary);
+    // The window's own scale is the one the card is painted at; only a
+    // not-yet-created window falls back to the monitor's DPI.
+    let scale = scale.map_or_else(|| f64::from(monitor.dpi) / 96.0, f64::from);
+    let visible = visible_card(card, scale);
+    let free = free_space(monitor.work, visible);
+    let offset = |fraction: f32, free: i32| {
+        (f64::from(fraction.clamp(0.0, 1.0)) * f64::from(free)).round() as i32
+    };
+    Some(CardTarget {
+        origin: point(
+            DevicePixels(monitor.work.origin.x.0 + offset(relative.0, free.width.0)),
+            DevicePixels(monitor.work.origin.y.0 + offset(relative.1, free.height.0)),
+        ),
+        display_id: monitor.display_id,
+        scale: scale as f32,
+    })
+}
+
+/// The relative position that puts the visible card at `origin` on `monitor`.
+///
+/// The inverse of [`relative_card_target`]: used to adopt the spot the user
+/// left as the one shared relative position.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "screen-sized pixel positions are exactly representable in f32"
+)]
+pub(crate) fn relative_from_point(
+    origin: Point<DevicePixels>,
+    monitor: &MonitorInfo,
+    card: Size<Pixels>,
+    scale: f32,
+) -> (f32, f32) {
+    let visible = visible_card(card, f64::from(scale));
+    let free = free_space(monitor.work, visible);
+    let fraction = |position: i32, start: i32, free: i32| {
+        if free <= 0 {
+            0.0
+        } else {
+            ((position - start) as f32 / free as f32).clamp(0.0, 1.0)
+        }
+    };
+    (
+        fraction(origin.x.0, monitor.work.origin.x.0, free.width.0),
+        fraction(origin.y.0, monitor.work.origin.y.0, free.height.0),
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) use native::{
+    card_dpi_mismatch, card_needs_raise, card_physical_placement, monitor_layout,
+    place_card_visible, set_card_layout_scale, take_card_user_moved,
+};
+
+/// Show or hide the card's window without destroying it; see
+/// [`crate::platform::hide_card`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::set_card_visible;
+
+/// Remove the Win32 frame from the card's window; see
+/// [`native::make_card_frameless`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::make_card_frameless;
+
+/// Keep the card's window from taking the foreground when clicked; see
+/// [`native::make_card_nonactivating`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::make_card_nonactivating;
+
+/// Move the card without resizing or activating it; see
+/// [`native::move_card_by`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::move_card_by;
+
+/// Watch the pinned card's click-through switch; see
+/// [`native::set_card_click_through`].
+#[cfg(target_os = "windows")]
+pub(crate) use native::set_card_click_through;
 
 /// One native cursor/monitor snapshot, kept through bootstrap-window creation.
 pub(crate) struct RingPlacement {
@@ -345,5 +572,474 @@ mod tests {
     fn a_work_area_smaller_than_the_notice_anchors_it_top_left() {
         let bounds = notice((0, 0, 200, 60), (0, 0, 200, 60), 96).bounds(96);
         assert_eq!(bounds.origin, point(DevicePixels(0), DevicePixels(0)));
+    }
+
+    fn monitor(
+        device: &str,
+        display_id: u64,
+        rect: (i32, i32, i32, i32),
+        work: (i32, i32, i32, i32),
+        dpi: u32,
+    ) -> MonitorInfo {
+        MonitorInfo {
+            device: device.to_string(),
+            display_id: DisplayId::from(display_id),
+            monitor: rect_bounds(rect),
+            work: rect_bounds(work),
+            dpi,
+        }
+    }
+
+    fn card() -> Size<gpui::Pixels> {
+        gpui::size(gpui::px(300.0), gpui::px(211.0))
+    }
+
+    #[test]
+    fn a_saved_card_returns_to_its_own_monitor() {
+        let layout = [
+            monitor(
+                r"\\.\DISPLAY1",
+                1,
+                (0, 0, 2560, 1440),
+                (0, 0, 2560, 1380),
+                120,
+            ),
+            monitor(
+                r"\\.\DISPLAY2",
+                2,
+                (2560, 0, 4480, 1080),
+                (2560, 0, 4480, 1080),
+                96,
+            ),
+        ];
+
+        let target = card_target(
+            &layout,
+            Some((
+                point(DevicePixels(3000), DevicePixels(500)),
+                Some(r"\\.\DISPLAY2"),
+            )),
+            card(),
+            None,
+        )
+        .expect("a target");
+
+        assert_eq!(target.origin, point(DevicePixels(3000), DevicePixels(500)));
+        assert_eq!(target.display_id, DisplayId::from(2));
+        assert!((target.scale - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_missing_display_clamps_the_card_into_the_primary() {
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 2560, 1440),
+            (0, 0, 2560, 1380),
+            120,
+        )];
+
+        let target = card_target(
+            &layout,
+            Some((
+                point(DevicePixels(3000), DevicePixels(500)),
+                Some(r"\\.\DISPLAY2"),
+            )),
+            card(),
+            None,
+        )
+        .expect("a target");
+
+        assert_eq!(
+            target.origin,
+            point(DevicePixels(2560 - 375), DevicePixels(500)),
+            "a point from the gone display is clamped into the primary at its size"
+        );
+        assert_eq!(target.display_id, DisplayId::from(1));
+    }
+
+    #[test]
+    fn a_resized_display_keeps_the_card_inside() {
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 1920, 1080),
+            (0, 0, 1920, 1080),
+            96,
+        )];
+
+        let target = card_target(
+            &layout,
+            Some((
+                point(DevicePixels(1800), DevicePixels(1000)),
+                Some(r"\\.\DISPLAY1"),
+            )),
+            card(),
+            None,
+        )
+        .expect("a target");
+
+        assert_eq!(
+            target.origin,
+            point(DevicePixels(1920 - 300), DevicePixels(1080 - 211))
+        );
+    }
+
+    #[test]
+    fn a_card_without_a_place_opens_bottom_right() {
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 1920, 1080),
+            (0, 0, 1920, 1032),
+            96,
+        )];
+
+        let target = card_target(&layout, None, card(), None).expect("a target");
+
+        assert_eq!(
+            target.origin,
+            point(DevicePixels(1920 - 300 - 24), DevicePixels(1032 - 211 - 24))
+        );
+    }
+
+    #[test]
+    fn a_card_is_sized_at_the_target_scale() {
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 3840, 2160),
+            (0, 0, 3840, 2160),
+            192,
+        )];
+
+        let target = card_target(&layout, None, card(), None).expect("a target");
+
+        assert_eq!(
+            target.origin,
+            point(DevicePixels(3840 - 600 - 48), DevicePixels(2160 - 422 - 48))
+        );
+        assert!((target.scale - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_saved_display_wins_over_the_point_monitor() {
+        let layout = [
+            monitor(
+                r"\\.\DISPLAY1",
+                1,
+                (0, 0, 1920, 1080),
+                (0, 0, 1920, 1080),
+                96,
+            ),
+            monitor(
+                r"\\.\DISPLAY2",
+                2,
+                (1920, 0, 4480, 1440),
+                (1920, 0, 4480, 1440),
+                120,
+            ),
+        ];
+
+        let target = card_target(
+            &layout,
+            Some((
+                point(DevicePixels(500), DevicePixels(500)),
+                Some(r"\\.\DISPLAY2"),
+            )),
+            card(),
+            None,
+        )
+        .expect("a target");
+
+        assert_eq!(
+            target.display_id,
+            DisplayId::from(2),
+            "the pinned display owns the card while it exists"
+        );
+        assert_eq!(target.origin, point(DevicePixels(1920), DevicePixels(500)));
+    }
+
+    #[test]
+    fn a_card_larger_than_the_work_area_anchors_top_left() {
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 200, 60),
+            (0, 0, 200, 60),
+            96,
+        )];
+
+        let target = card_target(&layout, None, card(), None).expect("a target");
+        assert_eq!(target.origin, point(DevicePixels(0), DevicePixels(0)));
+    }
+
+    fn even_card() -> Size<gpui::Pixels> {
+        gpui::size(gpui::px(300.0), gpui::px(212.0))
+    }
+
+    #[test]
+    fn a_relative_spot_lands_in_the_same_place_on_every_display() {
+        let layout = [
+            monitor(
+                r"\\.\DISPLAY1",
+                1,
+                (0, 0, 1920, 1080),
+                (0, 0, 1920, 1032),
+                96,
+            ),
+            monitor(
+                r"\\.\DISPLAY2",
+                2,
+                (1920, 0, 4480, 1440),
+                (1920, 0, 4480, 1440),
+                192,
+            ),
+        ];
+
+        for (display, origin) in [
+            (r"\\.\DISPLAY1", point(DevicePixels(0), DevicePixels(0))),
+            (r"\\.\DISPLAY2", point(DevicePixels(1920), DevicePixels(0))),
+        ] {
+            let target =
+                relative_card_target(&layout, Some(display), even_card(), None, (0.0, 0.0))
+                    .expect("a target");
+            assert_eq!(target.origin, origin, "flush top-left on {display}");
+        }
+
+        let primary = relative_card_target(
+            &layout,
+            Some(r"\\.\DISPLAY1"),
+            even_card(),
+            None,
+            (1.0, 1.0),
+        )
+        .expect("a target");
+        assert_eq!(
+            primary.origin,
+            point(DevicePixels(1920 - 300), DevicePixels(1032 - 212)),
+            "flush bottom-right, independent of the monitor's scale"
+        );
+        let scaled = relative_card_target(
+            &layout,
+            Some(r"\\.\DISPLAY2"),
+            even_card(),
+            None,
+            (1.0, 1.0),
+        )
+        .expect("a target");
+        assert_eq!(
+            scaled.origin,
+            point(DevicePixels(4480 - 600), DevicePixels(1440 - 424)),
+            "the same fraction scales the card with its monitor"
+        );
+    }
+
+    #[test]
+    fn a_relative_center_is_centred_in_each_work_area() {
+        let layout = [
+            monitor(
+                r"\\.\DISPLAY1",
+                1,
+                (0, 0, 1920, 1080),
+                (0, 0, 1920, 1032),
+                96,
+            ),
+            monitor(
+                r"\\.\DISPLAY2",
+                2,
+                (1920, 0, 4480, 1440),
+                (1920, 0, 4480, 1440),
+                96,
+            ),
+        ];
+
+        let primary = relative_card_target(
+            &layout,
+            Some(r"\\.\DISPLAY1"),
+            even_card(),
+            None,
+            (0.5, 0.5),
+        )
+        .expect("a target");
+        assert_eq!(primary.origin, point(DevicePixels(810), DevicePixels(410)));
+        let right = relative_card_target(
+            &layout,
+            Some(r"\\.\DISPLAY2"),
+            even_card(),
+            None,
+            (0.5, 0.5),
+        )
+        .expect("a target");
+        assert_eq!(
+            right.origin,
+            point(DevicePixels(1920 + 1130), DevicePixels(614)),
+            "a 2560-wide work area centres 1130 into its free 2260"
+        );
+    }
+
+    #[test]
+    fn the_relative_spot_stays_on_its_display_and_falls_back_to_the_primary() {
+        let layout = [
+            monitor(
+                r"\\.\DISPLAY1",
+                1,
+                (0, 0, 1920, 1080),
+                (0, 0, 1920, 1080),
+                96,
+            ),
+            monitor(
+                r"\\.\DISPLAY2",
+                2,
+                (1920, 0, 4480, 1440),
+                (1920, 0, 4480, 1440),
+                96,
+            ),
+        ];
+
+        let target = relative_card_target(
+            &layout,
+            Some(r"\\.\DISPLAY2"),
+            even_card(),
+            None,
+            (0.0, 0.0),
+        )
+        .expect("a target");
+        assert_eq!(target.display_id, DisplayId::from(2));
+        assert_eq!(
+            target.origin,
+            point(DevicePixels(1920), DevicePixels(0)),
+            "a present display keeps the spot it was on"
+        );
+
+        let target = relative_card_target(
+            &layout,
+            Some(r"\\.\DISPLAY99"),
+            even_card(),
+            None,
+            (0.0, 0.0),
+        )
+        .expect("a target");
+        assert_eq!(target.display_id, DisplayId::from(1));
+        assert_eq!(target.origin, point(DevicePixels(0), DevicePixels(0)));
+    }
+
+    #[test]
+    fn the_relative_spot_uses_the_window_scale_not_the_reported_monitor_dpi() {
+        let layout = [monitor(
+            r"\\.\DISPLAY56",
+            56,
+            (0, 0, 1600, 900),
+            (0, 0, 1600, 840),
+            120,
+        )];
+
+        let target = relative_card_target(&layout, None, even_card(), Some(1.5), (1.0, 1.0))
+            .expect("a target");
+        assert_eq!(
+            target.origin,
+            point(DevicePixels(1600 - 450), DevicePixels(840 - 318))
+        );
+    }
+
+    #[test]
+    fn a_visible_origin_roundtrips_through_its_relative_spot() {
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 1920, 1080),
+            (0, 0, 1920, 1032),
+            96,
+        )];
+        let monitor = &layout[0];
+
+        for visible in [(0, 0), (810, 410), (1620, 820)] {
+            let origin = point(DevicePixels(visible.0), DevicePixels(visible.1));
+            let relative = relative_from_point(origin, monitor, even_card(), 1.0);
+            let target = relative_card_target(&layout, None, even_card(), Some(1.0), relative)
+                .expect("a target");
+            assert_eq!(target.origin, origin, "origin {visible:?} roundtrips");
+        }
+    }
+
+    #[test]
+    fn a_card_too_wide_for_its_display_anchors_top_left() {
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 200, 100),
+            (0, 0, 200, 100),
+            96,
+        )];
+
+        let target =
+            relative_card_target(&layout, None, even_card(), None, (0.7, 0.8)).expect("a target");
+        assert_eq!(target.origin, point(DevicePixels(0), DevicePixels(0)));
+    }
+
+    #[test]
+    fn the_card_uses_the_window_scale_not_the_reported_monitor_dpi() {
+        // The virtual display reports 120 through GetDpiForMonitor while the
+        // window is actually painted at 150%; sizing the clamp from the
+        // reported DPI would leave the card short of the screen edge.
+        let layout = [monitor(
+            r"\\.\DISPLAY56",
+            56,
+            (0, 0, 1600, 900),
+            (0, 0, 1600, 840),
+            120,
+        )];
+
+        let target = card_target(&layout, None, card(), Some(1.5)).expect("a target");
+
+        assert_eq!(
+            target.origin,
+            point(DevicePixels(1600 - 450 - 36), DevicePixels(840 - 317 - 36))
+        );
+        assert!((target.scale - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_taskbar_change_is_not_a_display_topology_change() {
+        let primary = monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 2560, 1440),
+            (0, 0, 2560, 1380),
+            120,
+        );
+        let taskbar_moved = monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 2560, 1440),
+            (0, 0, 2560, 1440),
+            120,
+        );
+        assert!(!topology_changed(
+            Some(std::slice::from_ref(&primary)),
+            &[taskbar_moved]
+        ));
+
+        let resized = monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 1920, 1080),
+            (0, 0, 1920, 1080),
+            120,
+        );
+        assert!(topology_changed(
+            Some(std::slice::from_ref(&primary)),
+            &[resized]
+        ));
+
+        let higher_dpi = monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 2560, 1440),
+            (0, 0, 2560, 1380),
+            144,
+        );
+        assert!(topology_changed(Some(&[primary]), &[higher_dpi]));
+        assert!(topology_changed(None, &[]));
     }
 }
