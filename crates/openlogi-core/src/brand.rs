@@ -75,6 +75,13 @@ pub fn dev_id(id: &str) -> String {
 /// `CFBundleDisplayName`, and the root the helpers' names are formed from.
 pub const APP_NAME: &str = "OpenLogi";
 
+/// The Flow Indicator card's OS window title.
+///
+/// An identity, not a caption: the Windows tray looks the card up by it when
+/// raising the OpenLogi windows together, and the Linux task list shows it.
+/// Deliberately not localized for the same reason.
+pub const FLOW_INDICATOR_TITLE: &str = "OpenLogi - Flow Indicator";
+
 /// The GUI's executable, as cargo builds it and as the macOS bundle and the
 /// Linux packages ship it. The helpers' executables are [`Helper::executable`].
 pub const GUI_EXECUTABLE: &str = "openlogi-desktop";
