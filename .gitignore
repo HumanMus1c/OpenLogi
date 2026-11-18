@@ -93,3 +93,6 @@ node_modules/
 /.flatpak-builder/
 /build/
 /repo/
+
+# Files salvaged out of target/ by earlier debug sessions - local scratch, never committed.
+/_salvaged-from-target/
