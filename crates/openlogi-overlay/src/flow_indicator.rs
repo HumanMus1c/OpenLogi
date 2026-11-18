@@ -329,9 +329,16 @@ struct SavedPosition {
     /// Windows: the GDI device name of the monitor the card was saved on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     display: Option<String>,
-    /// Windows: the spot the user last left on each monitor, so switching back
-    /// to a display restores that display's own place instead of clamping the
-    /// other display's point onto it.
+    /// Windows: the visible card's origin as a fraction of the work area's
+    /// free space (0..=1). One value shared by every display, so a display,
+    /// resolution, or scale change keeps the same relative place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relative_x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relative_y: Option<f32>,
+    /// Windows: the old per-monitor absolute spots. Kept for files written by
+    /// builds before the relative position, and still recorded for an older
+    /// build that reads the same file; the relative fields take precedence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     positions: Vec<SavedSpot>,
 }
@@ -457,6 +464,8 @@ fn save_position(origin: Point<gpui::Pixels>, pinned: bool) {
         pinned,
         physical: false,
         display: None,
+        relative_x: None,
+        relative_y: None,
         positions: Vec::new(),
     });
 }
@@ -470,6 +479,7 @@ fn save_physical_position(
     origin: Point<DevicePixels>,
     display: Option<&str>,
     pinned: bool,
+    relative: Option<(f32, f32)>,
     positions: &BTreeMap<String, Point<DevicePixels>>,
 ) {
     let mut remembered: Vec<SavedSpot> = positions
@@ -495,6 +505,8 @@ fn save_physical_position(
         pinned,
         physical: true,
         display: display.map(str::to_owned),
+        relative_x: relative.map(|(x, _)| x),
+        relative_y: relative.map(|(_, y)| y),
         positions: remembered,
     });
 }
@@ -2514,6 +2526,7 @@ impl FlowIndicatorView {
         window: &mut Window,
         _origin: Point<gpui::Pixels>,
         placement: Option<&PhysicalPlacement>,
+        relative: Option<(f32, f32)>,
     ) {
         // The tray finds the card by this title to raise it with the GUI's
         // windows; the card is a tool window, so it stays out of the task list.
@@ -2522,13 +2535,21 @@ impl FlowIndicatorView {
         crate::platform::make_card_nonactivating(window);
         window.resize(window_size(self.rows.len()));
         let layout = crate::platform::monitor_layout();
-        let saved = placement.map(|placement| (placement.origin, placement.display.as_deref()));
-        if let Some(target) = crate::platform::card_target(
-            &layout,
-            saved,
-            card_size(self.rows.len()),
-            Some(window.scale_factor()),
-        ) {
+        let card = card_size(self.rows.len());
+        let scale = window.scale_factor();
+        let target = if let Some(relative) = relative {
+            crate::platform::relative_card_target(
+                &layout,
+                placement.and_then(|placement| placement.display.as_deref()),
+                card,
+                Some(scale),
+                relative,
+            )
+        } else {
+            let saved = placement.map(|placement| (placement.origin, placement.display.as_deref()));
+            crate::platform::card_target(&layout, saved, card, Some(scale))
+        };
+        if let Some(target) = target {
             let _ = crate::platform::place_card_visible(window, target.origin);
         }
         // The watch makes the shadow margin click-through in both states and
@@ -2635,6 +2656,10 @@ pub(crate) struct FlowIndicator {
     /// previously used monitor restores that monitor's own place.
     #[cfg(target_os = "windows")]
     positions: BTreeMap<String, Point<DevicePixels>>,
+    /// The card's place as a fraction of each work area's free space, shared
+    /// by every display. This is the position a switch follows.
+    #[cfg(target_os = "windows")]
+    relative: Option<(f32, f32)>,
     /// The monitor layout the last tick saw, to notice a topology change.
     #[cfg(target_os = "windows")]
     monitor_layout: Option<Vec<crate::platform::MonitorInfo>>,
@@ -2703,8 +2728,8 @@ impl FlowIndicator {
         // logical coordinates: adopt its point as physical so the card stays
         // where it is seen today, then rewrite it from the first tick.
         #[cfg(target_os = "windows")]
-        let (placement, placement_needs_save, positions) =
-            load_saved().map_or((None, false, BTreeMap::new()), |saved| {
+        let (placement, placement_needs_save, positions, relative) =
+            load_saved().map_or((None, false, BTreeMap::new(), None), |saved| {
                 let (placement, legacy) = saved.physical_placement();
                 let mut positions: BTreeMap<String, Point<DevicePixels>> = saved
                     .positions
@@ -2714,7 +2739,8 @@ impl FlowIndicator {
                 if let Some(display) = &placement.display {
                     positions.entry(display.clone()).or_insert(placement.origin);
                 }
-                (Some(placement), legacy, positions)
+                let relative = saved.relative_x.zip(saved.relative_y);
+                (Some(placement), legacy, positions, relative)
             });
         Self {
             settings,
@@ -2734,6 +2760,8 @@ impl FlowIndicator {
             placement,
             #[cfg(target_os = "windows")]
             positions,
+            #[cfg(target_os = "windows")]
+            relative,
             #[cfg(target_os = "windows")]
             monitor_layout: None,
             #[cfg(target_os = "windows")]
@@ -3010,16 +3038,37 @@ impl FlowIndicator {
         let Some(handle) = self.window.as_ref() else {
             return;
         };
-        let Some(saved) = self.target_placement(&layout) else {
-            return;
-        };
+        let relative = self.relative;
+        let saved = self.target_placement(&layout);
         let _ = handle.update(cx, |view, window, _| {
-            if let Some(target) = crate::platform::card_target(
-                &layout,
-                Some((saved.origin, saved.display.as_deref())),
-                card_size(view.rows.len()),
-                Some(window.scale_factor()),
-            ) {
+            let card = card_size(view.rows.len());
+            let scale = window.scale_factor();
+            let target = if let Some(relative) = relative {
+                // Follow the monitor the card is on, not the one the file
+                // remembers: Windows may have moved the card off a monitor
+                // that is going away. A display that is already gone resolves
+                // to the primary.
+                let current = crate::platform::card_physical_placement(window)
+                    .map(|(_, display)| display)
+                    .filter(|display| layout.iter().any(|monitor| &monitor.device == display));
+                crate::platform::relative_card_target(
+                    &layout,
+                    current.as_deref(),
+                    card,
+                    Some(scale),
+                    relative,
+                )
+            } else {
+                saved.as_ref().and_then(|saved| {
+                    crate::platform::card_target(
+                        &layout,
+                        Some((saved.origin, saved.display.as_deref())),
+                        card,
+                        Some(scale),
+                    )
+                })
+            };
+            if let Some(target) = target {
                 let before =
                     crate::platform::card_physical_placement(window).map(|(origin, _)| origin);
                 let _ = crate::platform::place_card_visible(window, target.origin);
@@ -3064,6 +3113,7 @@ impl FlowIndicator {
                     placement.origin,
                     placement.display.as_deref(),
                     self.pinned_seen,
+                    self.relative,
                     &self.positions,
                 );
             }
@@ -3208,6 +3258,7 @@ impl FlowIndicator {
                 placement.origin,
                 placement.display.as_deref(),
                 self.pinned.get(),
+                self.relative,
                 &self.positions,
             );
         }
@@ -3227,37 +3278,80 @@ impl FlowIndicator {
         let user_moved = crate::platform::take_card_user_moved();
         let actual = self.window.as_ref().and_then(|handle| {
             handle
-                .update(cx, |_, window, _| {
-                    crate::platform::card_physical_placement(window)
+                .update(cx, |view, window, _| {
+                    crate::platform::card_physical_placement(window).map(|(origin, display)| {
+                        (origin, display, view.rows.len(), window.scale_factor())
+                    })
                 })
                 .ok()
                 .flatten()
         });
-        let mut adopted = false;
-        if let Some((origin, display)) = actual {
-            // A saved monitor name of `None` is a legacy file: whatever display
-            // currently holds the card is the one to record.
-            let same_display = self.placement.as_ref().is_none_or(|placement| {
-                placement
-                    .display
-                    .as_deref()
-                    .is_none_or(|saved| saved == display)
+        let (origin, display, rows, scale) = actual?;
+        // A saved monitor name of `None` is a legacy file: whatever display
+        // currently holds the card is the one to record.
+        let same_display = self.placement.as_ref().is_none_or(|placement| {
+            placement
+                .display
+                .as_deref()
+                .is_none_or(|saved| saved == display.as_str())
+        });
+        let layout = crate::platform::monitor_layout();
+        // The saved display can be the one that just went away; the card then
+        // lives on the display Windows moved it to, and the file should say so.
+        let saved_display_present = self.placement.as_ref().is_none_or(|placement| {
+            placement
+                .display
+                .as_deref()
+                .is_none_or(|saved| layout.iter().any(|monitor| monitor.device == saved))
+        });
+        let adopt = adopt_now
+            || user_moved
+            || self.placement.is_none()
+            || (self.placement_needs_save && same_display)
+            || !saved_display_present;
+        if adopt {
+            self.positions.insert(display.clone(), origin);
+            self.placement = Some(PhysicalPlacement {
+                origin,
+                display: Some(display.clone()),
             });
-            if adopt_now
-                || user_moved
-                || self.placement.is_none()
-                || (self.placement_needs_save && same_display)
-            {
-                self.positions.insert(display.clone(), origin);
-                self.placement = Some(PhysicalPlacement {
-                    origin,
-                    display: Some(display),
-                });
-                adopted = true;
-            }
-            self.placement_needs_save = false;
         }
-        if adopted {
+        // A file written before the relative position has none yet: seed it
+        // from the spot the card is seen at, so the next display switch keeps
+        // that same place instead of the absolute point.
+        let seed = self.relative.is_none();
+        if adopt || seed {
+            let monitor = layout
+                .iter()
+                .find(|monitor| monitor.device == display)
+                .or_else(|| {
+                    layout
+                        .iter()
+                        .find(|monitor| monitor.monitor.contains(&origin))
+                })
+                .or_else(|| {
+                    layout.iter().find(|monitor| {
+                        monitor.monitor.origin == point(DevicePixels(0), DevicePixels(0))
+                    })
+                })
+                .or_else(|| layout.first());
+            if let Some(monitor) = monitor {
+                let relative =
+                    crate::platform::relative_from_point(origin, monitor, card_size(rows), scale);
+                self.relative = Some(relative);
+                if seed {
+                    let monitor_name = display.clone();
+                    info!(
+                        relative_x = f64::from(relative.0),
+                        relative_y = f64::from(relative.1),
+                        monitor = monitor_name.as_str(),
+                        "Flow Indicator seeded its shared relative position"
+                    );
+                }
+            }
+        }
+        self.placement_needs_save = false;
+        if adopt || seed {
             self.placement.clone()
         } else {
             None
@@ -3436,6 +3530,8 @@ impl FlowIndicator {
             )]
             let want_topmost = self.effective_mode() == FlowIndicatorDisplayMode::Topmost;
             let new_row_count = rows.len();
+            #[cfg(target_os = "windows")]
+            let relative_active = self.relative.is_some();
             let size_changed = handle
                 .update(cx, |view, window, cx| {
                     let size_changed = view.rows.len() != new_row_count;
@@ -3465,7 +3561,7 @@ impl FlowIndicator {
                     #[cfg(any(target_os = "windows", target_os = "linux"))]
                     if let Some(desired) = desired {
                         #[cfg(target_os = "windows")]
-                        {
+                        if !(relative_active && size_changed) {
                             let current = window.bounds().origin;
                             if current != desired {
                                 crate::platform::move_card_by(
@@ -3483,9 +3579,17 @@ impl FlowIndicator {
                 .unwrap_or(false);
             #[cfg(target_os = "windows")]
             if size_changed {
-                // The row-count resize anchors the card's bottom edge itself;
-                // remember that deliberate move on the next tick.
-                self.placement_needs_save = true;
+                if relative_active {
+                    // The relative spot is pinned to the card's top-left; a
+                    // card that changed height must be re-anchored, not
+                    // adopted, or the next display switch would inherit the
+                    // bottom-edge shift.
+                    self.placement_settle_until = Some(Instant::now() + DISPLAY_SETTLE);
+                } else {
+                    // The row-count resize anchors the card's bottom edge
+                    // itself; remember that deliberate move on the next tick.
+                    self.placement_needs_save = true;
+                }
             }
             #[cfg(not(target_os = "windows"))]
             let _ = size_changed;
@@ -3546,6 +3650,7 @@ impl FlowIndicator {
                     placement.origin,
                     placement.display.as_deref(),
                     self.pinned.get(),
+                    self.relative,
                     &self.positions,
                 );
             }
@@ -3625,11 +3730,24 @@ impl FlowIndicator {
     fn card_bounds(&self, rows: usize) -> (Bounds<gpui::Pixels>, Option<DisplayId>) {
         let layout = crate::platform::monitor_layout();
         let target_placement = self.target_placement(&layout);
-        let saved = target_placement
-            .as_ref()
-            .map(|placement| (placement.origin, placement.display.as_deref()));
-        let Some(target) = crate::platform::card_target(&layout, saved, card_size(rows), None)
-        else {
+        let card = card_size(rows);
+        let target = if let Some(relative) = self.relative {
+            crate::platform::relative_card_target(
+                &layout,
+                target_placement
+                    .as_ref()
+                    .and_then(|placement| placement.display.as_deref()),
+                card,
+                None,
+                relative,
+            )
+        } else {
+            let saved = target_placement
+                .as_ref()
+                .map(|placement| (placement.origin, placement.display.as_deref()));
+            crate::platform::card_target(&layout, saved, card, None)
+        };
+        let Some(target) = target else {
             // No monitor reported (a very early boot): open at the origin and
             // let the first tick place the card once the layout is known.
             return (
@@ -3706,6 +3824,8 @@ impl FlowIndicator {
         };
         #[cfg(target_os = "windows")]
         let placement = self.target_placement(&crate::platform::monitor_layout());
+        #[cfg(target_os = "windows")]
+        let relative = self.relative;
         let configured = handle.update(cx, |view, window, cx| {
             view.mode = settings_mode;
             view.appearance_preference = preference;
@@ -3716,7 +3836,7 @@ impl FlowIndicator {
             view.refresh_shadow(window, cx);
             view.refresh_value_shadows(window, cx);
             #[cfg(target_os = "windows")]
-            view.on_opened(window, origin, placement.as_ref());
+            view.on_opened(window, origin, placement.as_ref(), relative);
             #[cfg(not(target_os = "windows"))]
             view.on_opened(window, origin);
             // X11's card is always a managed toplevel; its initial stacking is
@@ -4229,6 +4349,8 @@ mod tests {
             pinned: true,
             physical: true,
             display: Some(r"\\.\DISPLAY1".to_string()),
+            relative_x: Some(0.75),
+            relative_y: Some(0.25),
             positions: positions.clone(),
         })
         .expect("serialize");
@@ -4237,6 +4359,10 @@ mod tests {
         assert_eq!(
             (saved.physical, saved.display.as_deref()),
             (true, Some(r"\\.\DISPLAY1"))
+        );
+        assert_eq!(
+            (saved.relative_x, saved.relative_y),
+            (Some(0.75), Some(0.25))
         );
         assert_eq!(saved.positions, positions);
     }
@@ -4247,6 +4373,7 @@ mod tests {
         assert!(!saved.pinned);
         assert!(!saved.physical, "an old file is still logical coordinates");
         assert_eq!(saved.display, None);
+        assert_eq!((saved.relative_x, saved.relative_y), (None, None));
     }
 
     #[cfg(target_os = "windows")]

@@ -954,3 +954,22 @@ docs commit that follows fills the hashes.
   restore path is covered by the core file test, the agent publication test,
   and the tray's existing offline-row test.
   Status: kept.
+
+## 23. Flow Indicator position across displays (2026-11-18)
+
+- `pending` **feat(overlay): keep the card at the same relative spot across displays** — kept.
+  Why: the card saved an absolute origin per monitor, so a resolution or scale
+  change left it clamped in the wrong place, and a display switch restored a
+  point that no longer matched the work area.
+  Fix: the Windows card saves its visible origin as a fraction of the work
+  area's free space (`relative_x`/`relative_y`), one value shared by every
+  display. A file written before those fields seeds them from the spot the card
+  is seen at; the per-display absolute spots remain for older builds and as the
+  legacy fallback. A topology change follows the display the card is actually
+  on, and a row-count resize re-anchors the card instead of adopting the
+  bottom-edge shift.
+  Verified: no run recorded in this session. The commit adds Windows unit tests
+  for the same relative place across displays, a centred card, monitor
+  fallback, window scale vs reported DPI, the visible-origin round trip, and a
+  card too wide for its display.
+  Status: kept.

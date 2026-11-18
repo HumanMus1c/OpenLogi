@@ -16,8 +16,8 @@ pub(crate) use placement::{NoticePlacement, RingPlacement};
 #[cfg(target_os = "windows")]
 pub(crate) use windows::{
     MonitorInfo, NoticePlacement, RingPlacement, card_dpi_mismatch, card_needs_raise,
-    card_physical_placement, card_target, monitor_layout, place_card_visible,
-    set_card_layout_scale, take_card_user_moved, topology_changed,
+    card_physical_placement, card_target, monitor_layout, place_card_visible, relative_card_target,
+    relative_from_point, set_card_layout_scale, take_card_user_moved, topology_changed,
 };
 
 /// Take the card's window off the screen without destroying it.
