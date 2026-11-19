@@ -973,3 +973,36 @@ docs commit that follows fills the hashes.
   fallback, window scale vs reported DPI, the visible-origin round trip, and a
   card too wide for its display.
   Status: kept.
+
+## 24. Flow Indicator edge insets (2026-11-19)
+
+- `pending` **fix(overlay): anchor the card's edges instead of its free-space share** — kept.
+  Why: the shared spot was the visible origin as a fraction of the work area's
+  free space, so the card's own DPI-scaled size was part of the mapping. A
+  live switch on one 1920x1032 work area (125% -> 100%) moved the card from
+  (1467, 437) to (1538, 449): +71 px sideways, +12 px down, with the pinned
+  right/top gaps drifting by a few pixels. The reopen also adopted the
+  outgoing window's origin with `close()` before the fresh window had the new
+  monitor's scale, so a transient painted size could be baked into the shared
+  fraction, and the reopen placed against the file's display instead of the
+  one Windows had moved the card to.
+  Fix: the file records the gap from the nearest work-area edge on each axis
+  (`inset_x`/`inset_y` as fractions of the work area, `inset_from_right`/
+  `inset_from_bottom`), measured from the card's own edge. A scale change
+  therefore keeps the physical gap to the anchored edges; a resolution or
+  display change keeps the same relative gap. The internal reopens close
+  without adopting, and a topology reopen carries the card's actual display
+  into the new window. A file without the inset fields is first placed by the
+  old free-space share (still read, no longer written), so the upgrade keeps
+  the card where the old build showed it, and the first tick records the edge
+  insets from that spot.
+  Verified: Windows `cargo test -p openlogi-overlay` (125 passed, 4 ignored),
+  `cargo clippy -p openlogi-overlay --all-targets -- -D warnings`, `cargo fmt
+  -p openlogi-overlay -- --check`. The 16:36 live file and window rect were
+  measured against the old formula before the change. A live upgrade run
+  opened the rewritten pre-inset file at the spot the old build showed
+  (visible origin 1538,449 in a 1920x1032 work area) and seeded
+  `inset_x=0.042708`/`inset_y=0.435078`, `from_right=true`,
+  `from_bottom=false`. No display switch has been run against this build yet;
+  Linux/macOS not compiled.
+  Status: kept.

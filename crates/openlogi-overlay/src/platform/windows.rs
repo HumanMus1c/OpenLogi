@@ -127,22 +127,79 @@ fn visible_card(card: Size<Pixels>, scale: f64) -> Size<DevicePixels> {
     )
 }
 
-/// How far the card's top-left may move inside `work`: from flush top-left to
-/// flush bottom-right. Smaller than zero when the card does not fit.
-fn free_space(work: Bounds<DevicePixels>, visible: Size<DevicePixels>) -> Size<DevicePixels> {
-    size(
-        (work.size.width - visible.width).max(DevicePixels(0)),
-        (work.size.height - visible.height).max(DevicePixels(0)),
-    )
+/// How far the visible card sits from the two work-area edges it hugs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CardInsets {
+    /// Each axis is measured from its nearer edge when the spot is recorded.
+    pub(crate) from_right: bool,
+    pub(crate) from_bottom: bool,
+    /// The gaps as fractions of the work area's width and height.
+    pub(crate) x: f32,
+    pub(crate) y: f32,
 }
 
-/// The card's place from one relative position shared by every display.
+/// The card's place from the edges it hugged when the spot was recorded.
 ///
-/// `relative` is the visible card's top-left as a fraction of the work area's
-/// free space: 0 is flush left/top, 1 is flush right/bottom. The same absolute
-/// point covers a different share of another display, and a point near an
-/// edge clamps, so switching displays shifts the card's relative place; the
-/// same fraction is the same spot in every display's own proportions.
+/// The gaps are fractions of the work area, so a resolution or display change
+/// keeps the same relative distance and a scale change keeps the same physical
+/// gap to the anchored edges (the card's other sides move as its scaled size
+/// changes). Measuring from the card's own edge, rather than its origin
+/// against the free space, is what keeps a pinned corner pinned.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a card's logical size scaled by a display DPI, and a fraction of a screen-sized work area, fit in i32 pixels"
+)]
+pub(crate) fn inset_card_target(
+    layout: &[MonitorInfo],
+    display: Option<&str>,
+    card: Size<Pixels>,
+    scale: Option<f32>,
+    insets: CardInsets,
+) -> Option<CardTarget> {
+    let primary = layout
+        .iter()
+        .find(|monitor| monitor.monitor.origin == point(DevicePixels(0), DevicePixels(0)))
+        .or_else(|| layout.first())?;
+    let monitor = display
+        .and_then(|device| layout.iter().find(|monitor| monitor.device == device))
+        .unwrap_or(primary);
+    // The window's own scale is the one the card is painted at; only a
+    // not-yet-created window falls back to the monitor's DPI.
+    let scale = scale.map_or_else(|| f64::from(monitor.dpi) / 96.0, f64::from);
+    let visible = visible_card(card, scale);
+    let work = monitor.work;
+    let gap = |fraction: f32, length: i32| {
+        (f64::from(fraction.clamp(0.0, 1.0)) * f64::from(length)).round() as i32
+    };
+    let x = if insets.from_right {
+        work.right().0 - visible.width.0 - gap(insets.x, work.size.width.0)
+    } else {
+        work.left().0 + gap(insets.x, work.size.width.0)
+    };
+    let y = if insets.from_bottom {
+        work.bottom().0 - visible.height.0 - gap(insets.y, work.size.height.0)
+    } else {
+        work.top().0 + gap(insets.y, work.size.height.0)
+    };
+    let max = point(
+        (work.right() - visible.width).max(work.left()),
+        (work.bottom() - visible.height).max(work.top()),
+    );
+    Some(CardTarget {
+        origin: point(DevicePixels(x), DevicePixels(y)).clamp(&work.origin, &max),
+        display_id: monitor.display_id,
+        scale: scale as f32,
+    })
+}
+
+/// The card's place from the free-space share a pre-inset file recorded.
+///
+/// Only an upgrade path: the build before the edge insets stored the visible
+/// origin as a fraction of the work area's free space, and placing such a
+/// file with [`inset_card_target`] (or its stale absolute point) would move
+/// the card on the first launch after the upgrade. The old formula puts it
+/// exactly where the old build showed it, and the first tick then records
+/// the edge insets from that spot.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "a card's logical size scaled by a display DPI, and a fraction of a screen-sized work area, fit in i32 pixels"
@@ -161,51 +218,59 @@ pub(crate) fn relative_card_target(
     let monitor = display
         .and_then(|device| layout.iter().find(|monitor| monitor.device == device))
         .unwrap_or(primary);
-    // The window's own scale is the one the card is painted at; only a
-    // not-yet-created window falls back to the monitor's DPI.
     let scale = scale.map_or_else(|| f64::from(monitor.dpi) / 96.0, f64::from);
     let visible = visible_card(card, scale);
-    let free = free_space(monitor.work, visible);
+    let free = point(
+        (monitor.work.size.width - visible.width).max(DevicePixels(0)),
+        (monitor.work.size.height - visible.height).max(DevicePixels(0)),
+    );
     let offset = |fraction: f32, free: i32| {
         (f64::from(fraction.clamp(0.0, 1.0)) * f64::from(free)).round() as i32
     };
     Some(CardTarget {
         origin: point(
-            DevicePixels(monitor.work.origin.x.0 + offset(relative.0, free.width.0)),
-            DevicePixels(monitor.work.origin.y.0 + offset(relative.1, free.height.0)),
+            DevicePixels(monitor.work.origin.x.0 + offset(relative.0, free.x.0)),
+            DevicePixels(monitor.work.origin.y.0 + offset(relative.1, free.y.0)),
         ),
         display_id: monitor.display_id,
         scale: scale as f32,
     })
 }
 
-/// The relative position that puts the visible card at `origin` on `monitor`.
+/// The insets that put the visible card at `origin` on `monitor`.
 ///
-/// The inverse of [`relative_card_target`]: used to adopt the spot the user
-/// left as the one shared relative position.
+/// The inverse of [`inset_card_target`]: used to adopt the spot the user left.
 #[expect(
     clippy::cast_precision_loss,
     reason = "screen-sized pixel positions are exactly representable in f32"
 )]
-pub(crate) fn relative_from_point(
+pub(crate) fn insets_from_point(
     origin: Point<DevicePixels>,
     monitor: &MonitorInfo,
     card: Size<Pixels>,
     scale: f32,
-) -> (f32, f32) {
+) -> CardInsets {
     let visible = visible_card(card, f64::from(scale));
-    let free = free_space(monitor.work, visible);
-    let fraction = |position: i32, start: i32, free: i32| {
-        if free <= 0 {
+    let work = monitor.work;
+    let fraction = |gap: i32, length: i32| {
+        if length <= 0 {
             0.0
         } else {
-            ((position - start) as f32 / free as f32).clamp(0.0, 1.0)
+            (gap.max(0) as f32 / length as f32).clamp(0.0, 1.0)
         }
     };
-    (
-        fraction(origin.x.0, monitor.work.origin.x.0, free.width.0),
-        fraction(origin.y.0, monitor.work.origin.y.0, free.height.0),
-    )
+    let left = origin.x.0 - work.left().0;
+    let right = work.right().0 - (origin.x.0 + visible.width.0);
+    let top = origin.y.0 - work.top().0;
+    let bottom = work.bottom().0 - (origin.y.0 + visible.height.0);
+    let from_right = right < left;
+    let from_bottom = bottom < top;
+    CardInsets {
+        from_right,
+        from_bottom,
+        x: fraction(if from_right { right } else { left }, work.size.width.0),
+        y: fraction(if from_bottom { bottom } else { top }, work.size.height.0),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -778,154 +843,128 @@ mod tests {
         gpui::size(gpui::px(300.0), gpui::px(212.0))
     }
 
-    #[test]
-    fn a_relative_spot_lands_in_the_same_place_on_every_display() {
-        let layout = [
-            monitor(
-                r"\\.\DISPLAY1",
-                1,
-                (0, 0, 1920, 1080),
-                (0, 0, 1920, 1032),
-                96,
-            ),
-            monitor(
-                r"\\.\DISPLAY2",
-                2,
-                (1920, 0, 4480, 1440),
-                (1920, 0, 4480, 1440),
-                192,
-            ),
-        ];
-
-        for (display, origin) in [
-            (r"\\.\DISPLAY1", point(DevicePixels(0), DevicePixels(0))),
-            (r"\\.\DISPLAY2", point(DevicePixels(1920), DevicePixels(0))),
-        ] {
-            let target =
-                relative_card_target(&layout, Some(display), even_card(), None, (0.0, 0.0))
-                    .expect("a target");
-            assert_eq!(target.origin, origin, "flush top-left on {display}");
-        }
-
-        let primary = relative_card_target(
-            &layout,
-            Some(r"\\.\DISPLAY1"),
-            even_card(),
-            None,
-            (1.0, 1.0),
-        )
-        .expect("a target");
-        assert_eq!(
-            primary.origin,
-            point(DevicePixels(1920 - 300), DevicePixels(1032 - 212)),
-            "flush bottom-right, independent of the monitor's scale"
-        );
-        let scaled = relative_card_target(
-            &layout,
-            Some(r"\\.\DISPLAY2"),
-            even_card(),
-            None,
-            (1.0, 1.0),
-        )
-        .expect("a target");
-        assert_eq!(
-            scaled.origin,
-            point(DevicePixels(4480 - 600), DevicePixels(1440 - 424)),
-            "the same fraction scales the card with its monitor"
-        );
+    /// A one-row card, 300x97 logical, the size the live file recorded.
+    fn reading_card() -> Size<gpui::Pixels> {
+        gpui::size(gpui::px(300.0), gpui::px(97.0))
     }
 
     #[test]
-    fn a_relative_center_is_centred_in_each_work_area() {
-        let layout = [
-            monitor(
-                r"\\.\DISPLAY1",
-                1,
-                (0, 0, 1920, 1080),
-                (0, 0, 1920, 1032),
-                96,
-            ),
-            monitor(
-                r"\\.\DISPLAY2",
-                2,
-                (1920, 0, 4480, 1440),
-                (1920, 0, 4480, 1440),
-                96,
-            ),
-        ];
+    fn a_scale_change_keeps_the_gap_to_the_anchored_edges() {
+        // The pinned spot the live file recorded: a 1920x1032 work area, the
+        // card painted at 125%, its nearest edges 78 px from the right and
+        // 437 from the top. At 100% the card shrinks, so its far sides move —
+        // the gaps to the anchored edges stay exactly where the user left
+        // them, which is where the origin-side drift came from.
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 1920, 1080),
+            (0, 0, 1920, 1032),
+            120,
+        )];
+        let origin = point(DevicePixels(1467), DevicePixels(437));
 
-        let primary = relative_card_target(
-            &layout,
-            Some(r"\\.\DISPLAY1"),
-            even_card(),
-            None,
-            (0.5, 0.5),
-        )
-        .expect("a target");
-        assert_eq!(primary.origin, point(DevicePixels(810), DevicePixels(410)));
-        let right = relative_card_target(
-            &layout,
-            Some(r"\\.\DISPLAY2"),
-            even_card(),
-            None,
-            (0.5, 0.5),
-        )
-        .expect("a target");
-        assert_eq!(
-            right.origin,
-            point(DevicePixels(1920 + 1130), DevicePixels(614)),
-            "a 2560-wide work area centres 1130 into its free 2260"
+        let insets = insets_from_point(origin, &layout[0], reading_card(), 1.25);
+        assert!(insets.from_right, "the card hugs the right edge");
+        assert!(
+            !insets.from_bottom,
+            "the top edge is the nearer vertical edge"
         );
-    }
+        assert!((insets.x - 78.0 / 1920.0).abs() < 1e-6);
+        assert!((insets.y - 437.0 / 1032.0).abs() < 1e-6);
 
-    #[test]
-    fn the_relative_spot_stays_on_its_display_and_falls_back_to_the_primary() {
-        let layout = [
-            monitor(
-                r"\\.\DISPLAY1",
-                1,
-                (0, 0, 1920, 1080),
-                (0, 0, 1920, 1080),
-                96,
-            ),
-            monitor(
-                r"\\.\DISPLAY2",
-                2,
-                (1920, 0, 4480, 1440),
-                (1920, 0, 4480, 1440),
-                96,
-            ),
-        ];
-
-        let target = relative_card_target(
-            &layout,
-            Some(r"\\.\DISPLAY2"),
-            even_card(),
-            None,
-            (0.0, 0.0),
-        )
-        .expect("a target");
-        assert_eq!(target.display_id, DisplayId::from(2));
+        let target =
+            inset_card_target(&layout, None, reading_card(), Some(1.0), insets).expect("a target");
         assert_eq!(
             target.origin,
-            point(DevicePixels(1920), DevicePixels(0)),
-            "a present display keeps the spot it was on"
+            point(DevicePixels(1920 - 300 - 78), DevicePixels(437)),
+            "the pinned top and right gaps do not move with the scale"
         );
+    }
 
-        let target = relative_card_target(
-            &layout,
-            Some(r"\\.\DISPLAY99"),
-            even_card(),
-            None,
-            (0.0, 0.0),
-        )
-        .expect("a target");
+    #[test]
+    fn a_resolution_change_scales_the_gap_with_the_work_area() {
+        let insets = CardInsets {
+            from_right: true,
+            from_bottom: false,
+            x: 78.0 / 1920.0,
+            y: 437.0 / 1032.0,
+        };
+        let layout = [monitor(
+            r"\\.\DISPLAY2",
+            2,
+            (0, 0, 2560, 1440),
+            (0, 0, 2560, 1440),
+            96,
+        )];
+
+        let target =
+            inset_card_target(&layout, None, reading_card(), Some(1.0), insets).expect("a target");
+
+        assert_eq!(
+            target.origin,
+            point(DevicePixels(2560 - 300 - 104), DevicePixels(610))
+        );
+    }
+
+    #[test]
+    fn the_nearer_edges_are_the_ones_that_anchor() {
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 1920, 1080),
+            (0, 0, 1920, 1032),
+            96,
+        )];
+        let origin = point(DevicePixels(100), DevicePixels(40));
+
+        let insets = insets_from_point(origin, &layout[0], reading_card(), 1.0);
+
+        assert!(!insets.from_right, "the card sits nearer the left edge");
+        assert!(!insets.from_bottom, "and nearer the top edge");
+        let target =
+            inset_card_target(&layout, None, reading_card(), Some(1.0), insets).expect("a target");
+        assert_eq!(target.origin, origin);
+    }
+
+    #[test]
+    fn the_inset_spot_stays_on_its_display_and_falls_back_to_the_primary() {
+        let layout = [
+            monitor(
+                r"\\.\DISPLAY1",
+                1,
+                (0, 0, 1920, 1080),
+                (0, 0, 1920, 1080),
+                96,
+            ),
+            monitor(
+                r"\\.\DISPLAY2",
+                2,
+                (1920, 0, 4480, 1440),
+                (1920, 0, 4480, 1440),
+                96,
+            ),
+        ];
+        let insets = CardInsets {
+            from_right: false,
+            from_bottom: false,
+            x: 0.0,
+            y: 0.0,
+        };
+
+        let target = inset_card_target(&layout, Some(r"\\.\DISPLAY2"), even_card(), None, insets)
+            .expect("a target");
+        assert_eq!(target.display_id, DisplayId::from(2));
+        assert_eq!(target.origin, point(DevicePixels(1920), DevicePixels(0)));
+
+        let target = inset_card_target(&layout, Some(r"\\.\DISPLAY99"), even_card(), None, insets)
+            .expect("a target");
         assert_eq!(target.display_id, DisplayId::from(1));
         assert_eq!(target.origin, point(DevicePixels(0), DevicePixels(0)));
     }
 
     #[test]
-    fn the_relative_spot_uses_the_window_scale_not_the_reported_monitor_dpi() {
+    fn the_inset_spot_uses_the_window_scale_not_the_reported_monitor_dpi() {
         let layout = [monitor(
             r"\\.\DISPLAY56",
             56,
@@ -933,17 +972,27 @@ mod tests {
             (0, 0, 1600, 840),
             120,
         )];
+        let insets = CardInsets {
+            from_right: true,
+            from_bottom: true,
+            x: 0.0625,
+            y: 0.5,
+        };
 
-        let target = relative_card_target(&layout, None, even_card(), Some(1.5), (1.0, 1.0))
-            .expect("a target");
+        let target =
+            inset_card_target(&layout, None, even_card(), Some(1.5), insets).expect("a target");
+
         assert_eq!(
             target.origin,
-            point(DevicePixels(1600 - 450), DevicePixels(840 - 318))
+            point(
+                DevicePixels(1600 - 450 - 100),
+                DevicePixels(840 - 318 - 420)
+            )
         );
     }
 
     #[test]
-    fn a_visible_origin_roundtrips_through_its_relative_spot() {
+    fn a_visible_origin_roundtrips_through_its_insets() {
         let layout = [monitor(
             r"\\.\DISPLAY1",
             1,
@@ -953,13 +1002,38 @@ mod tests {
         )];
         let monitor = &layout[0];
 
-        for visible in [(0, 0), (810, 410), (1620, 820)] {
+        for visible in [(0, 0), (100, 40), (810, 410), (1620, 820)] {
             let origin = point(DevicePixels(visible.0), DevicePixels(visible.1));
-            let relative = relative_from_point(origin, monitor, even_card(), 1.0);
-            let target = relative_card_target(&layout, None, even_card(), Some(1.0), relative)
+            let insets = insets_from_point(origin, monitor, reading_card(), 1.0);
+            let target = inset_card_target(&layout, None, reading_card(), Some(1.0), insets)
                 .expect("a target");
             assert_eq!(target.origin, origin, "origin {visible:?} roundtrips");
         }
+    }
+
+    #[test]
+    fn the_pre_inset_share_places_an_upgraded_file_where_it_was_seen() {
+        // The old build's live spot under this share, work area and card:
+        // the upgrade must open the file there, not at its stale absolute
+        // point, before the first tick records the edge insets.
+        let layout = [monitor(
+            r"\\.\DISPLAY1",
+            1,
+            (0, 0, 1920, 1080),
+            (0, 0, 1920, 1032),
+            96,
+        )];
+
+        let target = relative_card_target(
+            &layout,
+            None,
+            reading_card(),
+            Some(1.0),
+            (0.949_514_57, 0.479_692_64),
+        )
+        .expect("a target");
+
+        assert_eq!(target.origin, point(DevicePixels(1538), DevicePixels(449)));
     }
 
     #[test]
@@ -971,9 +1045,14 @@ mod tests {
             (0, 0, 200, 100),
             96,
         )];
+        let insets = CardInsets {
+            from_right: false,
+            from_bottom: false,
+            x: 0.7,
+            y: 0.8,
+        };
 
-        let target =
-            relative_card_target(&layout, None, even_card(), None, (0.7, 0.8)).expect("a target");
+        let target = inset_card_target(&layout, None, even_card(), None, insets).expect("a target");
         assert_eq!(target.origin, point(DevicePixels(0), DevicePixels(0)));
     }
 
