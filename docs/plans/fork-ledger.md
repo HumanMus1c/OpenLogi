@@ -828,7 +828,7 @@ docs commit that follows fills the hashes.
 
 ## 18. Flow Indicator status-glyph typography (2026-11-09)
 
-- `pending` **fix(overlay): put the offline tag and the charging bolt on the row's type scale** — kept.
+- `c94d19eb` **fix(overlay): put the offline tag and the charging bolt on the row's type scale** — kept.
   Why: the offline word was 10 px / weight 400 while the name and reading were
   16 px / 500–600, and it carried only the eight-copy hairline. The pinned card
   is a transparent glyph HUD, so the tag was the only row text without the
@@ -853,7 +853,7 @@ docs commit that follows fills the hashes.
 
 ## 19. Flow Indicator restart persistence (2026-11-09)
 
-- `pending` **fix(overlay): keep a pinned card through an agent restart** — kept.
+- `6df02a1b` **fix(overlay): keep a pinned card through an agent restart** — kept.
   Why: the agent's last-known battery cache is process-local, so the 2026-11-09
   reinstall erased every offline row; `flow_indicator_rows` also required a
   readout, so a paired-but-sleeping device could hold no row at all, and the
@@ -927,7 +927,7 @@ docs commit that follows fills the hashes.
 
 ## 22. Tray offline rows read the last-known cache (2026-11-11)
 
-- `pending` **fix(agent): publish the last-known battery reading to every surface** — kept.
+- `d3a67803` **fix(agent): publish the last-known battery reading to every surface** — kept.
   Why: after the 2026-11-10 reinstall the Windows tray menu listed
   `G703 Lightspeed  – · 离线` and `PRO Wireless  – · 离线`, while the Flow
   Indicator still showed 95% and 51%. The cache was the overlay's private
@@ -957,7 +957,7 @@ docs commit that follows fills the hashes.
 
 ## 23. Flow Indicator position across displays (2026-11-18)
 
-- `pending` **feat(overlay): keep the card at the same relative spot across displays** — kept.
+- `0704fa98` **feat(overlay): keep the card at the same relative spot across displays** — kept.
   Why: the card saved an absolute origin per monitor, so a resolution or scale
   change left it clamped in the wrong place, and a display switch restored a
   point that no longer matched the work area.
