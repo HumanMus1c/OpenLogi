@@ -2517,6 +2517,129 @@ impl FlowIndicatorView {
     }
 }
 
+/// What prompted [`FlowIndicator::remember_placement`] to inspect the card.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlacementTrigger {
+    Tick,
+    UserMoved,
+    RePinned,
+}
+
+/// Relationship between the existing saved placement and the active monitor.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedPlacementState {
+    Missing,
+    Present {
+        same_display: bool,
+        display_connected: bool,
+    },
+}
+
+/// Inputs to [`decide_placement_adoption`].
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlacementAdoptionInput {
+    trigger: PlacementTrigger,
+    saved_placement: SavedPlacementState,
+    has_insets: bool,
+    placement_needs_save: bool,
+}
+
+/// Decision produced by [`decide_placement_adoption`].
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlacementAdoption {
+    adopt_placement: bool,
+    adopt_insets: bool,
+}
+
+/// Decide whether the live window position updates the remembered physical
+/// point (`adopt_placement`) and whether it recomputes screen edge insets
+/// (`adopt_insets`).
+///
+/// Only explicit user intent (dragging, re-pinning) or missing initial state
+/// may overwrite `insets`; monitor topology changes (`!display_connected`)
+/// and row-count resizes (`placement_needs_save`) update the fallback point on
+/// the active monitor without baking rounding or clamping into the edge insets.
+#[cfg(target_os = "windows")]
+const fn decide_placement_adoption(input: PlacementAdoptionInput) -> PlacementAdoption {
+    let explicit = !matches!(input.trigger, PlacementTrigger::Tick);
+    let (has_placement, same_display, display_connected) = match input.saved_placement {
+        SavedPlacementState::Missing => (false, true, true),
+        SavedPlacementState::Present {
+            same_display,
+            display_connected,
+        } => (true, same_display, display_connected),
+    };
+    let adopt_placement = explicit
+        || !has_placement
+        || (input.placement_needs_save && same_display)
+        || !display_connected;
+    let adopt_insets = explicit || !has_placement || !input.has_insets;
+    PlacementAdoption {
+        adopt_placement,
+        adopt_insets,
+    }
+}
+
+/// Placement state used to resolve the card's target position on a monitor.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct SavedCardAnchor<'a> {
+    insets: Option<crate::platform::CardInsets>,
+    legacy_relative: Option<(f32, f32)>,
+    placement: Option<&'a PhysicalPlacement>,
+}
+
+/// Resolve the card's target physical origin on `layout` from `anchor`,
+/// preferring normalized edge insets, then legacy relative fractions, then
+/// the remembered physical origin.
+#[cfg(target_os = "windows")]
+fn resolve_card_target(
+    layout: &[crate::platform::MonitorInfo],
+    display: Option<&str>,
+    card: Size<gpui::Pixels>,
+    scale: Option<f32>,
+    anchor: SavedCardAnchor<'_>,
+) -> Option<crate::platform::CardTarget> {
+    if let Some(insets) = anchor.insets {
+        crate::platform::inset_card_target(layout, display, card, scale, insets)
+    } else if let Some(relative) = anchor.legacy_relative {
+        crate::platform::relative_card_target(layout, display, card, scale, relative)
+    } else {
+        let saved = anchor
+            .placement
+            .map(|placement| (placement.origin, placement.display.as_deref()));
+        crate::platform::card_target(layout, saved, card, scale)
+    }
+}
+
+/// Re-anchor a live Windows card onto its current monitor using `anchor`,
+/// returning the new target origin when `place_card_visible` moved it.
+#[cfg(target_os = "windows")]
+fn reanchor_window_to_target(
+    window: &mut Window,
+    rows: usize,
+    layout: &[crate::platform::MonitorInfo],
+    anchor: SavedCardAnchor<'_>,
+) -> Option<Point<DevicePixels>> {
+    let card = card_size(rows);
+    let scale = window.scale_factor();
+    // Follow the monitor the card is on, not the one the file remembers:
+    // Windows may have moved the card off a monitor that is going away. A
+    // display that is already gone resolves to the primary.
+    let current = crate::platform::card_physical_placement(window)
+        .map(|(_, display)| display)
+        .filter(|display| layout.iter().any(|monitor| &monitor.device == display));
+    let target = resolve_card_target(layout, current.as_deref(), card, Some(scale), anchor)?;
+    let before = crate::platform::card_physical_placement(window).map(|(origin, _)| origin);
+    let _ = crate::platform::place_card_visible(window, target.origin);
+    let after = crate::platform::card_physical_placement(window).map(|(origin, _)| origin);
+    (before != after).then_some(target.origin)
+}
+
 impl FlowIndicatorView {
     /// A freshly opened card: name it, and on X11 hand the window to the seam
     /// that restores its position.
@@ -2559,16 +2682,17 @@ impl FlowIndicatorView {
         crate::platform::make_card_nonactivating(window);
         window.resize(window_size(self.rows.len()));
         let layout = crate::platform::monitor_layout();
-        let card = card_size(self.rows.len());
-        let scale = window.scale_factor();
-        let target = if let Some(insets) = insets {
-            crate::platform::inset_card_target(&layout, display, card, Some(scale), insets)
-        } else if let Some(relative) = legacy_relative {
-            crate::platform::relative_card_target(&layout, display, card, Some(scale), relative)
-        } else {
-            let saved = placement.map(|placement| (placement.origin, placement.display.as_deref()));
-            crate::platform::card_target(&layout, saved, card, Some(scale))
-        };
+        let target = resolve_card_target(
+            &layout,
+            display,
+            card_size(self.rows.len()),
+            Some(window.scale_factor()),
+            SavedCardAnchor {
+                insets,
+                legacy_relative,
+                placement,
+            },
+        );
         if let Some(target) = target {
             let _ = crate::platform::place_card_visible(window, target.origin);
         }
@@ -3017,34 +3141,13 @@ impl FlowIndicator {
     /// A fresh window asks GPUI for the scale of the monitor it opens on, so
     /// this is the fallback that cannot leave the card stuck at the previous
     /// monitor's scale (and its pin unreachable).
-    #[cfg(target_os = "windows")]
-    fn reopen_for_dpi(&mut self, cx: &mut App) {
-        if self.dpi_reopens >= 2 {
-            warn!("Flow Indicator could not recover its monitor DPI by reopening the card");
-            self.dpi_mismatch_since = None;
-            return;
-        }
-        self.dpi_reopens += 1;
-        info!("Flow Indicator reopening the card to apply its monitor DPI");
-        self.close_with(cx, false);
-        let (rows, hidden) = self.rows();
-        self.open(&rows, hidden, None, true, cx);
-        self.dpi_mismatch_since = None;
-    }
-
-    /// Reopen the card once after a display topology has settled.
+    /// Reopen the visible card on whichever monitor currently holds it.
     ///
-    /// A window created while a display was still disappearing can keep the
-    /// old monitor's DPI; its own DPI and GPUI's scale then agree, so the
-    /// mismatch watchdog cannot see the stale scale. A fresh window created
-    /// after the topology settles asks Windows for the remaining monitor's
-    /// DPI.
+    /// Keeping the reopened card on the display that holds the window stops it
+    /// from snapping back to an obsolete saved display name, and clearing
+    /// `last_layout_dpi` re-baselines the scale watchdog for the fresh window.
     #[cfg(target_os = "windows")]
-    fn reopen_for_topology(&mut self, cx: &mut App) {
-        info!("Flow Indicator reopening the card after a display topology change");
-        // Windows may have moved the card onto another display; the reopened
-        // card must stay where the user sees it, not on the display the file
-        // remembers from before the change.
+    fn reopen_on_current_display(&mut self, cx: &mut App) {
         self.reopen_display = self.window.as_ref().and_then(|handle| {
             handle
                 .update(cx, |_, window, _| {
@@ -3057,8 +3160,33 @@ impl FlowIndicator {
         let (rows, hidden) = self.rows();
         self.open(&rows, hidden, None, true, cx);
         self.dpi_mismatch_since = None;
-        self.dpi_reopens = 0;
         self.last_layout_dpi = 0;
+    }
+
+    #[cfg(target_os = "windows")]
+    fn reopen_for_dpi(&mut self, cx: &mut App) {
+        if self.dpi_reopens >= 2 {
+            warn!("Flow Indicator could not recover its monitor DPI by reopening the card");
+            self.dpi_mismatch_since = None;
+            return;
+        }
+        self.dpi_reopens += 1;
+        info!("Flow Indicator reopening the card to apply its monitor DPI");
+        self.reopen_on_current_display(cx);
+    }
+
+    /// Reopen the card once after a display topology has settled.
+    ///
+    /// A window created while a display was still disappearing can keep the
+    /// old monitor's DPI; its own DPI and GPUI's scale then agree, so the
+    /// mismatch watchdog cannot see the stale scale. A fresh window created
+    /// after the topology settles asks Windows for the remaining monitor's
+    /// DPI.
+    #[cfg(target_os = "windows")]
+    fn reopen_for_topology(&mut self, cx: &mut App) {
+        info!("Flow Indicator reopening the card after a display topology change");
+        self.reopen_on_current_display(cx);
+        self.dpi_reopens = 0;
     }
 
     /// Put the card back where the user fixed it after a display topology
@@ -3106,56 +3234,21 @@ impl FlowIndicator {
         let legacy_relative = self.legacy_relative;
         let saved = self.target_placement(&layout);
         let _ = handle.update(cx, |view, window, _| {
-            let card = card_size(view.rows.len());
-            let scale = window.scale_factor();
-            // Follow the monitor the card is on, not the one the file
-            // remembers: Windows may have moved the card off a monitor that
-            // is going away. A display that is already gone resolves to the
-            // primary.
-            let current = || {
-                crate::platform::card_physical_placement(window)
-                    .map(|(_, display)| display)
-                    .filter(|display| layout.iter().any(|monitor| &monitor.device == display))
-            };
-            let target = if let Some(insets) = insets {
-                crate::platform::inset_card_target(
-                    &layout,
-                    current().as_deref(),
-                    card,
-                    Some(scale),
+            if let Some(origin) = reanchor_window_to_target(
+                window,
+                view.rows.len(),
+                &layout,
+                SavedCardAnchor {
                     insets,
-                )
-            } else if let Some(relative) = legacy_relative {
-                crate::platform::relative_card_target(
-                    &layout,
-                    current().as_deref(),
-                    card,
-                    Some(scale),
-                    relative,
-                )
-            } else {
-                saved.as_ref().and_then(|saved| {
-                    crate::platform::card_target(
-                        &layout,
-                        Some((saved.origin, saved.display.as_deref())),
-                        card,
-                        Some(scale),
-                    )
-                })
-            };
-            if let Some(target) = target {
-                let before =
-                    crate::platform::card_physical_placement(window).map(|(origin, _)| origin);
-                let _ = crate::platform::place_card_visible(window, target.origin);
-                let after =
-                    crate::platform::card_physical_placement(window).map(|(origin, _)| origin);
-                if before != after {
-                    info!(
-                        ?target.origin,
-                        scale = window.scale_factor(),
-                        "Flow Indicator re-anchored the card"
-                    );
-                }
+                    legacy_relative,
+                    placement: saved.as_ref(),
+                },
+            ) {
+                info!(
+                    ?origin,
+                    scale = window.scale_factor(),
+                    "Flow Indicator re-anchored the card"
+                );
             }
         });
     }
@@ -3184,13 +3277,7 @@ impl FlowIndicator {
         {
             let _ = self.remember_placement(cx, self.pinned_seen);
             if let Some(placement) = self.placement.clone() {
-                save_physical_position(
-                    placement.origin,
-                    placement.display.as_deref(),
-                    self.pinned_seen,
-                    self.insets,
-                    &self.positions,
-                );
+                self.save_placement_file(&placement, self.pinned_seen);
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -3329,14 +3416,19 @@ impl FlowIndicator {
             return;
         }
         if let Some(placement) = self.remember_placement(cx, false) {
-            save_physical_position(
-                placement.origin,
-                placement.display.as_deref(),
-                self.pinned.get(),
-                self.insets,
-                &self.positions,
-            );
+            self.save_placement_file(&placement, self.pinned.get());
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn save_placement_file(&self, placement: &PhysicalPlacement, pinned: bool) {
+        save_physical_position(
+            placement.origin,
+            placement.display.as_deref(),
+            pinned,
+            self.insets,
+            &self.positions,
+        );
     }
 
     /// Adopt the card's current physical position when the user moved it (or
@@ -3379,23 +3471,36 @@ impl FlowIndicator {
                 .as_deref()
                 .is_none_or(|saved| layout.iter().any(|monitor| monitor.device == saved))
         });
-        let adopt = adopt_now
-            || user_moved
-            || self.placement.is_none()
-            || (self.placement_needs_save && same_display)
-            || !saved_display_present;
-        if adopt {
+        let seed = self.insets.is_none();
+        let trigger = if adopt_now {
+            PlacementTrigger::RePinned
+        } else if user_moved {
+            PlacementTrigger::UserMoved
+        } else {
+            PlacementTrigger::Tick
+        };
+        let saved_placement = if self.placement.is_some() {
+            SavedPlacementState::Present {
+                same_display,
+                display_connected: saved_display_present,
+            }
+        } else {
+            SavedPlacementState::Missing
+        };
+        let decision = decide_placement_adoption(PlacementAdoptionInput {
+            trigger,
+            saved_placement,
+            has_insets: !seed,
+            placement_needs_save: self.placement_needs_save,
+        });
+        if decision.adopt_placement {
             self.positions.insert(display.clone(), origin);
             self.placement = Some(PhysicalPlacement {
                 origin,
                 display: Some(display.clone()),
             });
         }
-        // A file written before the edge insets has none yet: seed them from
-        // the spot the card is seen at, so the next display switch keeps that
-        // place instead of the absolute point.
-        let seed = self.insets.is_none();
-        if adopt || seed {
+        if decision.adopt_insets {
             let monitor = layout
                 .iter()
                 .find(|monitor| monitor.device == display)
@@ -3429,11 +3534,9 @@ impl FlowIndicator {
             }
         }
         self.placement_needs_save = false;
-        if adopt || seed {
-            self.placement.clone()
-        } else {
-            None
-        }
+        (decision.adopt_placement || decision.adopt_insets)
+            .then(|| self.placement.clone())
+            .flatten()
     }
 
     /// Persist where the user dragged the card. Called once a second with the
@@ -3597,6 +3700,34 @@ impl FlowIndicator {
             // compositor chose for this one.
             let card = card_size(rows.len());
             let outer = window_size(rows.len());
+            let new_row_count = rows.len();
+            #[cfg(target_os = "windows")]
+            let resizes_card = handle
+                .read_with(cx, |view, _| view.rows.len() != new_row_count)
+                .unwrap_or(false);
+            #[cfg(target_os = "windows")]
+            if resizes_card {
+                // Adopt any drag completed earlier in this tick before
+                // resizing/re-anchoring against `insets`, so the resize stays
+                // where the user dropped the card.
+                self.persist_position(cx);
+            }
+            let Some(handle) = self.window.as_ref() else {
+                return;
+            };
+            #[cfg(target_os = "windows")]
+            let insets_active = self.insets.is_some();
+            #[cfg(target_os = "windows")]
+            let reanchor = (resizes_card && insets_active).then(|| {
+                let layout = crate::platform::monitor_layout();
+                let saved = self.target_placement(&layout);
+                (layout, self.insets, self.legacy_relative, saved)
+            });
+            #[cfg(target_os = "windows")]
+            let desired = (!insets_active)
+                .then(|| resize_origin(cx, handle, card))
+                .flatten();
+            #[cfg(not(target_os = "windows"))]
             let desired = resize_origin(cx, handle, card);
             #[cfg(not(any(target_os = "windows", target_os = "linux")))]
             let _ = desired;
@@ -3607,9 +3738,6 @@ impl FlowIndicator {
                 expect(unused_variables, reason = "a live stacking bit is Windows/X11-only")
             )]
             let want_topmost = self.effective_mode() == FlowIndicatorDisplayMode::Topmost;
-            let new_row_count = rows.len();
-            #[cfg(target_os = "windows")]
-            let insets_active = self.insets.is_some();
             let size_changed = handle
                 .update(cx, |view, window, cx| {
                     let size_changed = view.rows.len() != new_row_count;
@@ -3636,19 +3764,29 @@ impl FlowIndicator {
                     }
                     #[cfg(target_os = "linux")]
                     view.apply_click_through(window, view.pinned.get());
-                    #[cfg(any(target_os = "windows", target_os = "linux"))]
-                    if let Some(desired) = desired {
-                        #[cfg(target_os = "windows")]
-                        if !(insets_active && size_changed) {
-                            let current = window.bounds().origin;
-                            if current != desired {
-                                crate::platform::move_card_by(
-                                    window,
-                                    point(desired.x - current.x, desired.y - current.y),
-                                );
-                            }
+                    #[cfg(target_os = "windows")]
+                    if let Some((ref layout, insets, legacy_relative, ref saved)) = reanchor {
+                        let _ = reanchor_window_to_target(
+                            window,
+                            new_row_count,
+                            layout,
+                            SavedCardAnchor {
+                                insets,
+                                legacy_relative,
+                                placement: saved.as_ref(),
+                            },
+                        );
+                    } else if let Some(desired) = desired {
+                        let current = window.bounds().origin;
+                        if current != desired {
+                            crate::platform::move_card_by(
+                                window,
+                                point(desired.x - current.x, desired.y - current.y),
+                            );
                         }
-                        #[cfg(target_os = "linux")]
+                    }
+                    #[cfg(target_os = "linux")]
+                    if let Some(desired) = desired {
                         view.anchor_after_resize(window, desired);
                     }
                     cx.notify();
@@ -3657,16 +3795,9 @@ impl FlowIndicator {
                 .unwrap_or(false);
             #[cfg(target_os = "windows")]
             if size_changed {
-                if insets_active {
-                    // The insets are measured from the anchored edges; a card
-                    // that changed height must be re-anchored, not adopted,
-                    // or the next display switch would inherit the shift.
-                    self.placement_settle_until = Some(Instant::now() + DISPLAY_SETTLE);
-                } else {
-                    // The row-count resize anchors the card's bottom edge
-                    // itself; remember that deliberate move on the next tick.
-                    self.placement_needs_save = true;
-                }
+                // Record the resized origin on the next tick (`adopt_insets`
+                // stays false so edge insets remain fixed).
+                self.placement_needs_save = true;
             }
             #[cfg(not(target_os = "windows"))]
             let _ = size_changed;
@@ -3735,13 +3866,7 @@ impl FlowIndicator {
         if adopt {
             let _ = self.remember_placement(cx, false);
             if let Some(placement) = self.placement.clone() {
-                save_physical_position(
-                    placement.origin,
-                    placement.display.as_deref(),
-                    self.pinned.get(),
-                    self.insets,
-                    &self.positions,
-                );
+                self.save_placement_file(&placement, self.pinned.get());
             }
         }
         if let Some(handle) = self.window.take() {
@@ -3828,17 +3953,17 @@ impl FlowIndicator {
                 .as_ref()
                 .and_then(|placement| placement.display.as_deref())
         });
-        let card = card_size(rows);
-        let target = if let Some(insets) = self.insets {
-            crate::platform::inset_card_target(&layout, display, card, None, insets)
-        } else if let Some(relative) = self.legacy_relative {
-            crate::platform::relative_card_target(&layout, display, card, None, relative)
-        } else {
-            let saved = target_placement
-                .as_ref()
-                .map(|placement| (placement.origin, placement.display.as_deref()));
-            crate::platform::card_target(&layout, saved, card, None)
-        };
+        let target = resolve_card_target(
+            &layout,
+            display,
+            card_size(rows),
+            None,
+            SavedCardAnchor {
+                insets: self.insets,
+                legacy_relative: self.legacy_relative,
+                placement: target_placement.as_ref(),
+            },
+        );
         let Some(target) = target else {
             // No monitor reported (a very early boot): open at the origin and
             // let the first tick place the card once the layout is known.
@@ -4592,6 +4717,181 @@ mod tests {
             target, active,
             "a display with no remembered spot keeps the active point for clamping"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn topology_switches_and_resizes_preserve_saved_edge_insets() {
+        use super::{
+            PlacementAdoption, PlacementAdoptionInput, PlacementTrigger, SavedPlacementState,
+            decide_placement_adoption,
+        };
+
+        // Topology switch off the saved display updates the active placement
+        // without recomputing edge insets on the replacement monitor.
+        assert_eq!(
+            decide_placement_adoption(PlacementAdoptionInput {
+                trigger: PlacementTrigger::Tick,
+                saved_placement: SavedPlacementState::Present {
+                    same_display: false,
+                    display_connected: false,
+                },
+                has_insets: true,
+                placement_needs_save: false,
+            }),
+            PlacementAdoption {
+                adopt_placement: true,
+                adopt_insets: false,
+            }
+        );
+
+        // Row-count resize (`placement_needs_save`) on the same display saves
+        // the new origin without rewriting existing edge insets.
+        assert_eq!(
+            decide_placement_adoption(PlacementAdoptionInput {
+                trigger: PlacementTrigger::Tick,
+                saved_placement: SavedPlacementState::Present {
+                    same_display: true,
+                    display_connected: true,
+                },
+                has_insets: true,
+                placement_needs_save: true,
+            }),
+            PlacementAdoption {
+                adopt_placement: true,
+                adopt_insets: false,
+            }
+        );
+
+        // Explicit user moves, re-pins, and initial opens adopt both placement
+        // and edge insets.
+        for input in [
+            PlacementAdoptionInput {
+                trigger: PlacementTrigger::UserMoved,
+                saved_placement: SavedPlacementState::Present {
+                    same_display: true,
+                    display_connected: true,
+                },
+                has_insets: true,
+                placement_needs_save: false,
+            },
+            PlacementAdoptionInput {
+                trigger: PlacementTrigger::RePinned,
+                saved_placement: SavedPlacementState::Present {
+                    same_display: false,
+                    display_connected: false,
+                },
+                has_insets: true,
+                placement_needs_save: false,
+            },
+            PlacementAdoptionInput {
+                trigger: PlacementTrigger::Tick,
+                saved_placement: SavedPlacementState::Missing,
+                has_insets: false,
+                placement_needs_save: false,
+            },
+        ] {
+            assert_eq!(
+                decide_placement_adoption(input),
+                PlacementAdoption {
+                    adopt_placement: true,
+                    adopt_insets: true,
+                }
+            );
+        }
+
+        // Pre-inset files keep their remembered placement while seeding insets.
+        assert_eq!(
+            decide_placement_adoption(PlacementAdoptionInput {
+                trigger: PlacementTrigger::Tick,
+                saved_placement: SavedPlacementState::Present {
+                    same_display: true,
+                    display_connected: true,
+                },
+                has_insets: false,
+                placement_needs_save: false,
+            }),
+            PlacementAdoption {
+                adopt_placement: false,
+                adopt_insets: true,
+            }
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn preserved_edge_insets_anchor_resizes_and_roundtrip_across_displays() {
+        use super::{SavedCardAnchor, card_size, resolve_card_target};
+        use crate::platform::{MonitorInfo, insets_from_point};
+        use gpui::{Bounds, DevicePixels, DisplayId, point, size};
+
+        fn monitor_with_work(
+            device: &str,
+            id: u64,
+            extent: (i32, i32),
+            work_extent: (i32, i32),
+            dpi: u32,
+        ) -> MonitorInfo {
+            MonitorInfo {
+                device: device.to_string(),
+                display_id: DisplayId::from(id),
+                monitor: Bounds::new(
+                    point(DevicePixels(0), DevicePixels(0)),
+                    size(DevicePixels(extent.0), DevicePixels(extent.1)),
+                ),
+                work: Bounds::new(
+                    point(DevicePixels(0), DevicePixels(0)),
+                    size(DevicePixels(work_extent.0), DevicePixels(work_extent.1)),
+                ),
+                dpi,
+            }
+        }
+
+        let primary = monitor_with_work(r"\\.\DISPLAY1", 1, (2560, 1440), (2560, 1380), 120);
+        let secondary = monitor_with_work(r"\\.\DISPLAY6", 6, (1920, 1080), (1920, 1032), 96);
+        let two_rows = card_size(2);
+        let three_rows = card_size(3);
+        let origin_2560 = point(DevicePixels(12), DevicePixels(1050));
+        let original_insets = insets_from_point(origin_2560, &primary, two_rows, 1.25);
+        assert!(original_insets.from_bottom);
+
+        let anchor = SavedCardAnchor {
+            insets: Some(original_insets),
+            legacy_relative: None,
+            placement: None,
+        };
+        let on_secondary = resolve_card_target(
+            std::slice::from_ref(&secondary),
+            None,
+            two_rows,
+            Some(1.0),
+            anchor,
+        )
+        .expect("secondary target");
+        let on_secondary_3 = resolve_card_target(
+            std::slice::from_ref(&secondary),
+            None,
+            three_rows,
+            Some(1.0),
+            anchor,
+        )
+        .expect("resized target");
+        let delta_height = f64::from(f32::from(three_rows.height) - f32::from(two_rows.height));
+        assert_eq!(
+            f64::from(on_secondary.origin.y.0 - on_secondary_3.origin.y.0),
+            delta_height.round(),
+            "bottom-anchored resize moves origin upward by the added height"
+        );
+
+        let restored = resolve_card_target(
+            std::slice::from_ref(&primary),
+            None,
+            two_rows,
+            Some(1.25),
+            anchor,
+        )
+        .expect("restored primary target");
+        assert_eq!(restored.origin, origin_2560);
     }
 
     #[cfg(target_os = "windows")]

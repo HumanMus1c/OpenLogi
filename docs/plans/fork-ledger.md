@@ -976,7 +976,7 @@ docs commit that follows fills the hashes.
 
 ## 24. Flow Indicator edge insets (2026-11-19)
 
-- `pending` **fix(overlay): anchor the card's edges instead of its free-space share** — kept.
+- `f50b3a21` **fix(overlay): anchor the card's edges instead of its free-space share** — kept.
   Why: the shared spot was the visible origin as a fraction of the work area's
   free space, so the card's own DPI-scaled size was part of the mapping. A
   live switch on one 1920x1032 work area (125% -> 100%) moved the card from
@@ -1004,5 +1004,35 @@ docs commit that follows fills the hashes.
   (visible origin 1538,449 in a 1920x1032 work area) and seeded
   `inset_x=0.042708`/`inset_y=0.435078`, `from_right=true`,
   `from_bottom=false`. No display switch has been run against this build yet;
+  Linux/macOS not compiled.
+  Status: kept.
+- `pending` **fix(overlay): preserve edge insets across display switches and resizes** — kept.
+  Why: three follow-up issues remained in `f50b3a21`. First,
+  `FlowIndicator::remember_placement` treated `!saved_display_present` as `adopt = true`,
+  so a topology switch onto a remaining display recomputed `self.insets` from the
+  fallback monitor's rounded or clamped coordinates (`2026-11-20 10:25:17` live log
+  rewrote `DISPLAY1` `2560x1380` insets into `DISPLAY6` `1920x1032` `12/1920` and
+  `441/1032`). Second, `sync` skipped `move_card_by` when `insets_active && size_changed`
+  and deferred re-anchoring to `Tick`, letting row-count changes grow downward before
+  re-anchoring. Third, `reopen_for_dpi` closed and reopened without capturing
+  `reopen_display` or resetting `last_layout_dpi = 0`, diverging from
+  `reopen_for_topology`.
+  Fix: extracted typed `PlacementTrigger` / `SavedPlacementState` decisions
+  (`decide_placement_adoption`) so topology changes (`!display_connected`) and row-count
+  resizes (`placement_needs_save`) update `self.placement`/`self.positions` without
+  overwriting `self.insets`; only explicit user drags (`UserMoved`), re-pins
+  (`RePinned`), initial placement, or pre-inset seeding recompute `self.insets`.
+  Extracted shared `SavedCardAnchor` / `resolve_card_target` / `reanchor_window_to_target`
+  (re-exporting `CardTarget` from `platform.rs`) so `sync` adopts any pending drag and
+  immediately re-anchors after `window.resize` when row count changes with active insets.
+  Extracted `reopen_on_current_display` shared by `reopen_for_dpi` and
+  `reopen_for_topology`.
+  Verified: Windows `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, `cargo test -p openlogi-overlay` (127 passed, 0 failed, 4 ignored,
+  including `topology_switches_and_resizes_preserve_saved_edge_insets` and
+  `preserved_edge_insets_anchor_resizes_and_roundtrip_across_displays`), and `cargo xtask
+  ci ast-grep typos`. Pre-existing `openlogi-desktop::app::deeplink::tests::
+  an_app_profile_link_opens_the_profile_the_selected_device_runs_the_app_under` fails
+  identically against `upstream/master` (`9ca7ef0c`) and is outside this change;
   Linux/macOS not compiled.
   Status: kept.
