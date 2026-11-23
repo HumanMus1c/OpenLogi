@@ -95,6 +95,23 @@ pub enum FlowIndicatorDisplayMode {
     Topmost,
 }
 
+/// The tray badge's shape. Windows renders the badge bitmap itself, so the
+/// style is a rendering choice; macOS shows a text title instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayBadgeStyle {
+    /// A disc inscribed in the system's icon slot, edge-to-edge.
+    #[default]
+    Circle,
+    /// A full-bleed rounded square, matching the square-ish icons around it.
+    RoundedSquare,
+    /// A wide face with the device name, a progress bar, and the value in one
+    /// row. Linux-only: a StatusNotifierItem panel can keep the pixmap's
+    /// aspect ratio, while the Windows notification area squares every icon.
+    /// Selectable from `config.toml` only.
+    Wide,
+}
+
 /// Layout used for the Home device gallery.
 ///
 /// This is a presentation preference: the GUI owns how each mode renders, while
@@ -333,6 +350,19 @@ pub struct AppSettings {
     /// for what counts as low.
     #[serde(default = "default_true")]
     pub low_battery_notifications: bool,
+    /// Whether the tray shows a battery readout: the tooltip, the device rows
+    /// in its menu, and the tray icon. **On by default.** The readout renders
+    /// the inventory the agent already polls; it never triggers a HID read of
+    /// its own. Off restores the static brand icon and the plain Show/Quit
+    /// menu.
+    #[serde(default = "default_true")]
+    pub tray_battery: bool,
+    /// The tray badge's shape. The circle fills the system's icon slot
+    /// edge-to-edge; the rounded square trades the disc look for the visual
+    /// weight the square-ish neighbouring icons carry. Used on Windows; macOS
+    /// reads the level out as text.
+    #[serde(default)]
+    pub tray_badge_style: TrayBadgeStyle,
     /// Whether the floating Flow Indicator lists detected devices and their
     /// battery readings. **Off by default**: the card is an opt-in surface,
     /// and turning it off restores the settings app's previous behaviour. The
@@ -590,6 +620,8 @@ impl Default for AppSettings {
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
+            tray_battery: true,
+            tray_badge_style: TrayBadgeStyle::Circle,
             flow_indicator: false,
             flow_indicator_show_offline: true,
             flow_indicator_max_devices: FLOW_INDICATOR_MAX_DEVICES_DEFAULT,
