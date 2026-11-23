@@ -1683,11 +1683,7 @@ impl FlowIndicatorView {
         watched: Option<bool>,
         window_dark: bool,
     ) -> bool {
-        match preference {
-            openlogi_core::config::Appearance::Light => false,
-            openlogi_core::config::Appearance::Dark => true,
-            openlogi_core::config::Appearance::System => watched.unwrap_or(window_dark),
-        }
+        preference.resolves_dark(watched.unwrap_or(window_dark))
     }
 
     /// Bake the pinned card's shadow for the current rows off the UI thread.

@@ -973,3 +973,32 @@ docs commit that follows fills the hashes.
   fallback, window scale vs reported DPI, the visible-origin round trip, and a
   card too wide for its display.
   Status: kept.
+
+## 24. Windows tray menu theme (2026-11-23)
+
+- `pending` **fix(tray): follow the panel theme in the windows tray menu** — kept.
+  Why: the Windows agent's `TrackPopupMenu` context menu stayed in legacy Win32
+  light mode even when Windows and the OpenLogi settings panel were dark, and
+  `AppState::commit_appearance` wrote `config.toml` without reloading the agent.
+  Fix: add `Appearance::resolves_dark` in `openlogi-core` and consume it in the
+  overlay, desktop, and Windows tray; change `commit_appearance` to
+  `persist_and_reload` so panel appearance switches reach the running agent
+  live; dynamically resolve `uxtheme.dll` dark-mode ordinals (`104`
+  `RefreshImmersiveColorPolicyState`, `133` `AllowDarkModeForWindow`, `135`
+  `AllowDarkModeForApp`/`SetPreferredAppMode` gated by
+  `ntdll!RtlGetNtVersionNumbers`, `136` `FlushMenuThemes`) via
+  `LOAD_LIBRARY_SEARCH_SYSTEM32` and apply them on tray init, window creation,
+  `WM_SETTINGCHANGE`/`WM_THEMECHANGED`, and before `CreatePopupMenu`, reading
+  `AppsUseLightTheme` for `Appearance::System` while keeping
+  `SystemUsesLightTheme` for the taskbar icon glyph.
+  Verified: Windows `cargo fmt --all -- --check`, `cargo xtask ci ast-grep`,
+  `cargo xtask ci typos`, non-GUI `RUSTDOCFLAGS="-D warnings" cargo doc`,
+  `cargo test -p openlogi-core -p openlogi-agent -p openlogi-desktop
+  -p openlogi-overlay` (540 + 43 + 117 + 850 + 122 passed, 0 failed, 4 ignored,
+  including new `Appearance::resolves_dark`, `commit_appearance` reload, and
+  Windows `uxtheme.dll` ordinal-resolution tests), Clippy on all four crates
+  with `-D warnings` (exempting only the pre-existing Rust 1.100
+  `clippy::map_unwrap_or` and `clippy::needless_range_loop` lints on untouched
+  files already fixed upstream in `da245558`), and user live verification on
+  Windows 11 confirming the tray context menu now renders dark.
+  Status: kept.
