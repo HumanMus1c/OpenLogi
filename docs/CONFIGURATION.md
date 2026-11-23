@@ -64,8 +64,15 @@ optional physical device key.
 
 - startup, update, menu-bar / tray, input-capture, and asset-download toggles
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
-- `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
-  optional theme names, and optional UI radius
+- `language`, `device_view_mode` (`grid`, `list`, or `carousel`), optional
+  theme names, and optional UI radius
+- `appearance`: `system` (default), `light`, or `dark`. Changing it reloads
+  the running agent so the Windows tray context menu updates live without a
+  restart (tracking Windows' app theme under `system`). Dark tray menus
+  require Windows 10 1809+ (build `17763`+) — Windows 10 1903+ / Windows 11
+  (`18362`+) use `SetPreferredAppMode`, builds `17763`–`18361` use
+  `AllowDarkModeForApp`, and earlier Windows builds fall back to the default
+  light system menu
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it
   off, a diverted horizontal thumb wheel still scrolls as a phased gesture (ended after
   120 ms idle) so apps that reveal content on horizontal swipes, like Messages, react;

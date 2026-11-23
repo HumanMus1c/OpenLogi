@@ -16,21 +16,26 @@
 //!
 //! Everything runs on one dedicated thread: the hidden window, its message
 //! pump, and the menu. The icon is re-added when a `TaskbarCreated`
-//! broadcast finds it gone (an Explorer restart), and the glyph tracks the
+//! broadcast finds it gone (an Explorer restart), the glyph tracks the
 //! taskbar theme (black on a light taskbar, white on a dark one) at install
-//! time.
+//! time, and the popup menu follows the OpenLogi panel's resolved light/dark
+//! theme.
 
 #![expect(
     unsafe_code,
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
+use openlogi_core::config::Appearance;
 use tracing::{debug, info, warn};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{
+    GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW,
@@ -41,9 +46,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
     LoadIconW, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW, SW_RESTORE,
     SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPED,
+    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_OVERLAPPED,
 };
+use windows_sys::core::BOOL;
 
 use crate::shutdown::{self, ShutdownRequestSender};
 
@@ -57,11 +63,33 @@ const ID_QUIT: usize = 2;
 /// until then; real ids are never zero (`RegisterWindowMessageW` starts at
 /// 0xC000).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+/// Panel appearance preference (`0 = System`, `1 = Light`, `2 = Dark`).
+static MENU_APPEARANCE: AtomicU8 = AtomicU8::new(0);
 
 thread_local! {
     /// Where the win32 tray callback hands process termination to the async
     /// lifecycle. The callback and message pump share this one tray thread.
     static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
+}
+
+/// Update the panel appearance preference used to theme the Win32 tray popup
+/// menu (`System` follows Windows' app theme; `Light` / `Dark` force that
+/// mode).
+pub fn set_appearance(appearance: Appearance) {
+    let encoded = match appearance {
+        Appearance::System => 0,
+        Appearance::Light => 1,
+        Appearance::Dark => 2,
+    };
+    MENU_APPEARANCE.store(encoded, Ordering::Relaxed);
+}
+
+fn current_appearance() -> Appearance {
+    match MENU_APPEARANCE.load(Ordering::Relaxed) {
+        1 => Appearance::Light,
+        2 => Appearance::Dark,
+        _ => Appearance::System,
+    }
 }
 
 /// Host the tray icon on its own thread. No-op when the user disabled the
@@ -87,6 +115,7 @@ pub fn spawn(show_in_tray: bool, shutdown_tx: ShutdownRequestSender) {
 /// agent's lifetime.
 fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
+    apply_menu_theme(std::ptr::null_mut(), menu_is_dark());
     let class_name = wide("OpenLogiAgentTray");
     // SAFETY: plain win32 registration/creation calls with pointers that
     // outlive the calls; the class name buffer lives until thread exit.
@@ -129,6 +158,7 @@ fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
             warn!("tray window creation failed — no tray icon");
             return;
         }
+        apply_menu_theme(hwnd, menu_is_dark());
         TASKBAR_CREATED.store(
             RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             Ordering::Relaxed,
@@ -169,6 +199,10 @@ unsafe extern "system" fn wnd_proc(
                 WM_RBUTTONUP | WM_CONTEXTMENU => unsafe { show_menu(hwnd) },
                 _ => {}
             }
+            0
+        }
+        WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            apply_menu_theme(hwnd, menu_is_dark());
             0
         }
         m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
@@ -327,65 +361,308 @@ unsafe fn tray_icon() -> HICON {
 /// Whether the taskbar renders light (needs the black glyph). Missing value
 /// means the Windows default: dark.
 fn taskbar_is_light() -> bool {
+    personalize_dword("SystemUsesLightTheme") == Some(1)
+}
+
+/// Whether Windows apps default to dark mode. Missing value means the Windows
+/// default: light (matching GPUI's `UISettings::Foreground` check).
+fn apps_use_dark_theme() -> bool {
+    personalize_dword("AppsUseLightTheme") == Some(0)
+}
+
+/// Read a DWORD from the Windows Personalize registry key.
+fn personalize_dword(name: &str) -> Option<u32> {
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
     RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-        .and_then(|k| k.get_value::<u32, _>("SystemUsesLightTheme"))
-        .is_ok_and(|v| v == 1)
+        .and_then(|k| k.get_value::<u32, _>(name))
+        .ok()
+}
+
+/// Resolve whether the tray popup menu should render dark from the stored
+/// preference and the host OS dark-theme query.
+fn resolve_menu_dark(appearance: Appearance, system_dark: impl FnOnce() -> bool) -> bool {
+    match appearance {
+        Appearance::System => system_dark(),
+        other => other.resolves_dark(false),
+    }
+}
+
+/// Whether the tray popup menu should render dark, matching the OpenLogi
+/// settings panel's resolved appearance.
+fn menu_is_dark() -> bool {
+    resolve_menu_dark(current_appearance(), apps_use_dark_theme)
+}
+
+type FarProc = unsafe extern "system" fn() -> isize;
+type RtlGetNtVersionNumbers = unsafe extern "system" fn(*mut u32, *mut u32, *mut u32);
+type RefreshImmersiveColorPolicyState = unsafe extern "system" fn();
+type AllowDarkModeForWindow = unsafe extern "system" fn(HWND, BOOL) -> BOOL;
+type AllowDarkModeForApp = unsafe extern "system" fn(BOOL) -> BOOL;
+type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
+type FlushMenuThemes = unsafe extern "system" fn();
+
+const PREFERRED_APP_MODE_FORCE_DARK: i32 = 2;
+const PREFERRED_APP_MODE_FORCE_LIGHT: i32 = 3;
+const WIN10_1809_BUILD: u32 = 17763;
+const WIN10_1903_BUILD: u32 = 18362;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UxThemeApi {
+    Unsupported,
+    AllowDarkModeForApp,
+    SetPreferredAppMode,
+}
+
+const fn uxtheme_api_for_version(major: u32, build: u32) -> UxThemeApi {
+    if major > 10 || (major == 10 && build >= WIN10_1903_BUILD) {
+        UxThemeApi::SetPreferredAppMode
+    } else if major == 10 && build >= WIN10_1809_BUILD {
+        UxThemeApi::AllowDarkModeForApp
+    } else {
+        UxThemeApi::Unsupported
+    }
+}
+
+const fn preferred_app_mode(dark: bool) -> i32 {
+    if dark {
+        PREFERRED_APP_MODE_FORCE_DARK
+    } else {
+        PREFERRED_APP_MODE_FORCE_LIGHT
+    }
+}
+
+enum UxThemeAppMode {
+    AllowDark(AllowDarkModeForApp),
+    SetPreferred(SetPreferredAppMode),
+}
+
+struct UxTheme {
+    app_mode: Option<UxThemeAppMode>,
+    refresh_immersive_color_policy_state: Option<RefreshImmersiveColorPolicyState>,
+    allow_dark_mode_for_window: Option<AllowDarkModeForWindow>,
+    flush_menu_themes: Option<FlushMenuThemes>,
+}
+
+impl UxTheme {
+    fn global() -> Option<&'static Self> {
+        static UXTHEME: OnceLock<Option<UxTheme>> = OnceLock::new();
+        UXTHEME.get_or_init(Self::load).as_ref()
+    }
+
+    fn load() -> Option<Self> {
+        let (major, _minor, build) = windows_version()?;
+        Self::load_for_version(major, build)
+    }
+
+    fn load_for_version(major: u32, build: u32) -> Option<Self> {
+        let api = uxtheme_api_for_version(major, build);
+        if api == UxThemeApi::Unsupported {
+            return None;
+        }
+        // SAFETY: `LOAD_LIBRARY_SEARCH_SYSTEM32` loads the system
+        // `uxtheme.dll` only (preventing application-directory DLL planting);
+        // the handle intentionally stays loaded for the process lifetime.
+        let module: HMODULE = unsafe {
+            LoadLibraryExW(
+                wide("uxtheme.dll").as_ptr(),
+                std::ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        };
+        if module.is_null() {
+            return None;
+        }
+        // SAFETY: `module` is a live `uxtheme.dll` handle on a Windows build
+        // >= 17763 (`api != Unsupported`); each ordinal is transmuted to its
+        // matching Win32 system-ABI signature for that build range.
+        unsafe {
+            let refresh_immersive_color_policy_state = ordinal_proc(module, 104)
+                .map(|proc| std::mem::transmute::<FarProc, RefreshImmersiveColorPolicyState>(proc));
+            let allow_dark_mode_for_window = ordinal_proc(module, 133)
+                .map(|proc| std::mem::transmute::<FarProc, AllowDarkModeForWindow>(proc));
+            let app_mode = match (api, ordinal_proc(module, 135)) {
+                (UxThemeApi::AllowDarkModeForApp, Some(proc)) => {
+                    Some(UxThemeAppMode::AllowDark(std::mem::transmute::<
+                        FarProc,
+                        AllowDarkModeForApp,
+                    >(proc)))
+                }
+                (UxThemeApi::SetPreferredAppMode, Some(proc)) => {
+                    Some(UxThemeAppMode::SetPreferred(std::mem::transmute::<
+                        FarProc,
+                        SetPreferredAppMode,
+                    >(proc)))
+                }
+                _ => None,
+            };
+            let flush_menu_themes = ordinal_proc(module, 136)
+                .map(|proc| std::mem::transmute::<FarProc, FlushMenuThemes>(proc));
+            Some(Self {
+                app_mode,
+                refresh_immersive_color_policy_state,
+                allow_dark_mode_for_window,
+                flush_menu_themes,
+            })
+        }
+    }
+}
+
+/// Query the real Windows major/minor/build numbers directly from
+/// `ntdll!RtlGetNtVersionNumbers`, bypassing version-manifest lies.
+fn windows_version() -> Option<(u32, u32, u32)> {
+    // SAFETY: `ntdll.dll` is always mapped in every Win32 process;
+    // `GetModuleHandleW` does not increment its reference count, and
+    // `RtlGetNtVersionNumbers` writes three `u32` values into valid locals.
+    unsafe {
+        let ntdll = GetModuleHandleW(wide("ntdll.dll").as_ptr());
+        if ntdll.is_null() {
+            return None;
+        }
+        let proc = GetProcAddress(ntdll, c"RtlGetNtVersionNumbers".as_ptr().cast::<u8>())?;
+        let rtl_get_nt_version_numbers =
+            std::mem::transmute::<FarProc, RtlGetNtVersionNumbers>(proc);
+        let (mut major, mut minor, mut build) = (0u32, 0u32, 0u32);
+        rtl_get_nt_version_numbers(&raw mut major, &raw mut minor, &raw mut build);
+        Some((major, minor, build & 0x0FFF_FFFF))
+    }
+}
+
+/// Resolve an undocumented `uxtheme.dll` export by ordinal.
+///
+/// # Safety
+/// `module` must be a live `uxtheme.dll` handle, and the caller must
+/// transmute the returned address only to the ABI-exact function signature
+/// belonging to `ordinal` on the verified Windows build.
+unsafe fn ordinal_proc(module: HMODULE, ordinal: u16) -> Option<FarProc> {
+    // SAFETY: Win32 `GetProcAddress` treats a pointer with a zero high word
+    // and the 16-bit ordinal in the low word as an ordinal lookup, never
+    // dereferencing it as a string.
+    unsafe {
+        GetProcAddress(
+            module,
+            std::ptr::without_provenance::<u8>(usize::from(ordinal)),
+        )
+    }
+}
+
+/// Configure Win32 popup-menu theming for this process and `hwnd`.
+///
+/// Windows provides no documented `HMENU` dark-mode API, so on Windows 10
+/// 1809+ we invoke the `uxtheme.dll` dark-mode entry points dynamically and
+/// degrade gracefully to the default system menu when unavailable.
+fn apply_menu_theme(hwnd: HWND, dark: bool) {
+    let Some(theme) = UxTheme::global() else {
+        return;
+    };
+    // SAFETY: `theme` holds resolved `uxtheme.dll` system-ABI entry points
+    // valid for this Windows build; `hwnd` is either null (process-level
+    // init before window creation) or the live tray window handle.
+    unsafe {
+        match theme.app_mode {
+            Some(UxThemeAppMode::SetPreferred(set_preferred)) => {
+                let _ = set_preferred(preferred_app_mode(dark));
+            }
+            Some(UxThemeAppMode::AllowDark(allow_dark)) => {
+                let _ = allow_dark(i32::from(dark));
+            }
+            None => {}
+        }
+        if let Some(refresh) = theme.refresh_immersive_color_policy_state {
+            refresh();
+        }
+        if !hwnd.is_null()
+            && let Some(allow_window) = theme.allow_dark_mode_for_window
+        {
+            let _ = allow_window(hwnd, i32::from(dark));
+        }
+        if let Some(flush) = theme.flush_menu_themes {
+            flush();
+        }
+    }
+}
+
+/// Win32 operations needed to theme and present the tray popup menu. A trait
+/// lets tests run `show_menu_with` without spawning a modal OS popup.
+trait PopupMenuHost {
+    fn apps_use_dark_theme(&self) -> bool;
+    fn apply_theme(&mut self, hwnd: HWND, dark: bool);
+    fn track_popup_command(&mut self, hwnd: HWND) -> Option<usize>;
+}
+
+struct Win32PopupMenu;
+
+impl PopupMenuHost for Win32PopupMenu {
+    fn apps_use_dark_theme(&self) -> bool {
+        apps_use_dark_theme()
+    }
+
+    fn apply_theme(&mut self, hwnd: HWND, dark: bool) {
+        apply_menu_theme(hwnd, dark);
+    }
+
+    fn track_popup_command(&mut self, hwnd: HWND) -> Option<usize> {
+        // SAFETY: menu handles are created and destroyed here, and `hwnd` is the
+        // live tray window owned by this message-pump thread; the
+        // SetForegroundWindow/WM_NULL bracket is the documented TrackPopupMenu
+        // dance for tray menus (without it the menu won't dismiss on outside
+        // clicks).
+        unsafe {
+            let menu = CreatePopupMenu();
+            if menu.is_null() {
+                return None;
+            }
+            // Built fresh on every right-click, so `t!` follows a live language
+            // switch with no rebuild plumbing.
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                ID_SHOW,
+                wide(&rust_i18n::t!("app.show_main_window")).as_ptr(),
+            );
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                ID_QUIT,
+                wide(&rust_i18n::t!("app.quit_openlogi")).as_ptr(),
+            );
+
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&raw mut pt);
+            SetForegroundWindow(hwnd);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                pt.x,
+                pt.y,
+                0,
+                hwnd,
+                std::ptr::null(),
+            );
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, WM_NULL, 0, 0);
+            DestroyMenu(menu);
+
+            usize::try_from(cmd).ok().filter(|&id| id != 0)
+        }
+    }
+}
+
+/// Apply the current panel/system menu theme to `hwnd` before presenting the
+/// tray context menu and return any chosen command id.
+fn show_menu_with(hwnd: HWND, host: &mut impl PopupMenuHost) -> Option<usize> {
+    let dark = resolve_menu_dark(current_appearance(), || host.apps_use_dark_theme());
+    host.apply_theme(hwnd, dark);
+    host.track_popup_command(hwnd)
 }
 
 /// Show the context menu at the cursor and run the chosen command.
-#[expect(
-    clippy::cast_sign_loss,
-    reason = "TrackPopupMenu returns the command id it was given, never negative"
-)]
 unsafe fn show_menu(hwnd: HWND) {
-    // SAFETY: menu handles are created and destroyed here; the
-    // SetForegroundWindow/WM_NULL bracket is the documented TrackPopupMenu
-    // dance for tray menus (without it the menu won't dismiss on outside
-    // clicks).
-    unsafe {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            return;
-        }
-        // Built fresh on every right-click, so `t!` follows a live language
-        // switch with no rebuild plumbing.
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ID_SHOW,
-            wide(&rust_i18n::t!("app.show_main_window")).as_ptr(),
-        );
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ID_QUIT,
-            wide(&rust_i18n::t!("app.quit_openlogi")).as_ptr(),
-        );
-
-        let mut pt = POINT { x: 0, y: 0 };
-        GetCursorPos(&raw mut pt);
-        SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-            pt.x,
-            pt.y,
-            0,
-            hwnd,
-            std::ptr::null(),
-        );
-        windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, WM_NULL, 0, 0);
-        DestroyMenu(menu);
-
-        match cmd as usize {
-            ID_SHOW => open_or_focus_gui(),
-            ID_QUIT => quit(hwnd),
-            _ => {}
-        }
+    match show_menu_with(hwnd, &mut Win32PopupMenu) {
+        Some(ID_SHOW) => open_or_focus_gui(),
+        Some(ID_QUIT) => quit(hwnd),
+        _ => {}
     }
 }
 
@@ -543,7 +820,16 @@ fn wide(s: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NotifyArea, Readd, is_gui_process_name};
+    use std::cell::Cell;
+
+    use openlogi_core::config::Appearance;
+    use windows_sys::Win32::Foundation::HWND;
+
+    use super::{
+        ID_SHOW, NotifyArea, PopupMenuHost, Readd, UxTheme, UxThemeApi, UxThemeAppMode,
+        apply_menu_theme, is_gui_process_name, preferred_app_mode, set_appearance, show_menu_with,
+        uxtheme_api_for_version, windows_version,
+    };
 
     #[test]
     fn the_cli_binary_is_not_the_gui() {
@@ -601,5 +887,174 @@ mod tests {
                 "has_icon={has_icon} refuses_add={refuses_add}"
             );
         }
+    }
+
+    #[test]
+    fn uxtheme_api_tier_tracks_windows_build_boundaries() {
+        for (major, build, expected) in [
+            (6, 7601, UxThemeApi::Unsupported),
+            (10, 17134, UxThemeApi::Unsupported),
+            (10, 17762, UxThemeApi::Unsupported),
+            (10, 17763, UxThemeApi::AllowDarkModeForApp),
+            (10, 18361, UxThemeApi::AllowDarkModeForApp),
+            (10, 18362, UxThemeApi::SetPreferredAppMode),
+            (10, 19045, UxThemeApi::SetPreferredAppMode),
+            (10, 22000, UxThemeApi::SetPreferredAppMode),
+            (10, 26300, UxThemeApi::SetPreferredAppMode),
+            (11, 0, UxThemeApi::SetPreferredAppMode),
+        ] {
+            assert_eq!(
+                uxtheme_api_for_version(major, build),
+                expected,
+                "major={major} build={build}"
+            );
+        }
+    }
+
+    #[test]
+    fn menu_theme_maps_dark_flag_to_force_modes() {
+        assert_eq!(preferred_app_mode(true), 2);
+        assert_eq!(preferred_app_mode(false), 3);
+    }
+
+    #[test]
+    fn uxtheme_resolves_dark_menu_entry_points_for_host_windows_tier() {
+        let (major, _minor, build) =
+            windows_version().expect("RtlGetNtVersionNumbers resolves on Windows");
+        let tier = uxtheme_api_for_version(major, build);
+        match tier {
+            UxThemeApi::Unsupported => {
+                assert!(UxTheme::global().is_none());
+            }
+            UxThemeApi::AllowDarkModeForApp | UxThemeApi::SetPreferredAppMode => {
+                let uxtheme =
+                    UxTheme::global().expect("uxtheme.dll resolves on Windows 10 1809+ and 11");
+                match tier {
+                    UxThemeApi::AllowDarkModeForApp => assert!(
+                        matches!(uxtheme.app_mode, Some(UxThemeAppMode::AllowDark(_))),
+                        "expected ordinal 135 to resolve as AllowDarkModeForApp on {major}.{build}"
+                    ),
+                    UxThemeApi::SetPreferredAppMode => assert!(
+                        matches!(uxtheme.app_mode, Some(UxThemeAppMode::SetPreferred(_))),
+                        "expected ordinal 135 to resolve as SetPreferredAppMode on {major}.{build}"
+                    ),
+                    UxThemeApi::Unsupported => unreachable!(),
+                }
+                assert!(
+                    uxtheme.refresh_immersive_color_policy_state.is_some(),
+                    "expected ordinal 104 (RefreshImmersiveColorPolicyState)"
+                );
+                assert!(
+                    uxtheme.allow_dark_mode_for_window.is_some(),
+                    "expected ordinal 133 (AllowDarkModeForWindow)"
+                );
+                assert!(
+                    uxtheme.flush_menu_themes.is_some(),
+                    "expected ordinal 136 (FlushMenuThemes)"
+                );
+                apply_menu_theme(std::ptr::null_mut(), true);
+                apply_menu_theme(std::ptr::null_mut(), false);
+            }
+        }
+    }
+
+    #[test]
+    fn uxtheme_load_for_version_handles_1809_and_pre_1809_boundaries() {
+        assert!(
+            UxTheme::load_for_version(10, 17762).is_none(),
+            "builds before Windows 10 1809 must skip undocumented ordinal lookups"
+        );
+        let (major, _minor, build) =
+            windows_version().expect("RtlGetNtVersionNumbers resolves on Windows");
+        if uxtheme_api_for_version(major, build) != UxThemeApi::Unsupported {
+            let uxtheme = UxTheme::load_for_version(10, 17763)
+                .expect("uxtheme.dll resolves ordinal 135 under Windows 10 1809 tier");
+            assert!(
+                matches!(uxtheme.app_mode, Some(UxThemeAppMode::AllowDark(_))),
+                "build 17763 must map ordinal 135 to AllowDarkModeForApp"
+            );
+            assert!(uxtheme.refresh_immersive_color_policy_state.is_some());
+            assert!(uxtheme.allow_dark_mode_for_window.is_some());
+            assert!(uxtheme.flush_menu_themes.is_some());
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum PopupEvent {
+        ApplyTheme { hwnd: usize, dark: bool },
+        TrackPopup { hwnd: usize },
+    }
+
+    struct FakePopupMenuHost {
+        system_dark: bool,
+        system_queries: Cell<usize>,
+        command: Option<usize>,
+        events: Vec<PopupEvent>,
+    }
+
+    impl PopupMenuHost for FakePopupMenuHost {
+        fn apps_use_dark_theme(&self) -> bool {
+            self.system_queries.set(self.system_queries.get() + 1);
+            self.system_dark
+        }
+
+        fn apply_theme(&mut self, hwnd: HWND, dark: bool) {
+            self.events.push(PopupEvent::ApplyTheme {
+                hwnd: hwnd as usize,
+                dark,
+            });
+        }
+
+        fn track_popup_command(&mut self, hwnd: HWND) -> Option<usize> {
+            self.events.push(PopupEvent::TrackPopup {
+                hwnd: hwnd as usize,
+            });
+            self.command
+        }
+    }
+
+    #[test]
+    fn show_menu_applies_resolved_theme_to_window_before_tracking_popup() {
+        let hwnd: HWND = std::ptr::without_provenance_mut(0x1234);
+        let expected_hwnd = hwnd as usize;
+
+        for (preference, system_dark, expected_dark, expected_queries) in [
+            (Appearance::Light, true, false, 0),
+            (Appearance::Dark, false, true, 0),
+            (Appearance::System, true, true, 1),
+            (Appearance::System, false, false, 1),
+        ] {
+            set_appearance(preference);
+            let mut host = FakePopupMenuHost {
+                system_dark,
+                system_queries: Cell::new(0),
+                command: Some(ID_SHOW),
+                events: Vec::new(),
+            };
+
+            let cmd = show_menu_with(hwnd, &mut host);
+
+            assert_eq!(cmd, Some(ID_SHOW));
+            assert_eq!(
+                host.events,
+                vec![
+                    PopupEvent::ApplyTheme {
+                        hwnd: expected_hwnd,
+                        dark: expected_dark,
+                    },
+                    PopupEvent::TrackPopup {
+                        hwnd: expected_hwnd,
+                    },
+                ],
+                "preference={preference:?} system_dark={system_dark}"
+            );
+            assert_eq!(
+                host.system_queries.get(),
+                expected_queries,
+                "preference={preference:?}"
+            );
+        }
+
+        set_appearance(Appearance::System);
     }
 }
