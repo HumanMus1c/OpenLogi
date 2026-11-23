@@ -171,3 +171,21 @@ fn x11_observer_republishes_a_class_rewritten_on_the_focused_window() {
     drop(worker.join().unwrap());
     assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
 }
+
+#[test]
+fn select_window_for_pid_prefers_openlogi_main_app_id() {
+    let other: Window = 0x10;
+    let main_win: Window = 0x20;
+    let wrong_pid: Window = 0x30;
+    let candidates = [
+        (wrong_pid, 100, Some(openlogi_core::brand::APP_ID)),
+        (other, 200, Some("openlogi-flow-indicator")),
+        (main_win, 200, Some(openlogi_core::brand::APP_ID)),
+    ];
+    assert_eq!(select_window_for_pid(&candidates, 200), Some(main_win));
+    assert_eq!(
+        select_window_for_pid(&[(other, 200, Some("other-app"))], 200),
+        Some(other)
+    );
+    assert_eq!(select_window_for_pid(&candidates, 999), None);
+}
