@@ -16,8 +16,8 @@ use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, PropertyNotifyEvent,
-    Window,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt as _, EventMask,
+    PropertyNotifyEvent, Window,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -283,4 +283,83 @@ impl FrontmostSource for X11Source {
     fn name(&self) -> &'static str {
         "x11"
     }
+}
+
+fn select_window_for_pid(
+    candidates: &[(Window, u32, Option<&str>)],
+    target_pid: u32,
+) -> Option<Window> {
+    candidates
+        .iter()
+        .find(|(_, pid, app_id)| {
+            *pid == target_pid && *app_id == Some(openlogi_core::brand::APP_ID)
+        })
+        .or_else(|| candidates.iter().find(|(_, pid, _)| *pid == target_pid))
+        .map(|&(window, _, _)| window)
+}
+
+fn intern_atom(conn: &RustConnection, name: &[u8]) -> Option<Atom> {
+    let atom = conn.intern_atom(false, name).ok()?.reply().ok()?.atom;
+    (atom != x11rb::NONE).then_some(atom)
+}
+
+fn window_pid(conn: &RustConnection, window: Window, net_wm_pid: Atom) -> Option<u32> {
+    conn.get_property(false, window, net_wm_pid, AtomEnum::CARDINAL, 0, 1)
+        .ok()?
+        .reply()
+        .ok()?
+        .value32()?
+        .next()
+}
+
+/// Raise and focus OpenLogi's main window belonging to `pid` via EWMH
+/// `_NET_ACTIVE_WINDOW` on this session's `$DISPLAY`.
+pub(super) fn activate_window_for_pid(pid: u32) -> bool {
+    let Ok((conn, screen_num)) =
+        RustConnection::connect(None).map_err(|e| debug!("X11 activate unavailable: {e}"))
+    else {
+        return false;
+    };
+    let Some(root) = conn.setup().roots.get(screen_num).map(|screen| screen.root) else {
+        return false;
+    };
+    let (Some(net_client_list), Some(net_wm_pid), Some(net_active_window)) = (
+        intern_atom(&conn, b"_NET_CLIENT_LIST"),
+        intern_atom(&conn, b"_NET_WM_PID"),
+        intern_atom(&conn, b"_NET_ACTIVE_WINDOW"),
+    ) else {
+        return false;
+    };
+    let Ok(Ok(clients)) = conn
+        .get_property(false, root, net_client_list, AtomEnum::WINDOW, 0, u32::MAX)
+        .map(x11rb::cookie::Cookie::reply)
+    else {
+        return false;
+    };
+    let Some(windows) = clients.value32() else {
+        return false;
+    };
+    let matches: Vec<(Window, u32, Option<String>)> = windows
+        .filter_map(|window| {
+            let candidate_pid = window_pid(&conn, window, net_wm_pid)?;
+            (candidate_pid == pid).then(|| (window, candidate_pid, window_app_id(&conn, window)))
+        })
+        .collect();
+    let refs: Vec<(Window, u32, Option<&str>)> = matches
+        .iter()
+        .map(|(window, candidate_pid, app_id)| (*window, *candidate_pid, app_id.as_deref()))
+        .collect();
+    let Some(target) = select_window_for_pid(&refs, pid) else {
+        return false;
+    };
+    let event = ClientMessageEvent::new(32, target, net_active_window, [2u32, 0, 0, 0, 0]);
+    let Ok(cookie) = conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        event,
+    ) else {
+        return false;
+    };
+    cookie.check().is_ok() && conn.flush().is_ok()
 }
