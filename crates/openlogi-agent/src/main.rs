@@ -47,6 +47,10 @@ mod tray;
 #[cfg(any(target_os = "macos", test))]
 mod tray_model;
 #[cfg(target_os = "windows")]
+mod tray_readout;
+#[cfg(target_os = "windows")]
+mod tray_setting;
+#[cfg(target_os = "windows")]
 mod tray_windows;
 mod virtual_keyboard;
 
@@ -141,10 +145,16 @@ fn main() {
         // the core exited without arming — fall through and let the process
         // end.
         let (armed_tx, armed_rx) = std::sync::mpsc::channel();
+        let lifecycle_shutdown = shutdown_tx.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(config, shutdown_requests, armed_tx));
+                runtime.block_on(lifecycle::run(
+                    config,
+                    shutdown_requests,
+                    lifecycle_shutdown,
+                    armed_tx,
+                ));
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
@@ -156,22 +166,16 @@ fn main() {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // Windows hosts the notification-area icon on its own win32 thread
-        // (message pump included); the async core keeps the main thread.
+        // Native resume notifications feed the same event seam across
+        // platforms: inventory wakes immediately and replays volatile
+        // settings on its settled authoritative snapshot.
         #[cfg(target_os = "windows")]
-        {
-            tray_windows::set_appearance(config.app_settings.appearance);
-            tray_windows::spawn(config.app_settings.show_in_menu_bar, shutdown_tx.clone());
-            // Native resume notifications feed the same event seam as macOS
-            // and Linux: inventory wakes immediately and replays volatile
-            // settings on its settled authoritative snapshot.
-            resume_windows::register(device_io_signal.clone());
-        }
+        resume_windows::register(device_io_signal.clone());
         #[cfg(target_os = "linux")]
         resume_linux::register(device_io_signal.clone());
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         drop(device_io_signal);
-        runtime.block_on(lifecycle::run(config, shutdown_requests));
+        runtime.block_on(lifecycle::run(config, shutdown_requests, shutdown_tx));
     }
 }
 
