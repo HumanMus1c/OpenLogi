@@ -6,10 +6,10 @@
 
 use gpui::{
     App, BorderStyle, Bounds, Corners, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder,
-    RenderOnce, Styled, Window, canvas, point, prelude::FluentBuilder as _, px, quad, rgb, size,
+    RenderOnce, Styled, Window, canvas, point, prelude::FluentBuilder as _, px, quad, size,
 };
 use gpui_kit::component::h_flex;
-use openlogi_core::device::{BatteryInfo, BatteryStatus, BatteryTone, BatteryValue};
+use openlogi_core::device::{BatteryInfo, BatteryStatus, BatteryValue};
 
 use super::theme::{self, Palette, Typography as _};
 
@@ -86,7 +86,7 @@ fn inline_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
         .child(
             gpui::div()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(pal.text_primary)
+                .text_color(theme::reading_color(battery.color(), pal))
                 .child(ValueSlot::new(battery)),
         )
 }
@@ -118,7 +118,7 @@ fn status_readout(battery: &BatteryInfo, online: bool, pal: Palette) -> impl Int
         .child(
             gpui::div()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(pal.text_primary)
+                .text_color(theme::reading_color(battery.color(), pal))
                 .child(ValueSlot::new(battery)),
         )
         .when_some(context_label(battery, online), |row, label| {
@@ -135,7 +135,7 @@ fn summary_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
         .child(
             gpui::div()
                 .text_heading()
-                .text_color(pal.text_primary)
+                .text_color(theme::reading_color(battery.color(), pal))
                 .child(ValueSlot::new(battery)),
         )
         .child(
@@ -259,15 +259,6 @@ fn summary_label(battery: &BatteryInfo) -> gpui::SharedString {
     }
 }
 
-fn tone_color(tone: BatteryTone, pal: Palette) -> Hsla {
-    match tone {
-        BatteryTone::Charging | BatteryTone::Full => rgb(theme::STATUS_CONNECTED).into(),
-        BatteryTone::Low => rgb(theme::STATUS_CONNECTING).into(),
-        BatteryTone::Critical | BatteryTone::Error => rgb(theme::STATUS_DISABLED).into(),
-        BatteryTone::Normal => pal.text_primary,
-    }
-}
-
 #[derive(Clone, Copy)]
 enum GlyphSize {
     Compact,
@@ -307,8 +298,7 @@ fn battery_glyph(
     glyph_size: GlyphSize,
     background: Hsla,
 ) -> impl IntoElement {
-    let tone = battery.tone();
-    let color = tone_color(tone, pal);
+    let color = theme::reading_color(battery.color(), pal);
     let mark = match battery.status {
         BatteryStatus::Charging | BatteryStatus::ChargingSlow => GlyphMark::Charging,
         BatteryStatus::Error => GlyphMark::Error,
@@ -494,7 +484,7 @@ fn paint_error_mark(body: Bounds<gpui::Pixels>, color: Hsla, window: &mut Window
 #[cfg(test)]
 mod tests {
     use gpui::InteractiveElement as _;
-    use openlogi_core::device::{BatteryLevel, BatteryReading};
+    use openlogi_core::device::{BatteryLevel, BatteryReading, BatteryTone};
 
     use super::*;
 
