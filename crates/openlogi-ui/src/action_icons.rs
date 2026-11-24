@@ -135,6 +135,17 @@ pub fn embedded_icon(path: &str) -> Option<&'static [u8]> {
         .map(|(_, bytes)| *bytes)
 }
 
+/// The inner markup of an embedded action glyph, for a surface that has to
+/// bake the same drawing into another SVG document.
+#[must_use]
+pub fn icon_body(path: &str) -> Option<&'static str> {
+    let bytes = embedded_icon(path)?;
+    let text = std::str::from_utf8(bytes).ok()?;
+    let start = text.find('>')? + 1;
+    let end = text.rfind("</svg>")?;
+    text.get(start..end)
+}
+
 /// GPUI asset source for the embedded ring glyphs, and nothing else.
 #[cfg(feature = "gpui")]
 pub struct ActionIcons;
