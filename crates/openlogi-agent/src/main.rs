@@ -44,11 +44,13 @@ mod takeover;
 mod tray;
 // The menu-bar menu's platform-free model. Only the macOS tray draws it so
 // far; tests build it everywhere, since nothing in it is platform code.
+#[cfg(target_os = "linux")]
+mod tray_linux;
 #[cfg(any(target_os = "macos", test))]
 mod tray_model;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod tray_readout;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod tray_setting;
 #[cfg(target_os = "windows")]
 mod tray_windows;
