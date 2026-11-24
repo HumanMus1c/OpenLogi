@@ -520,6 +520,62 @@ pub enum BatteryTone {
     Error,
 }
 
+/// The three-stage colour band a measured percentage maps to.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray, and the floating widget on the same band for the
+/// same percentage: 70% and above is healthy, 40% up to 70% is mid, and
+/// anything below 40% is low. Level-only readings have no percentage to
+/// band — [`BatteryInfo::color`] falls back to the firmware level for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryStage {
+    /// 70% and above.
+    Healthy,
+    /// 40% up to, but not including, 70%.
+    Mid,
+    /// Below 40%.
+    Low,
+}
+
+/// The percentage at or above which a reading is healthy.
+const HEALTHY_PERCENT: u8 = 70;
+/// The percentage at or above which a reading is in the middle band.
+const MID_PERCENT: u8 = 40;
+
+impl BatteryStage {
+    /// The band `percentage` falls in.
+    #[must_use]
+    pub const fn for_percentage(percentage: u8) -> Self {
+        if percentage >= HEALTHY_PERCENT {
+            Self::Healthy
+        } else if percentage >= MID_PERCENT {
+            Self::Mid
+        } else {
+            Self::Low
+        }
+    }
+}
+
+/// The colour role a battery surface paints a reading with.
+///
+/// A surface chooses the actual colours; this shared mapping keeps the
+/// settings app, the tray badge, and the floating widget on one colour for
+/// one reading. Status roles win over the percentage band: charging and
+/// charge complete paint green, a fault paints red, and only a discharging
+/// percentage takes its [`BatteryStage`]. A level-only reading keeps its
+/// firmware meaning, or stays neutral when the firmware reports nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryColor {
+    /// Charging, charge complete, or a healthy percentage.
+    Green,
+    /// A percentage in the middle band, or a firmware low level.
+    Amber,
+    /// A charging fault, a critical firmware level, or a low percentage.
+    Red,
+    /// Neither a percentage nor an urgent firmware level.
+    Neutral,
+}
+
 impl BatteryInfo {
     /// What this reading can show: a measured percentage, the firmware's
     /// coarse level, or nothing usable yet.
@@ -563,6 +619,46 @@ impl BatteryInfo {
                 Some(BatteryAttention::Critical) => BatteryTone::Critical,
                 Some(BatteryAttention::Low) => BatteryTone::Low,
                 None => BatteryTone::Normal,
+            },
+        }
+    }
+
+    /// The three-stage colour band this reading's percentage falls in.
+    ///
+    /// `None` for a level-only or missing reading: there is no percentage to
+    /// band, so a surface asks [`Self::color`] instead, which falls back to
+    /// the firmware level.
+    #[must_use]
+    pub fn stage(&self) -> Option<BatteryStage> {
+        match self.reading() {
+            BatteryReading::Percent(percentage) => Some(BatteryStage::for_percentage(percentage)),
+            BatteryReading::Level(_) | BatteryReading::NoReading => None,
+        }
+    }
+
+    /// The colour role a surface paints this reading with.
+    ///
+    /// Precedence is status first, then the percentage band, then the
+    /// firmware level: a charging 45% device paints green (the bolt explains
+    /// why) rather than the band's amber, and a fault paints red even while
+    /// the firmware still reports a healthy percentage.
+    #[must_use]
+    pub fn color(&self) -> BatteryColor {
+        match self.status {
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full => {
+                BatteryColor::Green
+            }
+            BatteryStatus::Error => BatteryColor::Red,
+            BatteryStatus::Discharging | BatteryStatus::Unknown => match self.stage() {
+                Some(BatteryStage::Healthy) => BatteryColor::Green,
+                Some(BatteryStage::Mid) => BatteryColor::Amber,
+                Some(BatteryStage::Low) => BatteryColor::Red,
+                None => match self.level {
+                    BatteryLevel::Critical => BatteryColor::Red,
+                    BatteryLevel::Low => BatteryColor::Amber,
+                    BatteryLevel::Full => BatteryColor::Green,
+                    BatteryLevel::Good | BatteryLevel::Unknown => BatteryColor::Neutral,
+                },
             },
         }
     }
