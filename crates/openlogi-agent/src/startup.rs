@@ -77,7 +77,19 @@ pub(crate) async fn bootstrap(config: Config, shutdown_tx: ShutdownRequestSender
             shutdown_tx,
         );
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let tray_config = Arc::new(config.clone());
+        crate::tray_linux::spawn(
+            config.app_settings.show_in_menu_bar,
+            config.app_settings.tray_battery,
+            config.app_settings.tray_badge_style,
+            tray_config,
+            Arc::clone(&observable),
+            shutdown_tx,
+        );
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     let _ = shutdown_tx;
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(
         config,
