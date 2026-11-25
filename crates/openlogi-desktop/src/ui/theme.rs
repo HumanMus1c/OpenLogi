@@ -12,16 +12,15 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-#[cfg(test)]
-use gpui::rgb;
 use gpui::{
     App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, StatefulInteractiveElement, Styled,
-    Window, hsla, px, relative, rems,
+    Window, hsla, px, relative, rems, rgb,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Theme, ThemeMode, ThemeRegistry, scroll::ScrollbarMode,
 };
 use openlogi_core::config::{Appearance, UiScale};
+use openlogi_core::device::{BatteryColor, BatteryStage};
 
 use crate::state::AppState;
 
@@ -40,6 +39,28 @@ pub const STATUS_CONNECTING: u32 = 0x00ea_b308;
 pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 /// Ring color for a device the user disabled ("Manage this device" off).
 pub const STATUS_DISABLED: u32 = 0x00ef_4444;
+
+/// The paint for a measured percentage's three-stage band, so a battery
+/// percentage and a brightness percentage read the same way.
+pub(crate) fn percentage_color(stage: BatteryStage) -> Hsla {
+    match stage {
+        BatteryStage::Healthy => rgb(STATUS_CONNECTED).into(),
+        BatteryStage::Mid => rgb(STATUS_CONNECTING).into(),
+        BatteryStage::Low => rgb(STATUS_DISABLED).into(),
+    }
+}
+
+/// The paint for a battery reading's shared colour role
+/// ([`openlogi_core::device::BatteryInfo::color`]), including the neutral
+/// text colour a level-only or missing reading keeps.
+pub(crate) fn reading_color(color: BatteryColor, pal: Palette) -> Hsla {
+    match color {
+        BatteryColor::Green => percentage_color(BatteryStage::Healthy),
+        BatteryColor::Amber => percentage_color(BatteryStage::Mid),
+        BatteryColor::Red => percentage_color(BatteryStage::Low),
+        BatteryColor::Neutral => pal.text_primary,
+    }
+}
 
 /// Sizes that several components need to agree on.
 pub const HEADER_H: f32 = 64.;

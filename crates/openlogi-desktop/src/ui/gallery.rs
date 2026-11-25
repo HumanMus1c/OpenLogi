@@ -19,7 +19,7 @@ use gpui_kit::component::{
 };
 use openlogi_core::brand::APP_ID;
 use openlogi_core::config::UiScale;
-use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStage, BatteryStatus};
 
 use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
@@ -533,6 +533,15 @@ impl ComponentGallery {
                         .value("50%", ["100%"])
                         .description("Applies in ratchet mode only.")
                         .disabled(true),
+                )
+                .child(
+                    SliderRow::new("Brightness", disabled_track(pal))
+                        .value("15%", ["100%"])
+                        .value_color(theme::percentage_color(BatteryStage::for_percentage(15)))
+                        .description(
+                            "A charge-like percentage paints the value on the shared \
+                             three-stage band.",
+                        ),
                 )
                 .child(self.entry_row(pal, cx))
                 .child(
