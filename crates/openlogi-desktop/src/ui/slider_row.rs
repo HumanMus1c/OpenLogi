@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, FontFeatures, InteractiveElement as _,
+    AnyElement, App, ClickEvent, Div, ElementId, FontFeatures, Hsla, InteractiveElement as _,
     IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
     prelude::FluentBuilder as _, px, rems,
 };
@@ -32,6 +32,7 @@ pub(crate) struct SliderRow {
     control: AnyElement,
     value: Option<SharedString>,
     widest: Vec<SharedString>,
+    value_color: Option<Hsla>,
     marker: Option<AnyElement>,
     /// The button the value becomes when it can be typed in exactly.
     entry: Option<BaseButton>,
@@ -52,6 +53,7 @@ impl SliderRow {
             control: control.into_any_element(),
             value: None,
             widest: Vec::new(),
+            value_color: None,
             marker: None,
             entry: None,
             description: None,
@@ -73,6 +75,15 @@ impl SliderRow {
     ) -> Self {
         self.value = Some(value.into());
         self.widest = widest.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Paint the value in `color` instead of the label's text colour — for a
+    /// reading whose magnitude carries meaning, such as a charge-like
+    /// percentage on the shared three-stage band. A disabled row stays muted.
+    #[must_use]
+    pub(crate) fn value_color(mut self, color: Hsla) -> Self {
+        self.value_color = Some(color);
         self
     }
 
@@ -167,6 +178,10 @@ impl RenderOnce for SliderRow {
         });
         let value = self.value.map(|value| {
             let number = number(value, self.widest);
+            let number = match self.value_color {
+                Some(color) if !self.disabled => number.text_color(color),
+                _ => number,
+            };
             let number = match self.entry {
                 Some(button) => entry_button(button, number, pal).into_any_element(),
                 None => number.into_any_element(),
