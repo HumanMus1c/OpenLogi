@@ -555,6 +555,16 @@ pub(crate) fn watch_frontmost_application_activations(
     FRONTMOST.watch(callback)
 }
 
+/// Raise and focus OpenLogi's main window in this Linux graphical session.
+pub(crate) fn activate_main_window(pid: Option<u32>) -> bool {
+    match detect_session_kind() {
+        SessionKind::Wayland => {
+            gnome_shell::activate_main_window() || pid.is_some_and(x11::activate_window_for_pid)
+        }
+        SessionKind::X11 | SessionKind::Unknown => pid.is_some_and(x11::activate_window_for_pid),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};

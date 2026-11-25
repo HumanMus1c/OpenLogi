@@ -46,6 +46,10 @@ trait Frontmost {
     #[zbus(name = "GetFocusedWmClass")]
     fn get_focused_wm_class(&self) -> zbus::Result<String>;
 
+    /// Raise and focus OpenLogi's main window in this GNOME session.
+    #[zbus(name = "ActivateMainWindow")]
+    fn activate_main_window(&self) -> zbus::Result<bool>;
+
     /// Emitted whenever GNOME's focused window changes.
     #[zbus(signal, name = "FocusedWmClassChanged")]
     fn focused_wm_class_changed(&self, wm_class: &str) -> zbus::Result<()>;
@@ -240,6 +244,33 @@ impl FrontmostSource for GnomeShellSource {
 /// Candidate constructor registered in [`super::wayland_candidates`].
 pub(super) fn candidate() -> Option<Box<dyn FrontmostSource>> {
     GnomeShellSource::connect().map(|s| Box::new(s) as Box<dyn FrontmostSource>)
+}
+
+/// Ask this GNOME session's `org.openlogi.Frontmost` extension to raise and
+/// focus OpenLogi's main window. Returns `false` when the extension is absent
+/// or no main window is open.
+pub(super) fn activate_main_window() -> bool {
+    let Ok(conn) =
+        Builder::session().map_err(|e| debug!("gnome-shell: no session bus for activate: {e}"))
+    else {
+        return false;
+    };
+    let Ok(conn) = conn
+        .method_timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| debug!("gnome-shell: session connect failed for activate: {e}"))
+    else {
+        return false;
+    };
+    let Ok(proxy) = FrontmostProxyBlocking::new(&conn)
+        .map_err(|e| debug!("gnome-shell: proxy build failed for activate: {e}"))
+    else {
+        return false;
+    };
+    proxy.activate_main_window().unwrap_or_else(|e| {
+        debug!("gnome-shell: ActivateMainWindow call failed: {e}");
+        false
+    })
 }
 
 #[cfg(test)]

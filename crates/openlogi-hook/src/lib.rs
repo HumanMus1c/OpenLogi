@@ -829,6 +829,15 @@ pub fn cursor_position() -> Option<CursorPosition> {
     Backend::cursor_position()
 }
 
+/// Raise and focus OpenLogi's main GUI window in the active Linux graphical
+/// session (via `org.openlogi.Frontmost` on GNOME Wayland or `_NET_ACTIVE_WINDOW`
+/// for `pid` on X11/XWayland).
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn activate_main_window(pid: Option<u32>) -> bool {
+    linux::activate_main_window(pid)
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 

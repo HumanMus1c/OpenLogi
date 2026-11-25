@@ -14,8 +14,8 @@ use crate::virtual_keyboard::VirtualKeyboard;
 
 /// A non-signal request for the process lifecycle owner.
 pub(crate) enum ShutdownRequest {
-    /// The user chose Quit from the macOS or Windows tray.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    /// The user chose Quit from the macOS, Windows, or Linux tray.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     TrayQuit {
         /// Kept alive through graceful teardown. The tray only falls back to
         /// direct exit if this sender is dropped because the core returned or
@@ -61,7 +61,7 @@ pub(crate) fn request_channel() -> (ShutdownRequestSender, ShutdownRequests) {
 /// The fallback exit still does the one thing of the lifecycle's final exit
 /// that outlives the process: it forgets the armed login session, so a start
 /// after a Quit whose core had already died is a dormant one, not a re-arm.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(crate) fn request_tray_quit(
     requests: Option<&ShutdownRequestSender>,
     fallback_status: i32,

@@ -61,7 +61,7 @@ use crate::{
 use button_debounce::{ButtonChange, ButtonDebounce};
 use foreground::{FRONTMOST, X11Source};
 pub(crate) use foreground::{
-    ForegroundApplicationObserver, watch_frontmost_application_activations,
+    ForegroundApplicationObserver, activate_main_window, watch_frontmost_application_activations,
 };
 use wheel::{PassThroughWheel, WheelEvent};
 
