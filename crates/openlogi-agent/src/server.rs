@@ -32,9 +32,9 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
-    FlowPairingCommandError, Generation, Identity, LockKeyObservation, MonitorEvent,
-    NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    FlowPairingCommandError, FlowPinnedObservation, Generation, Identity, LockKeyObservation,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -604,6 +604,14 @@ impl Agent for AgentServer {
         session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         self.action_ring.unhover(session_id)
+    }
+
+    async fn observe_flow_pinned(self, _: Context, since: Generation) -> FlowPinnedObservation {
+        openlogi_agent::flow_pin::flow_pin().observe(since).await
+    }
+
+    async fn report_flow_pinned(self, _: Context, pinned: bool) {
+        openlogi_agent::flow_pin::flow_pin().set(pinned);
     }
 }
 

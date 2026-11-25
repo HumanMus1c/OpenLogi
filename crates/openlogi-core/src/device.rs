@@ -773,6 +773,47 @@ pub fn flow_indicator_devices(
     rows
 }
 
+/// The rows a floating indicator can show, and how many matching devices its
+/// row limit hid.
+pub struct FlowIndicatorRows<'a> {
+    /// The rows the card shows, low-first and capped at the limit.
+    pub rows: Vec<&'a BatteryDevice>,
+    /// Matching devices the limit hid.
+    pub hidden: usize,
+}
+
+/// Rows for the floating indicator: online devices with something to show and,
+/// when `show_offline`, every paired device the receiver still reports — a
+/// sleeping device with no reading left keeps its row (with an empty reading)
+/// instead of dropping the card to its empty state. Sorted low-first and capped
+/// at `limit`.
+///
+/// Charging and full devices sort after healthy discharging ones, and readings
+/// with no value sort last. The tie-break is the display name, so a stable
+/// inventory does not reorder equal rows between polls. `hidden` tells a
+/// surface how many matching devices did not fit.
+#[must_use]
+pub fn flow_indicator_rows(
+    devices: &[BatteryDevice],
+    show_offline: bool,
+    limit: usize,
+) -> FlowIndicatorRows<'_> {
+    let mut rows: Vec<&BatteryDevice> = devices
+        .iter()
+        .filter(|device| {
+            if device.online {
+                device.has_readout()
+            } else {
+                show_offline
+            }
+        })
+        .collect();
+    rows.sort_by_key(|device| indicator_sort_key(device));
+    let hidden = rows.len().saturating_sub(limit);
+    rows.truncate(limit);
+    FlowIndicatorRows { rows, hidden }
+}
+
 fn indicator_sort_key(device: &BatteryDevice) -> (u8, u8, bool, String) {
     let tone = device.battery.as_ref().map(BatteryInfo::tone);
     let rank = match tone {

@@ -75,10 +75,10 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
-    FlowPairingCommandError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
-    LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    FlowPairingCommandError, FlowPinnedObservation, ForegroundApps, FoundDevice, Generation,
+    Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind,
+    NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -1602,6 +1602,14 @@ impl Agent for MockAgent {
         _session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         Err(ActionRingCommandError::SessionNotFound)
+    }
+
+    async fn observe_flow_pinned(self, _: Context, since: Generation) -> FlowPinnedObservation {
+        openlogi_agent::flow_pin::flow_pin().observe(since).await
+    }
+
+    async fn report_flow_pinned(self, _: Context, pinned: bool) {
+        openlogi_agent::flow_pin::flow_pin().set(pinned);
     }
 }
 
