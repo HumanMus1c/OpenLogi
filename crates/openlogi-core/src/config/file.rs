@@ -523,7 +523,7 @@ pub(super) fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
     ))
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg_attr(
         not(unix),
         expect(unused_mut, reason = "only the unix path mutates the options")
