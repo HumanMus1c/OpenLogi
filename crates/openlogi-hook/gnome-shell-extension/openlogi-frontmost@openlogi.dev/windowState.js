@@ -1,15 +1,27 @@
 // Window placement memory for GNOME Wayland.
 //
 // GNOME does not let ordinary clients position a toplevel, and it does not
-// implement wlr-layer-shell, so the app cannot restore the main window itself.
-// The shell can: this manager tracks the first OpenLogi settings window, moves
-// it to its saved frame after it opens, and saves the frame the user leaves it
-// at.
+// implement wlr-layer-shell, so the app cannot restore the main window or the
+// Flow Indicator card itself. The shell can: this manager tracks the two
+// OpenLogi surfaces, moves each one to its saved frame after it opens, saves
+// the frame the user left it at, and keeps the card above other windows when
+// the app's display mode asks for it.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Clutter from 'gi://Clutter';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-import {TRANSIENT_APP_IDS, parseState, serializeState, windowKind} from './windowStatePolicy.js';
+import {
+    MAIN_APP_ID,
+    TRANSIENT_APP_IDS,
+    parseDisplayMode,
+    parseFlowPinned,
+    parseFlowPosition,
+    parseState,
+    serializeState,
+    windowKind,
+} from './windowStatePolicy.js';
 
 export {TRANSIENT_APP_IDS};
 
@@ -24,6 +36,14 @@ function configDir() {
 
 function statePath() {
     return GLib.build_filenamev([configDir(), 'gnome-window-state.json']);
+}
+
+function configPath() {
+    return GLib.build_filenamev([configDir(), 'config.toml']);
+}
+
+function flowPositionPath() {
+    return GLib.build_filenamev([configDir(), 'flow-indicator.toml']);
 }
 
 function readText(path) {
@@ -61,13 +81,23 @@ export class WindowStateManager {
         this._restoreTimers = new Set();
         this._pollTimer = 0;
         this._saveTimer = 0;
+        this._displayMode = 'normal';
         this._windowCreatedId = 0;
+        this._configMonitor = null;
+        this._configChangedId = 0;
+        this._focusChangedId = 0;
+        this._lastExternalFocus = null;
+        this._pinned = false;
+        this._flowMonitor = null;
+        this._flowChangedId = 0;
     }
 
     enable() {
         this._state = parseState(readText(statePath()) ?? '');
-        console.log('OpenLogi window state: manager enabled ' +
-            `(state=${JSON.stringify(this._state)})`);
+        this._displayMode = parseDisplayMode(readText(configPath()) ?? '');
+        this._pinned = parseFlowPinned(readText(flowPositionPath()) ?? '');
+        console.log(`OpenLogi window state: manager enabled (state=${JSON.stringify(this._state)}, ` +
+            `mode=${this._displayMode}, pinned=${this._pinned})`);
         this._windowCreatedId = global.display.connect(
             'window-created',
             (_display, window) => {
@@ -91,8 +121,20 @@ export class WindowStateManager {
                 this._retryTrack(window, 250);
                 this._retryTrack(window, 900);
             });
+        // GNOME keeps routing clicks inside a focused window's old frame to
+        // it even after the pinned card's input region shrank to the pin; the
+        // click-through only starts once focus moves elsewhere. The card needs
+        // no keyboard focus, so hand it back to where the user came from.
+        this._focusChangedId = global.display.connect(
+            'notify::focus-window',
+            () => this._onFocusChanged());
         for (const window of global.display.list_all_windows())
             this._track(window);
+        const focused = global.display.focus_window;
+        if (focused)
+            this._onFocusChanged();
+        this._watchConfig();
+        this._watchFlowFile();
         this._pollTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, POLL_PERIOD_MS, () => {
             this._poll();
             return GLib.SOURCE_CONTINUE;
@@ -121,6 +163,25 @@ export class WindowStateManager {
         if (this._windowCreatedId) {
             global.display.disconnect(this._windowCreatedId);
             this._windowCreatedId = 0;
+        }
+        if (this._focusChangedId) {
+            global.display.disconnect(this._focusChangedId);
+            this._focusChangedId = 0;
+        }
+        if (this._flowMonitor) {
+            if (this._flowChangedId)
+                this._flowMonitor.disconnect(this._flowChangedId);
+            this._flowMonitor.cancel();
+            this._flowMonitor = null;
+            this._flowChangedId = 0;
+        }
+        this._lastExternalFocus = null;
+        if (this._configMonitor) {
+            if (this._configChangedId)
+                this._configMonitor.disconnect(this._configChangedId);
+            this._configMonitor.cancel();
+            this._configMonitor = null;
+            this._configChangedId = 0;
         }
         this._state = null;
     }
@@ -152,7 +213,8 @@ export class WindowStateManager {
             return;
         if (!kind)
             return;
-        this._mainTaken = true;
+        if (kind === 'main')
+            this._mainTaken = true;
         const record = {
             kind,
             ids: [
@@ -170,10 +232,11 @@ export class WindowStateManager {
             console.log(`OpenLogi window state: no mapped signal for ${kind}: ${error}`);
         }
         this._windows.set(window, record);
+        this._applyAbove(window, kind);
         // Identity is the earliest moment the saved frame is known. Keep the
         // default compositor frame invisible until the window maps and the
         // remembered frame has been applied; an unmapped move is a no-op.
-        if (this._target()) {
+        if (this._target(window, kind)) {
             const actor = window.get_compositor_private();
             if (actor)
                 actor.opacity = 0;
@@ -182,8 +245,15 @@ export class WindowStateManager {
         this._scheduleRestore(window, kind);
     }
 
-    _target() {
-        return this._state?.main ?? null;
+    _target(window, kind) {
+        const saved = this._state?.[kind];
+        if (saved)
+            return saved;
+        if (kind !== 'flow')
+            return null;
+        // No extension state yet: adopt the app's own saved position so the
+        // first enable does not visibly move a card the user already placed.
+        return parseFlowPosition(readText(flowPositionPath()) ?? '');
     }
 
     _untrack(window, record) {
@@ -220,20 +290,26 @@ export class WindowStateManager {
             return;
         if (this._ready.has(window))
             return;
-        const target = this._target();
-        if (!target) {
-            this._ready.add(window);
-            return;
-        }
         // Mutter ignores a move on a Wayland surface that has not mapped yet.
         // The actor stays hidden; the mapped signal calls this again.
         if (window.mapped === false)
             return;
+        this._applyAbove(window, kind);
+        const target = this._target(window, kind);
+        if (!target) {
+            this._ready.add(window);
+            return;
+        }
         const actor = window.get_compositor_private();
         if (actor)
             actor.opacity = 0;
-        const moved = window.move_resize_frame(
-            true, target.x, target.y, target.width, target.height);
+        let moved;
+        if (kind === 'main') {
+            moved = window.move_resize_frame(
+                true, target.x, target.y, target.width, target.height);
+        } else {
+            moved = window.move_frame(true, target.x, target.y);
+        }
         if (actor) {
             const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 80, () => {
                 this._restoreTimers.delete(timer);
@@ -282,6 +358,9 @@ export class WindowStateManager {
     /// toplevel moved by the user, so the state is also reconciled once a
     /// second; a frame that moved is saved even when the signal stayed quiet.
     _poll() {
+        // The file monitor is the fast path; this tick survives a monitor
+        // that stopped following an atomic rename.
+        this._refreshPinned();
         let changed = false;
         for (const [window, record] of this._windows) {
             if (!this._ready.has(window))
@@ -332,13 +411,16 @@ export class WindowStateManager {
     _remember(window, kind) {
         const frame = window.get_frame_rect();
         this._state ??= {};
-        if (kind === 'main' && frame.width > 0 && frame.height > 0) {
-            this._state.main = {
-                x: frame.x,
-                y: frame.y,
-                width: frame.width,
-                height: frame.height,
-            };
+        if (kind === 'main') {
+            if (frame.width > 0 && frame.height > 0)
+                this._state.main = {
+                    x: frame.x,
+                    y: frame.y,
+                    width: frame.width,
+                    height: frame.height,
+                };
+        } else if (kind === 'flow') {
+            this._state.flow = {x: frame.x, y: frame.y};
         }
     }
 
@@ -356,5 +438,178 @@ export class WindowStateManager {
         if (!this._state)
             return;
         writeText(statePath(), serializeState(this._state));
+    }
+
+    _onFocusChanged() {
+        const focused = global.display.focus_window;
+        if (!focused)
+            return;
+        if (this._windows.get(focused)?.kind === 'flow' ||
+            focused.get_wm_class() === 'openlogi-flow-indicator') {
+            this._refreshPinned();
+            if (this._pinned) {
+                this._releasePinnedFocus(focused);
+                this._repickPointer(focused, true);
+            }
+            return;
+        }
+        this._lastExternalFocus = focused;
+    }
+
+    /// Mutter only re-picks the actor under the pointer when it leaves and
+    /// re-enters the surface; an input-region change alone does not. Warp the
+    /// pointer just outside the pinned card's frame and straight back: the
+    /// intermediate leave and enter re-check the region, while the pointer
+    /// ends where it started.
+    _repickPointer(flowWindow, nudge) {
+        try {
+            const seat = Clutter.get_default_backend().get_default_seat();
+            const [x, y] = global.get_pointer();
+            if (nudge) {
+                const frame = flowWindow.get_frame_rect();
+                const screen = global.display.get_monitor_geometry(flowWindow.get_monitor());
+                let outsideX = frame.x + frame.width + 4;
+                if (outsideX >= screen.x + screen.width)
+                    outsideX = frame.x - 4;
+                outsideX = Math.max(screen.x + 1,
+                    Math.min(outsideX, screen.x + screen.width - 2));
+                const outsideY = Math.max(screen.y + 1,
+                    Math.min(frame.y + Math.floor(frame.height / 2),
+                        screen.y + screen.height - 2));
+                seat.warp_pointer(Math.round(outsideX), Math.round(outsideY));
+            }
+            seat.warp_pointer(Math.round(x), Math.round(y));
+        } catch (error) {
+            console.log(`OpenLogi window state: could not re-pick the pointer: ${error}`);
+        }
+    }
+
+    /// D-Bus hook for live checks of the pointer re-pick.
+    repickPointer(nudge) {
+        const flow = this._flowWindow();
+        if (flow)
+            this._repickPointer(flow, Boolean(nudge));
+    }
+
+    _flowWindow() {
+        let active = null;
+        for (const [window, record] of this._windows) {
+            if (record.kind === 'flow')
+                active = window;
+        }
+        return active;
+    }
+
+    /// Raise and focus OpenLogi's main window on this GNOME desktop while
+    /// keeping a topmost or pinned Flow Indicator card stacked above it.
+    activateMainWindow() {
+        let main = null;
+        for (const [window, record] of this._windows) {
+            if (record.kind === 'main') {
+                main = window;
+                break;
+            }
+        }
+        if (!main) {
+            for (const actor of global.get_window_actors()) {
+                const candidate = actor.meta_window;
+                if (candidate?.get_wm_class?.() === MAIN_APP_ID) {
+                    main = candidate;
+                    break;
+                }
+            }
+        }
+        if (!main)
+            return false;
+        try {
+            if (main.minimized)
+                main.unminimize();
+            Main.activateWindow(main, global.get_current_time());
+            for (const [window, record] of this._windows)
+                this._applyAbove(window, record.kind);
+            return true;
+        } catch (error) {
+            console.log(`OpenLogi window state: could not activate main window: ${error}`);
+            return false;
+        }
+    }
+
+    /// Fold the app's pinned write into the painted state. The app writes it
+    /// in the pin click's own handler, so the focus that click took can be
+    /// handed back without waiting for the one-second geometry poll.
+    _refreshPinned() {
+        const pinned = parseFlowPinned(readText(flowPositionPath()) ?? '');
+        if (pinned === this._pinned)
+            return;
+        this._pinned = pinned;
+        for (const [window, record] of this._windows)
+            this._applyAbove(window, record.kind);
+        console.log(`OpenLogi window state: card pinned=${pinned}`);
+        const flow = this._flowWindow();
+        if (pinned && flow) {
+            if (global.display.focus_window === flow)
+                this._releasePinnedFocus(flow);
+            this._repickPointer(flow, true);
+        }
+    }
+
+    /// Give focus back to the window the user came from. The pinned card is
+    /// lifted first: activating another window raises it, and a card left in
+    /// the normal stack would disappear under the window being refocused.
+    _releasePinnedFocus(flowWindow) {
+        this._applyAbove(flowWindow, 'flow');
+        const target = this._lastExternalFocus;
+        if (!target || target === flowWindow)
+            return;
+        try {
+            if (!target.get_compositor_private() || target.minimized)
+                return;
+            const workspace = global.workspace_manager.get_active_workspace();
+            if (!target.is_on_all_workspaces() && !target.located_on_workspace(workspace))
+                return;
+            Main.activateWindow(target, global.get_current_time());
+            console.log('OpenLogi window state: returned focus from the pinned card');
+        } catch (error) {
+            console.log(`OpenLogi window state: could not return focus: ${error}`);
+        }
+    }
+
+    _applyAbove(window, kind) {
+        if (kind !== 'flow' || window.mapped === false)
+            return;
+        try {
+            if (this._displayMode === 'topmost' || this._pinned)
+                window.make_above();
+            else
+                window.unmake_above();
+        } catch (error) {
+            console.log(`OpenLogi window state: could not apply the card mode: ${error}`);
+        }
+    }
+
+    _watchConfig() {
+        try {
+            this._configMonitor = Gio.File.new_for_path(configPath()).monitor_file(
+                Gio.FileMonitorFlags.NONE,
+                null);
+            this._configChangedId = this._configMonitor.connect('changed', () => {
+                this._displayMode = parseDisplayMode(readText(configPath()) ?? '');
+                for (const [window, record] of this._windows)
+                    this._applyAbove(window, record.kind);
+            });
+        } catch (error) {
+            console.log(`OpenLogi window state: could not watch config.toml: ${error}`);
+        }
+    }
+
+    _watchFlowFile() {
+        try {
+            this._flowMonitor = Gio.File.new_for_path(flowPositionPath()).monitor_file(
+                Gio.FileMonitorFlags.NONE,
+                null);
+            this._flowChangedId = this._flowMonitor.connect('changed', () => this._refreshPinned());
+        } catch (error) {
+            console.log(`OpenLogi window state: could not watch flow-indicator.toml: ${error}`);
+        }
     }
 }
