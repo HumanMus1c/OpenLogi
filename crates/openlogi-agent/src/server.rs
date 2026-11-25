@@ -121,7 +121,7 @@ impl AgentServer {
                 #[cfg(target_os = "macos")]
                 let show_in_menu_bar = config.app_settings.show_in_menu_bar;
                 #[cfg(target_os = "windows")]
-                let appearance = config.app_settings.appearance;
+                let reloaded_tray = Arc::new(config.clone());
                 let language = config.app_settings.language.clone();
                 // The menu reads the config on the main thread, from its own
                 // copy.
@@ -148,14 +148,21 @@ impl AgentServer {
                 // item now rather than at the next agent launch.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_visible(show_in_menu_bar, app_icon);
-                // The Windows popup menu tracks the panel's resolved light/dark
-                // appearance, so refresh it on reload too.
-                #[cfg(target_os = "windows")]
-                crate::tray_windows::set_appearance(appearance);
                 // And the interface language: re-resolve the process locale.
                 // Both tray menus rebuild each time they open and pick it up
                 // alone.
                 openlogi_core::locale::activate(language.as_deref());
+                #[cfg(target_os = "windows")]
+                {
+                    crate::tray_setting::apply_config(&reloaded_tray);
+                    crate::tray_windows::set_battery_readout(
+                        reloaded_tray.app_settings.tray_battery,
+                    );
+                    crate::tray_windows::set_badge_style(
+                        reloaded_tray.app_settings.tray_badge_style,
+                    );
+                    crate::tray_windows::set_config(reloaded_tray);
+                }
                 Ok(revision)
             }
             Err(error) => {

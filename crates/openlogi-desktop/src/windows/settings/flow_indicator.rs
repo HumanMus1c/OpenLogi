@@ -1,24 +1,88 @@
-//! Flow Indicator settings page: the floating battery card.
+//! Flow Indicator settings page: the tray readout and the floating card.
 
 use super::{
-    AppState, IconName, InteractiveElement, SettingField, SettingGroup, SettingItem, SettingPage,
+    AppState, IconName, InteractiveElement as _, SettingField, SettingGroup, SettingItem,
+    SettingPage,
 };
 use gpui_kit::component::radio::{Radio, RadioGroup};
+#[cfg(target_os = "windows")]
+use openlogi_core::config::TrayBadgeStyle;
 use openlogi_core::config::{
     FLOW_INDICATOR_MAX_DEVICES_DEFAULT, FLOW_INDICATOR_MAX_DEVICES_MAX,
     FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode,
 };
 
 pub(super) fn flow_indicator_page() -> SettingPage {
-    let group = SettingGroup::new()
+    let group = SettingGroup::new();
+    // The tray switch and badge style apply where the Windows tray is wired;
+    // macOS reads the level out as menu-bar text instead.
+    #[cfg(target_os = "windows")]
+    let group = group.item(tray_battery_item());
+    #[cfg(target_os = "windows")]
+    let group = group.item(badge_style_item());
+    let group = group
         .item(flow_indicator_item())
         .item(show_offline_item())
         .item(max_devices_item())
         .item(display_mode_item());
     SettingPage::new(tr!("flow_indicator.flow_indicator"))
-        .icon(IconName::Settings)
+        .icon(IconName::BatteryFull)
         .resettable(false)
         .group(group)
+}
+
+#[cfg(target_os = "windows")]
+fn tray_battery_item() -> SettingItem {
+    SettingItem::new(
+        tr!("flow_indicator.tray_battery"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|state| state.app_settings().tray_battery),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_tray_battery(enabled));
+            },
+        ),
+    )
+    .description(tr!("flow_indicator.tray_battery_description"))
+}
+
+#[cfg(target_os = "windows")]
+fn badge_style_item() -> SettingItem {
+    SettingItem::new(
+        tr!("flow_indicator.tray_badge_style"),
+        SettingField::render(|_, _, cx| {
+            let style = AppState::try_read(cx).map_or(TrayBadgeStyle::Circle, |state| {
+                state.app_settings().tray_badge_style
+            });
+            RadioGroup::vertical("tray-badge-style")
+                .child(
+                    Radio::new("tray-badge-style-circle")
+                        .label(tr!("flow_indicator.tray_badge_style_circle"))
+                        .debug_selector(|| "tray-badge-style-circle".into()),
+                )
+                .child(
+                    Radio::new("tray-badge-style-square")
+                        .label(tr!("flow_indicator.tray_badge_style_square"))
+                        .debug_selector(|| "tray-badge-style-square".into()),
+                )
+                // The config-file-only `Wide` style has no radio here, so
+                // nothing is selected while it is active.
+                .selected_index(match style {
+                    TrayBadgeStyle::Circle => Some(0),
+                    TrayBadgeStyle::RoundedSquare => Some(1),
+                    TrayBadgeStyle::Wide => None,
+                })
+                .on_change(|index, _, cx| {
+                    let style = match index {
+                        0 => TrayBadgeStyle::Circle,
+                        1 => TrayBadgeStyle::RoundedSquare,
+                        _ => unreachable!("the badge style has exactly two choices"),
+                    };
+                    AppState::apply(cx, |state| state.commit_tray_badge_style(style));
+                })
+        }),
+    )
+    .layout(gpui::Axis::Vertical)
+    .description(tr!("flow_indicator.tray_badge_style_description"))
 }
 
 fn flow_indicator_item() -> SettingItem {
