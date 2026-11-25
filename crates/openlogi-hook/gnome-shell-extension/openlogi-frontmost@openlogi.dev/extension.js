@@ -6,8 +6,10 @@
 // the focused window is otherwise not visible to ordinary clients.
 //
 // It also keeps Actions Ring surfaces out of GNOME's window animations so
-// their initial pointer coordinates stay valid. No titles, window contents,
-// or input are read. ESM module style; targets GNOME Shell 45+.
+// their initial pointer coordinates stay valid, and remembers where the user
+// left the main window (GNOME does not let a Wayland client place its own
+// toplevel). No window contents or input are read. ESM module style; targets
+// GNOME Shell 45+.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -15,6 +17,8 @@ import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extension
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {withoutRingAnimation} from './ringAnimation.js';
+import {WindowStateManager} from './windowState.js';
+import {attachAttentionFilter, detachAttentionFilter} from './windowStatePolicy.js';
 
 const DBUS_NAME = 'org.openlogi.Frontmost';
 const DBUS_PATH = '/org/openlogi/Frontmost';
@@ -47,9 +51,29 @@ export default class OpenLogiFrontmostExtension extends Extension {
         this._ringAnimations = new InjectionManager();
         this._ringAnimations.overrideMethod(
             Main.wm, '_shouldAnimateActor', withoutRingAnimation);
+
+        // GNOME's `Main.windowAttentionHandler` announces every demanding
+        // background window as "X is ready". OpenLogi's transient OSD/notice/
+        // ring surfaces are created in the background and are not user-facing
+        // windows; keep them out of that notification (and the task list).
+        this._attentionHandler = Main.windowAttentionHandler ?? null;
+        this._attentionToken = {};
+        if (!attachAttentionFilter(global.display, this._attentionHandler, this._attentionToken)) {
+            this._attentionHandler = null;
+            this._attentionToken = null;
+        }
+
+        this._windowState = new WindowStateManager();
+        this._windowState.enable();
     }
 
     disable() {
+        this._windowState?.disable();
+        this._windowState = null;
+        if (this._attentionHandler && this._attentionToken)
+            detachAttentionFilter(global.display, this._attentionHandler, this._attentionToken);
+        this._attentionHandler = null;
+        this._attentionToken = null;
         this._ringAnimations?.clear();
         this._ringAnimations = null;
         if (this._focusChangedId) {
