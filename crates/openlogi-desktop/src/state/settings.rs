@@ -5,6 +5,8 @@ use super::events::StateEvents;
 use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_kit::component::ThemeMode;
+#[cfg(target_os = "windows")]
+use openlogi_core::config::TrayBadgeStyle;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode,
     FLOW_INDICATOR_MAX_DEVICES_MAX, FLOW_INDICATOR_MAX_DEVICES_MIN, FlowIndicatorDisplayMode,
@@ -208,7 +210,9 @@ impl AppState {
         self.config.edit(|config| {
             config.set_device_custom_name(record_key, custom_name.clone());
         });
-        if !self.persist_config("device name") {
+        // The tray names rows from the persisted custom name, so the write
+        // must reach the agent, not just the file.
+        if !self.persist_and_reload("device name") {
             return StateEvent::InventoryChanged.into();
         }
         for record in self
@@ -402,6 +406,34 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.low_battery_notifications = enabled);
         self.persist_and_reload("low-battery notifications setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle the tray's battery readout and persist it. The agent owns the
+    /// tray; it reads the new value on config reload. An already-set value
+    /// writes nothing and is still reported; disk failures restore the
+    /// persisted value.
+    #[cfg(target_os = "windows")]
+    pub fn commit_tray_battery(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.tray_battery == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.tray_battery = enabled);
+        self.persist_and_reload("tray battery readout setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Set the tray badge's shape and persist it. The agent owns the tray;
+    /// it re-renders the badge when the reload reaches it. An already-set
+    /// value writes nothing and is still reported; disk failures restore the
+    /// persisted value.
+    #[cfg(target_os = "windows")]
+    pub fn commit_tray_badge_style(&mut self, style: TrayBadgeStyle) -> StateEvents {
+        if self.config.app_settings.tray_badge_style == style {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.tray_badge_style = style);
+        self.persist_and_reload("tray badge style setting");
         StateEvent::SettingsChanged.into()
     }
     /// Toggle the floating Flow Indicator and persist it. The overlay watches
